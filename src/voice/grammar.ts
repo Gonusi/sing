@@ -8,7 +8,7 @@
 import type { Command, InstrumentKind } from '../types.ts';
 
 const KIND_WORDS: Record<string, InstrumentKind> = {
-  drum: 'drums', drums: 'drums', violin: 'violin', synth: 'synth', bass: 'bass',
+  drum: 'drums', drums: 'drums', violin: 'violin', synth: 'synth', bass: 'bass', vocal: 'vocals', vocals: 'vocals',
 };
 
 const SIMPLE: Record<string, Command> = {
