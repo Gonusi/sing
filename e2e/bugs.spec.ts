@@ -19,3 +19,18 @@ test('BUG engine: undo right after record-from-stopped pops the first take inste
   // expected: the pending overdub is discarded, the loop keeps playing, the first take survives
   expect(r).toEqual({ undo: true, state: 'playing', loopLength: expect.any(Number), tracks: 1 });
 });
+
+test('BUG shell: a press right after closing a sheet is swallowed by the closing sheet layer', async ({ page }) => {
+  test.fail(true, 'src/ui/style.css .sheet-layer: visibility stays visible for --sheet-ms after close and catches pointer events (no pointer-events: none)');
+  await boot(page);
+  await page.locator('[data-action="settings"]').click();
+  await page.waitForTimeout(400);
+  await page.locator('.sheet-layer.open .sheet-done').click();
+  await page.mouse.move(230, 470);
+  await page.mouse.down(); // ~immediately after close: should start a press on the stage
+  await page.waitForTimeout(450);
+  await page.mouse.up();
+  const gestures = await page.evaluate(() => window.__sing!.log().filter((e) => e.type === 'gesture').map((e) => e.data!.type));
+  console.log(`[bug sheet-close press] gestures ${JSON.stringify(gestures)}`);
+  expect(gestures).toEqual(['holdStart', 'holdEnd']);
+});
