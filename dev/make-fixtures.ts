@@ -633,6 +633,19 @@ export const FIXTURES: FixtureDef[] = [
       beatboxFixture(sr, rng, beatboxHits(rng, 3, PHONE_TIMING_JITTER_SEC / 2, PHONE_BASE_GAIN_DB, PHONE_LEVEL_VARIATION_DB, BEATBOX_FAST_BAR, 60 / BPM_BEATBOX / 4), true),
   },
   {
+    name: 'stress-beatbox-44k',
+    gated: false,
+    description: 'beatbox-phone at 44.1 kHz (checks the 5.8 ms hop and the bin layout at 44.1 kHz)',
+    sampleRate: 44100,
+    build: (sr, rng) => beatboxFixture(sr, rng, beatboxHits(rng, 4, PHONE_TIMING_JITTER_SEC, PHONE_BASE_GAIN_DB, PHONE_LEVEL_VARIATION_DB), true),
+  },
+  {
+    name: 'stress-sing-wide-vibrato',
+    gated: false,
+    description: 'operatic vibrato: ±100 cents at 5.5 Hz from 150 ms, otherwise the C major line',
+    build: (sr, rng) => sungFixture(sr, rng, melody(C_MAJOR_LINE, rng, 0.4, 0.9, 0.5, 0.1, 0.2), -16, { ...DEFAULT_VOICE, vibratoCents: 100 }),
+  },
+  {
     name: 'stress-beatbox-noisy',
     gated: false,
     description: 'beatbox-phone in a loud room (-32 dBFS room noise)',

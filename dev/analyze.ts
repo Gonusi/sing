@@ -114,6 +114,7 @@ export function runDrums(samples: Float32Array, sampleRate: number): { hits: Tim
     const emittedAt = (frame + block.length) / sampleRate;
     for (const h of det.push({ frame, samples: block }, sampleRate)) hits.push({ ...h, emittedAt });
   }
+  for (const h of det.close(samples.length / sampleRate)) hits.push({ ...h, emittedAt: Infinity });
   return { hits, seconds: (performance.now() - t0) / 1000 };
 }
 
@@ -190,7 +191,7 @@ function scoreHits(truth: FixtureTruth['hits'], hits: TimedHit[], verbose: boole
     if (verbose || !ok) console.log(`    ${ok ? 'ok  ' : 'KIND'} gt ${gt.t.toFixed(3)} ${gt.kind.padEnd(5)} det ${d.t.toFixed(3)} ${d.kind.padEnd(5)} vel ${d.vel.toFixed(2)}  Δ ${ms(d.t - gt.t)} ms`);
   });
   hits.forEach((d, j) => {
-    score.finalDelays.push(d.emittedAt - d.t);
+    if (Number.isFinite(d.emittedAt)) score.finalDelays.push(d.emittedAt - d.t);
     if (matched.has(j)) return;
     score.extra++;
     console.log(`    EXTRA det ${d.t.toFixed(3)} ${d.kind} vel ${d.vel.toFixed(2)}`);
