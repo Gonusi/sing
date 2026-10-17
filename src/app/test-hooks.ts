@@ -95,6 +95,13 @@ export interface SingE2eApi extends SingTestApi {
   mic: {
     /** fetch + decode `url` into the cache (call before timing-critical code) */
     load(url: string): Promise<{ duration: Sec; sampleRate: number }>;
+    /**
+     * decode base64 file bytes into the cache under `url` (no network). WebKit's service worker takes fetches away from
+     * Playwright's page.route once it controls the page, so specs hand fixtures over this way.
+     */
+    put(url: string, base64: string): Promise<{ duration: Sec; sampleRate: number }>;
+    /** true when `url` is in the decode cache (loaded or put) */
+    cached(url: string): boolean;
     /** like the contract's play, plus slicing; throws if `at` already passed after decoding */
     play(url: string, at?: Sec, opts?: PlayOptions): Promise<Sec>;
   };
@@ -230,6 +237,16 @@ export function installTestHooks(deps: TestHookDeps): void {
     mic: {
       async load(url) {
         const b = await load(url);
+        return { duration: b.duration, sampleRate: b.sampleRate };
+      },
+      cached: (url) => decoded.has(url),
+      async put(url, base64) {
+        const bin = atob(base64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const p = ctx.decodeAudioData(bytes.buffer);
+        decoded.set(url, p);
+        const b = await p;
         return { duration: b.duration, sampleRate: b.sampleRate };
       },
       async play(url, at, opts = {}) {

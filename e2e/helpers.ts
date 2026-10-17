@@ -44,6 +44,16 @@ export async function routeFixtures(target: Page | BrowserContext): Promise<void
   });
 }
 
+/** hand fixture WAVs (dev/fixtures/out/<name>.wav) to the page's decode cache unless already there; works with any SW state */
+export async function putFixtures(page: Page, names: string[]): Promise<void> {
+  for (const name of names) {
+    const url = fixtureUrl(name);
+    if (await page.evaluate((u) => window.__sing!.mic.cached(u), url)) continue;
+    const b64 = readFileSync(join(FIXTURE_DIR, `${name}.wav`)).toString('base64');
+    await page.evaluate(([u, b]) => window.__sing!.mic.put(u, b), [url, b64] as const);
+  }
+}
+
 // ---------- boot ----------
 
 const errorLists = new WeakMap<Page, string[]>();
@@ -143,8 +153,13 @@ export interface FirstTakeRun {
  */
 export async function firstTake(
   page: Page,
-  o: { fixture: string; L: number; lead?: number; from?: number; dur?: number; kind?: InstrumentKind },
+  o: {
+    fixture: string; L: number; lead?: number; from?: number; dur?: number; kind?: InstrumentKind;
+    /** begin a named capture of the take's lane output right before the stop tap */
+    captureKey?: string;
+  },
 ): Promise<FirstTakeRun> {
+  await putFixtures(page, [o.fixture]);
   return page.evaluate(async (o) => {
     const s = window.__sing!;
     const url = `/__fixtures/${o.fixture}.wav`;
@@ -157,6 +172,10 @@ export async function firstTake(
     const start = s.logSince(t0).find((e) => e.type === 'take' && e.data?.phase === 'start');
     if (!start) throw new Error(`no take start (state ${s.state()})`);
     const stopT = t0 + o.L;
+    if (o.captureKey) {
+      await s.waitUntil(stopT - 0.3);
+      s.capture.begin(o.captureKey, String(start.data!.trackId));
+    }
     await s.waitUntil(stopT + 0.1);
     s.gesture({ type: 'tap', tDown: stopT });
     return {
@@ -184,6 +203,7 @@ export async function overdub(
   page: Page,
   o: { kind: InstrumentKind; fixture: string; lead?: number; from?: number; dur?: number; create?: boolean },
 ): Promise<OverdubRun> {
+  await putFixtures(page, [o.fixture]);
   return page.evaluate(async (o) => {
     const s = window.__sing!;
     const url = `/__fixtures/${o.fixture}.wav`;

@@ -2,7 +2,7 @@
 // (production preview), manifest valid with fetchable icons, fixtures reachable through page.route even once the SW
 // controls the page.
 import { expect, test } from '@playwright/test';
-import { boot, singUrl, watchErrors } from './helpers.ts';
+import { boot, putFixtures, singUrl, watchErrors } from './helpers.ts';
 
 test('start screen → stage, idle, no errors', async ({ page }) => {
   const errors = watchErrors(page);
@@ -49,7 +49,11 @@ test('service worker registered and controlling; manifest valid', async ({ page 
     const r = await page.request.get(new URL(icon.src, manifestUrl).href);
     expect(r.ok(), `icon ${icon.src}`).toBe(true);
   }
-  // fixtures still reach the page through page.route while the SW controls it
-  const info = await page.evaluate(() => window.__sing!.mic.load('/__fixtures/sing-cmaj.wav'));
-  expect(info.duration).toBeGreaterThan(11);
+  // page.route still serves fixtures while the SW controls the page? Chromium yes; WebKit no (the SW's fetch bypasses
+  // Playwright's interception), which is why specs hand fixtures over with mic.put (helpers.putFixtures).
+  const routed = await page.evaluate(() => window.__sing!.mic.load('/__fixtures/sing-cmaj.wav').then((i) => i.duration, (e: Error) => e.message));
+  console.log(`[boot] fixture through page.route under the SW: ${routed}`);
+  await putFixtures(page, ['sing-low']);
+  const put = await page.evaluate(() => window.__sing!.mic.load('/__fixtures/sing-low.wav'));
+  expect(put.duration).toBeGreaterThan(11);
 });
