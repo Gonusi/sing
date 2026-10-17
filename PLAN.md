@@ -8,8 +8,9 @@
 - [ ] Wave 1 — instruments: synth, bass, drums, violin phrase voice, blip, samples
 - [x] Wave 1 — shell: UI (start, input, lanes, status, sheets), icons, deploy workflow — merged, screenshots reviewed
 - [ ] Wave 1 merged, `tsc` + build green
-- [ ] Wave 2 — voice: fetch-model, check-grammar, recognizer, hold-to-talk
-- [ ] Wave 2 — tester: test hooks + e2e suite
+- [ ] Wave 2 — voice: fetch-model, check-grammar, recognizer, hold-to-talk (running)
+- [ ] Wave 2 — tester: test hooks + e2e suite (running)
+- [ ] Engine follow-up: real analysis in takes, drum close(), window clipping (running)
 - [ ] Wave 3 — fix rounds until the e2e suite passes on Chromium (+ WebKit non-voice)
 - [ ] Final report for the owner (push + Pages steps, iPhone checklist, spec deviations)
 - [ ] Owner: "Push please" → push `main`, enable Pages, deploy, iPhone session 1
