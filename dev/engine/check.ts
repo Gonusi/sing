@@ -5,7 +5,9 @@
 //
 // Scenarios: a first take · b overdub · c state table · g holds + state at tDown · d persistence (reload) ·
 //            e calibration loopback · f 15 s / 4 tracks exactness · f2 tiny loop · j on/off catch-up ·
-//            l interruption · h probe level · i capture tap frame accuracy · k real getUserMedia (Chromium only)
+//            l interruption · h probe level · i capture tap frame accuracy + limiter delay · k real getUserMedia (Chromium) ·
+//            r REAL analysis (src/analysis) on dsp's fixtures: first take, overdub, drum overdub, window edges
+// Needs dsp's fixtures: `node dev/make-fixtures.ts` (writes dev/fixtures/out/, gitignored). ONLY=r,f runs a subset.
 import type { Page } from '@playwright/test';
 import type { LogEvent, Session } from '../../src/types.ts';
 import type { Eng } from './page.ts';
@@ -88,12 +90,13 @@ async function checkFirstTake(page: Page): Promise<void> {
     const v = e.c.view();
     const mid = { state: v.state, rec: v.recordingTrackId, live: v.liveNotes.map((n) => n.pos), open: v.openNote, elapsed: v.elapsed, before, after: e.now(), loopPos: v.loopPos };
     await e.waitUntil(stopT + 0.15); // the tap is released 150 ms after touch-down
+    const startBefore = e.now();
     e.gesture({ type: 'tap', tDown: stopT });
     const startAt = e.now();
     await e.waitUntil(stopT + 2 * 2.4 + 0.2);
     e.command({ type: 'stop' });
     const wav = e.c.lastTakeWav();
-    return { t0, stopT, startAt, notes, mid, wavBytes: wav?.size ?? 0, sampleRate: e.sampleRate, session: e.c.session, events: e.events.filter((x) => x.t >= t0 - 0.001) };
+    return { t0, stopT, startBefore, startAt, notes, mid, wavBytes: wav?.size ?? 0, sampleRate: e.sampleRate, session: e.c.session, events: e.events.filter((x) => x.t >= t0 - 0.001) };
   });
   const m = d.mid;
   const elapsed = m.elapsed ?? -1;
@@ -129,8 +132,9 @@ async function checkFirstTake(page: Page): Promise<void> {
   const sorted = [...sc].sort((x, y) => x.heard - y.heard);
   const first = sorted[0];
   check('a5 first cycle after stop: pos 0.05 caught up with offset', !!first && first.cycle === 1 && Math.abs(first.pos - got[0].pos) < 1e-9 &&
-    first.offset > 0.02 && Math.abs(first.offset - (d.startAt - first.when)) < 0.006 && sc.every((s) => s.heard >= d.stopT - 1e-6),
-    first ? `cycle ${first.cycle} pos ${first.pos.toFixed(3)} offset ${ms(first.offset)} (start lag ${ms(d.startAt - first.when)})` : 'no events');
+    // currentTime moves in render-callback steps (Chromium headless: 512 frames), so bracket the stop handler
+    first.offset > 0.02 && first.offset >= d.startBefore - first.when - 1e-6 && first.offset <= d.startAt - first.when + 1e-6 && sc.every((s) => s.heard >= d.stopT - 1e-6),
+    first ? `cycle ${first.cycle} pos ${first.pos.toFixed(3)} offset ${ms(first.offset)} (stop handled ${ms(d.startBefore - first.when)}..${ms(d.startAt - first.when)} late)` : 'no events');
   const dups = duplicates(sc);
   const stop = d.events.find((e) => e.type === 'transport' && e.data?.action === 'stop')?.data as { scheduledUntil: Record<string, number> } | undefined;
   const until = stop?.scheduledUntil[track?.id ?? ''] ?? 0;
@@ -364,8 +368,8 @@ async function checkCalibration(page: Page): Promise<void> {
     if (e.c.state === 'playing' || e.c.state === 'overdubbing') e.command({ type: 'stop' });
     return e.calibrateLoopback(0.12);
   });
-  const expected = 0.12 - d.outLat;
-  check('e1 calibration with loopback 120 ms: ok, inLat = d − outLat (±5 ms)', d.result.ok && Math.abs(d.result.inLat - expected) < 0.005,
+  const expected = 0.12 - d.outLat + d.limiterDelay;
+  check('e1 calibration with loopback 120 ms: ok, inLat = d − (outLat − limiter delay) (±5 ms)', d.result.ok && Math.abs(d.result.inLat - expected) < 0.005,
     `ok ${d.result.ok} matched ${d.result.matched} inLat ${ms(d.result.inLat)} expected ${ms(expected)} spread ${ms(d.result.spread)}`);
 }
 
@@ -373,7 +377,7 @@ async function checkCalibration(page: Page): Promise<void> {
 
 function fourTrackSession(): Session {
   const L = 1.37;
-  const note = (pos: number, dur: number, midi: number, i: number) => ({ pos, dur, midi, vel: 0.8, phrase: `p:${i}`, legatoNext: false });
+  const note = (pos: number, dur: number, midi: number, i: number, phrase = `p:${i}`, legatoNext = false) => ({ pos, dur, midi, vel: 0.8, phrase, legatoNext });
   const kinds = ['kick', 'hat', 'snare', 'hat'] as const;
   return {
     v: 1,
@@ -381,11 +385,36 @@ function fourTrackSession(): Session {
     selectedId: 'tv',
     tracks: [
       { id: 'td', kind: 'drums', on: true, take: { id: 'kd', notes: [], hits: Array.from({ length: 14 }, (_, k) => ({ pos: k * 0.1, kind: kinds[k % 4], vel: 0.8 })) } },
-      { id: 'tv', kind: 'violin', on: true, take: { id: 'kv', hits: [], notes: [note(0, 0.4, 69, 0), note(0.45, 0.4, 71, 1), note(0.9, 0.4, 72, 2)] } },
+      // violin and bass: legato phrases (gaps < 120 ms), so the hand-over margin can be checked
+      { id: 'tv', kind: 'violin', on: true, take: { id: 'kv', hits: [], notes: [note(0, 0.4, 69, 0, 'kv:0', true), note(0.45, 0.4, 71, 1, 'kv:0', true), note(0.9, 0.4, 72, 2, 'kv:0')] } },
       { id: 'ts', kind: 'synth', on: true, take: { id: 'ks', hits: [], notes: [note(0.1, 0.2, 60, 0), note(0.35, 0.2, 64, 1), note(0.6, 0.2, 67, 2), note(0.85, 0.2, 72, 3), note(1.2, 0.4, 67, 4)] } },
-      { id: 'tb', kind: 'bass', on: true, take: { id: 'kb', hits: [], notes: [note(0, 0.6, 40, 0), note(0.7, 0.6, 43, 1)] } },
+      { id: 'tb', kind: 'bass', on: true, take: { id: 'kb', hits: [], notes: [note(0, 0.6, 40, 0, 'kb:0', true), note(0.7, 0.6, 43, 1, 'kb:0')] } },
     ],
   };
+}
+
+/** instruments: a legato continuation must be handed to the voice before the previous note's end + 0.25 s */
+const LEGATO_HANDOVER_SEC = 0.25;
+
+/** min over continuations of (previous note's end + 0.25 s) − hand-over time (log t); Infinity when none */
+function legatoMargin(events: LogEvent[], session: Session): { min: number; n: number } {
+  let min = Infinity;
+  let n = 0;
+  const logged = events.filter((e) => e.type === 'sched').map((e) => ({ t: e.t, s: e.data as unknown as Sched }));
+  for (const tr of session.tracks) {
+    const notes = tr.take?.notes ?? [];
+    notes.forEach((prev, i) => {
+      if (!prev.legatoNext || i + 1 >= notes.length) return;
+      const next = notes[i + 1];
+      for (const c of logged.filter((x) => x.s.trackId === tr.id && x.s.pos === next.pos)) {
+        const p = logged.find((x) => x.s.trackId === tr.id && x.s.pos === prev.pos && x.s.cycle === c.s.cycle);
+        if (!p) continue;
+        min = Math.min(min, p.s.when + prev.dur + LEGATO_HANDOVER_SEC - c.t);
+        n++;
+      }
+    });
+  }
+  return { min, n };
 }
 
 async function checkLongRun(page: Page, url: string): Promise<void> {
@@ -420,6 +449,8 @@ async function checkLongRun(page: Page, url: string): Promise<void> {
   const extra = [...actual].filter((k) => !expected.has(k));
   const drops = d.events.filter((e) => e.type === 'drop').length;
   const late = sc.filter((s) => s.offset > 0 || s.at > s.when + 1e-9).length;
+  const lm = legatoMargin(d.events, session);
+  check('f3 legato continuations handed over before previous end + 0.25 s', lm.n > 10 && lm.min > 0, `${lm.n} continuations, min margin ${ms(lm.min)}`);
   check('f1 15 s, 4 tracks, L=1.37: count = expected, no dup/missing/extra', d.restoredState === 'stopped' && dups.length === 0 && missing.length === 0 && extra.length === 0 && expected.size > 250,
     `${sc.length} scheduled / ${expected.size} expected; dup ${dups.length} missing ${missing.length} extra ${extra.length}; drops ${drops}, late ${late}`);
 }
@@ -455,8 +486,11 @@ async function checkToggle(page: Page): Promise<void> {
     e.c.toggleTrack('tb');
     await e.sleep(1);
     e.command({ type: 'stop' });
-    return { tOff, tOn, posOn, outLat: e.outLat(), events: e.events.filter((x) => x.t >= tOff - 0.001 && x.type === 'sched') };
+    return { tOff, tOn, posOn, outLat: e.outLat(), session: e.c.session, events: e.events.filter((x) => x.t >= tOff - 0.001 && x.type === 'sched') };
   });
+  // the caught-up bass note 0 is legato into note 1: that continuation must still reach the voice in time
+  const lm = legatoMargin(d.events.filter((e) => e.t >= d.tOn - 1e-6), d.session);
+  check('j2 catch-up path: legato continuation still handed over in time', lm.n > 0 && lm.min > 0, `${lm.n} continuations, min margin ${ms(lm.min)}`);
   const bass = d.events.filter((e) => (e.data as unknown as Sched).trackId === 'tb');
   const whileOff = bass.filter((e) => e.t > d.tOff + 1e-6 && e.t < d.tOn - 1e-6);
   const catchUp = bass.map((e) => e.data as unknown as Sched).find((s) => s.pos === 0 && s.offset > 0);
@@ -515,6 +549,118 @@ async function checkRealMic(url: string): Promise<void> {
   }
 }
 
+// ---------- r: the REAL analysis (src/analysis) on dsp's fixtures, incl. the window edges ----------
+
+interface Truth {
+  notes: { t: number; dur: number; midi: number }[];
+  hits: { t: number; kind: string }[];
+}
+
+/** fixture notes overlapping fixture window [w0, w1) (a note may start up to `early` before w0), clipped */
+function expectNotes(truth: Truth, w0: number, w1: number, early: number) {
+  return truth.notes
+    .filter((n) => n.t < w1 && n.t + n.dur > w0 && n.t >= w0 - early)
+    .map((n) => ({ start: Math.max(n.t, w0), end: Math.min(n.t + n.dur, w1), midi: n.midi, clipped: n.t < w0, closed: n.t + n.dur > w1 }));
+}
+
+async function checkRealAnalysis(page: Page, url: string): Promise<void> {
+  await page.goto(`${url}dev/engine/index.html?analysis=real`);
+  await page.click('#start');
+  await page.waitForFunction(() => {
+    const e = (window as unknown as W).__eng;
+    return e?.booted || e?.error;
+  }, null, { timeout: 20000 });
+  const d = await page.evaluate(async () => {
+    const e = (window as unknown as W).__eng;
+    if (e.error) throw new Error(e.error);
+    await e.c.clearSession();
+    const inLat = 0.02;
+    await e.c.setDevice({ inLat });
+    const cmaj = await e.loadFixture('sing-cmaj');
+    const beat = await e.loadFixture('beatbox-basic');
+    // r1 first take: fixture second 0.6 = t0 (the C4 at 0.5 starts in the pre-roll → clipped), stop inside F4 (5.265)
+    const A = 0.6;
+    const t0 = e.now() + 0.8;
+    e.injectFixture('sing-cmaj', 0, 5.6, t0 - A + inLat);
+    await e.waitUntil(t0 + 0.05);
+    e.gesture({ type: 'tap', tDown: t0 });
+    const stop = t0 + 4.8;
+    await e.waitUntil(stop + 0.15);
+    e.gesture({ type: 'tap', tDown: stop });
+    const first = e.c.session.tracks[0];
+    // r2 overdub (new synth lane): window = fixture [4.9, 9.7): G4 (4.593) starts 0.31 s before ts → clipped; A4 (9.176) is open at the end
+    const S = 4.9;
+    const ts = e.now() + 1.0;
+    e.injectFixture('sing-cmaj', 4.1, 10.2, ts - (S - 4.1) + inLat);
+    await e.waitUntil(ts + 0.05);
+    e.gesture({ type: 'tap', tDown: ts });
+    const lane2 = e.c.session.selectedId;
+    await e.waitUntil(ts + 4.8 + inLat + 0.15 + 0.2);
+    const state2 = e.c.state;
+    // r3 drum overdub into a new drums lane: first hit 20 ms after ts; tap-commit 30 ms after the last hit (released 60 ms later)
+    e.command({ type: 'create', kind: 'drums' });
+    const lane3 = e.c.session.selectedId;
+    const B = 0.48;
+    const ts3 = e.now() + 0.6;
+    e.injectFixture('beatbox-basic', 0.2, 5.1, ts3 - (B - 0.2) + inLat);
+    await e.waitUntil(ts3 + 0.05);
+    e.gesture({ type: 'tap', tDown: ts3 });
+    const end3 = ts3 + (5.03 - B);
+    await e.waitUntil(end3 + 0.06);
+    e.gesture({ type: 'tap', tDown: end3 });
+    const state3 = e.c.state;
+    await e.sleep(0.2);
+    e.command({ type: 'stop' });
+    return {
+      micStats: e.mic.stats(),
+      inLat, A, t0, stop, S, ts, B, ts3, end3, state2, state3, cmaj, beat,
+      session: e.c.session, firstId: first?.id ?? null, lane2, lane3,
+      events: e.events.filter((x) => x.t >= t0 - 0.001 && (x.type === 'sched' || x.type === 'take')),
+    };
+  });
+  console.log(`[r] mic stats ${JSON.stringify(d.micStats)}`);
+  const L = d.session.loopLength ?? 0;
+  const mod = (x: number) => ((x % L) + L) % L;
+  const notesOf = (id: string | null) => d.session.tracks.find((t) => t.id === id)?.take?.notes ?? [];
+  const tol = 0.03;
+
+  // r1
+  const want1 = expectNotes(d.cmaj, d.A, d.A + 4.8, Infinity).map((n) => ({ ...n, pos: n.start - d.A, endPos: n.end - d.A }));
+  const got1 = notesOf(d.firstId);
+  const err1 = want1.map((w, i) => (got1[i] && got1[i].midi === w.midi ? Math.abs(got1[i].pos - w.pos) : Infinity));
+  const edge1 = got1.length > 0 && Math.abs(got1[0].pos) < 0.001 && Math.abs(got1[got1.length - 1].pos + got1[got1.length - 1].dur - L) < tol;
+  check('r1 real analysis, first take: all notes ±30 ms, midi exact, start clip + end force-close', Math.abs(L - 4.8) < 0.001 && got1.length === want1.length && Math.max(...err1) <= tol && edge1,
+    `L=${L.toFixed(3)} n=${got1.length}/${want1.length} worst ${ms(Math.max(...err1))} midi ${got1.map((n) => n.midi).join(',')} last end ${got1.length ? ms(got1[got1.length - 1].pos + got1[got1.length - 1].dur - L) : '-'}`);
+
+  // r2
+  const want2 = expectNotes(d.cmaj, d.S, d.S + L, 0.5).map((n) => ({ ...n, pos: mod(d.ts + n.start - d.S - d.t0), dur: n.end - n.start }));
+  const got2 = notesOf(d.lane2);
+  const match2 = want2.map((w) => got2.find((g) => g.midi === w.midi && Math.abs(mod(g.pos - w.pos + L / 2) - L / 2) <= tol));
+  const err2 = want2.map((w, i) => (match2[i] ? Math.abs(mod(match2[i]!.pos - w.pos + L / 2) - L / 2) : Infinity));
+  const c0 = want2.findIndex((w) => w.clipped);
+  const cN = want2.findIndex((w) => w.closed);
+  const edge2 = c0 >= 0 && cN >= 0 && !!match2[c0] && Math.abs(match2[c0]!.dur - want2[c0].dur) < tol && !!match2[cN] && Math.abs(match2[cN]!.dur - want2[cN].dur) < tol;
+  check('r2 real analysis, overdub: all notes ±30 ms, midi exact, clipped first + force-closed last kept', d.state2 === 'playing' && got2.length === want2.length && Math.max(...err2) <= tol && edge2,
+    `n=${got2.length}/${want2.length} worst ${ms(Math.max(...err2))}; clipped dur ${match2[c0]?.dur.toFixed(3)}/${want2[c0]?.dur.toFixed(3)} closed dur ${match2[cN]?.dur.toFixed(3)}/${want2[cN]?.dur.toFixed(3)}`);
+  const commit2 = d.events.find((e) => e.type === 'take' && e.data?.phase === 'commit' && e.data?.trackId === d.lane2);
+  const sched2 = d.events.filter((e) => e.type === 'sched' && (e.data as unknown as Sched).trackId === d.lane2);
+  const early2 = sched2.filter((e) => (e.data as unknown as Sched).heard < d.ts + L - 1e-6).length;
+  check('r3 real analysis, overdub: pending notes play from ts + L, before the commit', !!commit2 && sched2.length > 0 && early2 === 0 && sched2[0].t < commit2.t,
+    `${sched2.length} sched, ${early2} before ts+L, first scheduled ${sched2[0]?.t.toFixed(3)} commit ${commit2?.t.toFixed(3)}`);
+
+  // r4
+  const want3 = d.beat.hits.filter((h) => h.t >= d.B && h.t < 5.03).map((h) => ({ pos: mod(d.ts3 + h.t - d.B - d.t0), kind: h.kind }));
+  console.log(`[r4] window starts at pos ${mod(d.ts3 - d.t0).toFixed(3)}, tap at pos ${mod(d.end3 - d.t0).toFixed(3)}`);
+  const got3 = d.session.tracks.find((t) => t.id === d.lane3)?.take?.hits ?? [];
+  const err3 = want3.map((w) => {
+    const g = got3.find((h) => Math.abs(mod(h.pos - w.pos + L / 2) - L / 2) <= tol);
+    return g && g.kind === w.kind ? Math.abs(mod(g.pos - w.pos + L / 2) - L / 2) : Infinity;
+  });
+  check('r4 real analysis, drum overdub: all hits ±30 ms, right kind, first (20 ms after ts) and last (30 ms before tap) kept', d.state3 === 'playing' && got3.length === want3.length && Math.max(...err3) <= tol,
+    `n=${got3.length}/${want3.length} worst ${ms(Math.max(...err3))}` +
+    (err3.some((e) => e === Infinity) ? `; missing/wrong: ${want3.filter((_, i) => err3[i] === Infinity).map((w) => `${w.kind}@${w.pos.toFixed(3)}`).join(' ')}; got ${got3.map((h) => `${h.kind[0]}@${h.pos.toFixed(3)}`).join(' ')}` : ''));
+}
+
 // ---------- h, i: probe and capture ----------
 
 async function checkProbeCapture(page: Page): Promise<void> {
@@ -522,6 +668,10 @@ async function checkProbeCapture(page: Page): Promise<void> {
   check('h1 probe: −24 dBFS tone looped into the mic reads back (±15%)', Math.abs(p.level - p.expected) / p.expected < 0.15, `level ${p.level.toFixed(4)} expected ${p.expected.toFixed(4)}`);
   const c = await page.evaluate(() => (window as unknown as W).__eng.captureClick());
   check('i1 capture tap: click onset at its scheduled frame (±3 frames)', Math.abs(c.onsetFrame - c.expectedFrame) <= 3, `onset ${c.onsetFrame} expected ${c.expectedFrame} (${c.frames} frames)`);
+  const l = await page.evaluate(() => (window as unknown as W).__eng.limiterDelay());
+  const want = Math.round(0.006 * l.sampleRate);
+  check('i2 limiter look-ahead = LIMITER_DELAY_SEC (6 ms, folded into outLat)', Math.abs(l.limiterFrame - l.masterFrame - want) <= 2,
+    `${l.limiterFrame - l.masterFrame} frames, expected ${want}`);
 }
 
 // ---------- main ----------
@@ -552,11 +702,17 @@ async function runEngine(engine: Engine, url: string): Promise<void> {
       ['f2', () => checkTinyLoop(page)],
     ];
     for (const [name, fn] of steps) {
+      if (ONLY && !ONLY.includes(name)) continue;
       try {
         await fn();
       } catch (e) {
         check(`${name} (threw)`, false, e instanceof Error ? e.message.split('\n')[0] : String(e));
       }
+    }
+    try {
+      if (!ONLY || ONLY.includes('r')) await checkRealAnalysis(page, url);
+    } catch (e) {
+      check('r (threw)', false, e instanceof Error ? e.message.split('\n')[0] : String(e));
     }
     await page.evaluate(() => (window as unknown as W).__eng.clearStore());
   } finally {
@@ -565,6 +721,8 @@ async function runEngine(engine: Engine, url: string): Promise<void> {
 }
 
 const which = process.argv[2] ?? 'all';
+/** ONLY=a,b,r runs just those scenarios (the steps' names above; r = real analysis, k = real mic) */
+const ONLY = process.env.ONLY ? process.env.ONLY.split(',') : null;
 const engines: Engine[] = which === 'all' ? ['chromium', 'webkit'] : [which as Engine];
 const served = await startDev();
 try {
@@ -572,7 +730,7 @@ try {
     try {
       await runEngine(e, served.url);
       current = e;
-      if (e === 'chromium') await checkRealMic(served.url);
+      if (e === 'chromium' && (!ONLY || ONLY.includes('k'))) await checkRealMic(served.url);
     } catch (err) {
       rows.push({ engine: e, check: 'boot', pass: false, detail: err instanceof Error ? err.message : String(err) });
     }

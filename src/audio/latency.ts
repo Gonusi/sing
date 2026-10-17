@@ -7,9 +7,10 @@
 // A wrong outputLatency report cancels out: any error in outLat lands in inLat, and the overdub correction
 // (tc = stamp − inLat, scheduling at heard − outLat) uses the same two numbers.
 //
-// Loopback test (mic.loopback(d): master → DelayNode(d) → mic input): the click is rendered at heard − outLat,
-// enters the delay at once and reaches the mic tap d later, so stamp = heard − outLat + d and
-//   expected inLat = d − outLat   (outLat as read when calibrate() started).
+// Loopback test (mic.loopback(d): limiter output → DelayNode(d) → mic input, i.e. the speaker feed): the click is
+// rendered into master at heard − outLat, leaves the limiter LIMITER_DELAY_SEC later and reaches the mic tap d after
+// that, so stamp = heard − outLat + LIMITER_DELAY_SEC + d and
+//   expected inLat = d − (baseLatency + outputLatency)  = d − outLat + LIMITER_DELAY_SEC   (outLat at calibrate() start).
 import type { Sec } from '../types.ts';
 import type { AudioEngine } from './context.ts';
 import type { Mic } from './mic.ts';
@@ -41,13 +42,15 @@ const MAX_IQR_SEC = 0.04;
 /** resolve this long after the last match window closed, if the mic stops delivering blocks */
 const FALLBACK_SLACK_SEC = 2;
 const CLICK_HZ = 2000;
-const CLICK_PEAK = 0.5;
+/** before the master gain (0.5): ≈ −7 dBFS at the output, clearly above a playing loop */
+const CLICK_PEAK = 0.9;
 const CLICK_DECAY_SEC = 0.03;
 
 /** Plays `clicks` clicks (scheduled with the outLat correction); the user claps along; median offset → inLat. */
 export async function calibrate(
   engine: AudioEngine,
   mic: Mic,
+  /** onClick(i, n): click i of n is being heard now, i = 1..n */
   opts: { clicks?: number; onClick?: (i: number, n: number) => void } = {},
 ): Promise<CalibrationResult> {
   const { ctx } = engine;
@@ -57,7 +60,8 @@ export async function calibrate(
   const heard = Array.from({ length: n }, (_, i) => first + i * CLICK_INTERVAL_SEC);
   heard.forEach((h, i) => {
     playClick(ctx, engine.master, h - outLat);
-    if (opts.onClick) setTimeout(() => opts.onClick?.(i, n), Math.max(0, (h - ctx.currentTime) * 1000));
+    // 1-based for the sheet's "i/n"
+    if (opts.onClick) setTimeout(() => opts.onClick?.(i + 1, n), Math.max(0, (h - ctx.currentTime) * 1000));
   });
 
   const onsets: Sec[] = [];

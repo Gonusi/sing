@@ -4,6 +4,10 @@
 //                   frame = context frame of samples[0]. No input connected → zeros, so time keeps flowing.
 //   'capture-tap' — records its input (mono mix) with the frame of the first sample; flushes on {type:'stop'}.
 // Both use port.postMessage with transferable buffers (no SharedArrayBuffer: GitHub Pages sends no COOP/COEP).
+// Frame stamps come from our own counter (FrameClock), not straight from `currentFrame`: under load Chromium's
+// currentFrame occasionally reads one quantum (128 frames) behind for a single process() call while the samples
+// are contiguous (measured: content = stamp + 128). A wrong stamp makes the block overlap its predecessor, and
+// the analysis restarts on any discontinuity (lost notes/hits).
 
 declare const currentFrame: number;
 declare function registerProcessor(name: string, ctor: new (options?: unknown) => WorkletProcessor): void;
@@ -18,6 +22,19 @@ interface WorkletProcessor {
 const BLOCK_SIZE = 512;
 /** samples per capture-tap message */
 const CAPTURE_CHUNK = 8192;
+/** currentFrame further than this from our count is a real discontinuity → re-sync to it */
+const RESYNC_FRAMES = 256;
+
+/** frame of each render quantum: counts process() calls, re-syncs to currentFrame only on a real jump */
+class FrameClock {
+  private next = -1;
+  at(current: number, n: number): number {
+    if (this.next < 0 || Math.abs(current - this.next) >= RESYNC_FRAMES) this.next = current;
+    const f = this.next;
+    this.next += n;
+    return f;
+  }
+}
 
 /** Accumulates render quanta into fixed blocks, stamping each block with the frame of its first sample. */
 class BlockAccumulator {
@@ -55,13 +72,14 @@ class BlockAccumulator {
 /** mic-tap: channel 0 of the input, in BLOCK_SIZE blocks */
 class MicTap extends AudioWorkletProcessor implements WorkletProcessor {
   private readonly acc = new BlockAccumulator(BLOCK_SIZE);
+  private readonly clock = new FrameClock();
   private readonly post = (frame: number, samples: Float32Array) => {
     this.port.postMessage({ frame, samples }, [samples.buffer]);
   };
   process(inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     const ch0 = inputs[0]?.[0] ?? null;
     const n = ch0?.length ?? outputs[0]?.[0]?.length ?? 128;
-    this.acc.push(ch0, n, currentFrame, this.post);
+    this.acc.push(ch0, n, this.clock.at(currentFrame, n), this.post);
     return true;
   }
 }
@@ -69,6 +87,7 @@ class MicTap extends AudioWorkletProcessor implements WorkletProcessor {
 /** capture-tap: mono mix of the input, posted in CAPTURE_CHUNK chunks; {type:'stop'} flushes and ends */
 class CaptureTap extends AudioWorkletProcessor implements WorkletProcessor {
   private readonly acc = new BlockAccumulator(CAPTURE_CHUNK);
+  private readonly clock = new FrameClock();
   private stopped = false;
   private mono = new Float32Array(128);
   private readonly post = (frame: number, samples: Float32Array) => {
@@ -91,7 +110,7 @@ class CaptureTap extends AudioWorkletProcessor implements WorkletProcessor {
     if (this.mono.length !== n) this.mono = new Float32Array(n);
     this.mono.fill(0);
     for (const ch of chans) for (let i = 0; i < n; i++) this.mono[i] += ch[i] / chans.length;
-    this.acc.push(chans.length ? this.mono : null, n, currentFrame, this.post);
+    this.acc.push(chans.length ? this.mono : null, n, this.clock.at(currentFrame, n), this.post);
     return true;
   }
 }

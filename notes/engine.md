@@ -1,27 +1,28 @@
 # Engine notes (area: engine)
 
 Owner files: `src/audio/{context,mic,mic-worklet,latency,capture,probe,wav-encode}.ts`, `src/loop/{clock,take}.ts`,
-`src/app/{controller,session}.ts`, `dev/engine/*`. Check: `node dev/engine/check.ts [chromium|webkit|all]` (~50 s per engine).
+`src/app/{controller,session}.ts`, `dev/engine/*`. Check: `node dev/engine/check.ts [chromium|webkit|all]` (~70 s per engine;
+needs dsp's fixtures from `node dev/make-fixtures.ts`; `ONLY=r,f` runs a subset).
 
 ## Module APIs as built
 
 | module | exports | notes |
 |---|---|---|
-| `audio/context.ts` | `createAudioEngine(): Promise<AudioEngine>` | `AudioEngine` = contract fields + **`sink`** (zero-gain → destination; worklet taps connect here to stay pulled) + **`onTick(cb)`** (Tone's worker ticker, 15 ms, try/catch per callback). Sync part (inside the gesture): `audioSession.type='play-and-record'`, `new AudioContext({latencyHint:'interactive'})`, `resume()`, master + sink. Then `Tone.setContext(ctx, true)` (disposes the stray context that `import 'tone'` creates at module load), `lookAhead = 0.03`, `audioWorklet.addModule(micWorkletUrl)`. Lifecycle: `statechange` (addEventListener — Tone owns `onstatechange`) / `visibilitychange` → `resume()`; 1 s watchdog: running but `currentTime` frozen → `suspend()` + `resume()`; emits `'interrupted'`/`'resumed'` on transitions. |
-| `audio/mic-worklet.ts` | processors `mic-tap`, `capture-tap` | `mic-tap`: 512-sample blocks of input channel 0, `frame` = context frame of `samples[0]` (4 quanta accumulated, first quantum's `currentFrame`); no input → zeros. `capture-tap`: mono mix (mean of channels), 8192-frame chunks, `{type:'stop'}` → flush + `{type:'end'}`. Transferable buffers, no SAB. |
-| `audio/mic.ts` | `createMic(engine, {test, ec}): Promise<Mic>` | `Mic` = contract + **`loopback(delaySec)`** (master → DelayNode → mic input; returns undo) + **`latest()`** (time after the newest sample). Real: `getUserMedia({audio:{echoCancellation, noiseSuppression:false, autoGainControl:false, channelCount:1}})` → MediaStreamSource → tap. Test: never calls getUserMedia; `inject(buf, at)` = BufferSource → tap only (not to speakers), `start(at)`. Ring: 2 s, frame-addressed, gaps filled with zeros. Re-acquires the device when the track ended (on `'resumed'`, on visible, on track `ended`; ≥ 2 s apart). |
-| `audio/latency.ts` | `defaultInLat`, `calibrate(engine, mic, {clicks=8, onClick})`, `playClick`, `matchOnsets`, `evaluate`, `createOnsetDetector` | Result = contract + `matched`, `offsets`. Clicks: 2 kHz, 30 ms decay, 0.6 s apart, first heard 0.5 s + outLat after start. Detector: sample-precise first sample over max(0.02, 6 × floor), 150 ms refractory. |
+| `audio/context.ts` | `createAudioEngine(): Promise<AudioEngine>`, `MASTER_GAIN`, `LIMITER`, `LIMITER_MAKEUP`, `LIMITER_DELAY_SEC` | `AudioEngine` = contract fields + **`sink`** (zero-gain → destination; worklet taps connect here to stay pulled) + **`limiter`** + **`onTick(cb)`** (Tone's worker ticker, 15 ms nominal / 18 ms measured, try/catch per callback). Output path: voices → strip gains → `master` → `limiter` (DynamicsCompressor: −3 dB, ratio 20, knee 0, attack 3 ms, release 150 ms) → destination. Net gain below the threshold = `MASTER_GAIN` 0.5 (−6 dB headroom): the master gain is 0.5 / `LIMITER_MAKEUP`, because the spec's compressor adds automatic makeup gain (1/0.721)^0.6 = ×1.217 (+1.7 dB, measured ×1.215). The compressor delays everything by a fixed 6 ms look-ahead (288 frames at 48 kHz, both engines) → included in `outLat()`. Sync part (inside the gesture): `audioSession.type='play-and-record'`, `new AudioContext({latencyHint:'interactive'})`, `resume()`, master + sink. Then `Tone.setContext(ctx, true)` (disposes the stray context that `import 'tone'` creates at module load), `lookAhead = 0.03`, `audioWorklet.addModule(micWorkletUrl)`. Lifecycle: `statechange` (addEventListener — Tone owns `onstatechange`) / `visibilitychange` → `resume()`; 1 s watchdog: running but `currentTime` frozen → `suspend()` + `resume()`; emits `'interrupted'`/`'resumed'` on transitions. |
+| `audio/mic-worklet.ts` | processors `mic-tap`, `capture-tap` | `mic-tap`: 512-sample blocks of input channel 0, `frame` = context frame of `samples[0]`; no input → zeros. Frames come from our own counter (`FrameClock`: +n per `process()`, re-synced to `currentFrame` only when it is ≥ 256 frames off): under load Chromium's `currentFrame` sometimes reads one quantum behind for a single call while the samples are contiguous (measured with frame-encoded audio: content = stamp + 128). The wrong stamp overlapped blocks, the take feed dropped 128 real samples, and dsp's tracker/detector restarted, so notes and hits were lost in ~1 of 3 real-analysis runs. Fixed; 0 bad stamps in 3 × 20 s under load since. `capture-tap`: mono mix (mean of channels), 8192-frame chunks, `{type:'stop'}` → flush + `{type:'end'}`. Transferable buffers, no SAB. |
+| `audio/mic.ts` | `createMic(engine, {test, ec}): Promise<Mic>` | `Mic` = contract + **`loopback(delaySec)`** (speaker feed = `engine.limiter` output → DelayNode → mic input; returns undo) + **`latest()`** (time after the newest sample) + **`stats()`** (blocks, discontinuities, frames missing; one real +256 jump at boot is normal). Real: `getUserMedia({audio:{echoCancellation, noiseSuppression:false, autoGainControl:false, channelCount:1}})` → MediaStreamSource → tap. Test: never calls getUserMedia; `inject(buf, at)` = BufferSource → tap only (not to speakers), `start(at)`. Ring: 2 s, frame-addressed, gaps filled with zeros. Re-acquires the device when the track ended (on `'resumed'`, on visible, on track `ended`; ≥ 2 s apart). |
+| `audio/latency.ts` | `defaultInLat`, `calibrate(engine, mic, {clicks=8, onClick})`, `playClick`, `matchOnsets`, `evaluate`, `createOnsetDetector` | Result = contract + `matched`, `offsets`. `onClick(i, n)` with **i = 1..n**, when click i is heard. Clicks: 2 kHz, peak 0.9 before the master gain (≈ −7 dBFS out), 30 ms decay, 0.6 s apart, first heard 0.5 s + outLat after start. Detector: sample-precise first sample over max(0.02, 6 × floor), 150 ms refractory. |
 | `audio/capture.ts` | `createCapture(engine): Capture` | `start(node)`: node → capture-tap → sink. `stop()` → `{frame, sampleRate, pcm}` (frame of `pcm[0]`). Measured: click onset within 2 frames of its scheduled frame. |
 | `audio/probe.ts` | `startProbe(engine, mic): Probe`, `blockRms` | 440 Hz at −24 dBFS on master (20 ms fades), `level()` = smoothed linear mic RMS (−24 dBFS sine reads 0.0446). |
 | `audio/wav-encode.ts` | `encodeWav16(f32, sr): Uint8Array`, `wavBlob` | mono 16-bit PCM. |
 | `loop/clock.ts` | `createScheduler(engine, {onEvent, onDrop, onTransport}): LoopScheduler`, pure helpers `forEachOccurrence`, `lateDecision`, `eventKey`, `rampParam`, constants | `LoopScheduler` = `Scheduler` + `origin`, `loopLength`, `tick()`, `resync()`, `trackOutput(id)`, `dispose()`. Owns one GainNode per track: `voice.output → strip gain → master`. |
-| `loop/take.ts` | `createTakeRecorder(opts): TakeRecorder`, `REAL_ANALYSIS`, `placeNote`, `placeHit`, constants | No Web Audio: needs only a `MicFeed`. `opts.analysis` (Partial) replaces any of the 6 analysis functions. Recorder: `liveNotes/liveHits/openNote/pendingTake/onUpdate/beginExclusion/endExclusion/addExclusion/finish(end)/discard/rawAudio`. |
+| `loop/take.ts` | `createTakeRecorder(opts): TakeRecorder`, `REAL_ANALYSIS`, `placeNote`, `placeHit`, constants | No Web Audio: needs only a `MicFeed`. `opts.analysis` (Partial) replaces any of the 6 analysis functions. Recorder: `liveNotes/liveHits/openNote/pendingTake/onUpdate/beginExclusion/endExclusion/addExclusion/finish(end)/discard/rawAudio`. Window ends: overdub analysis is fed to window end + `PITCH_TAIL_SEC` 35 ms (a frame centred at t needs audio to t + 1024 samples) / + `DRUM_TAIL_SEC` 100 ms, then `segmenter.close(windowEnd)` at once (the last notes never wait for their 140 ms finalisation). `finish(end)` clamps an overdub end to ts + L, calls `segmenter.close(end + inLat)` if still open and **`onsets.close(end + inLat)`** (hit right before a stop), then post-filters every note/hit to the window (dsp's `close` doesn't clip notes already returned by `push`). `MIN_NOTE_SEC` = 80 ms (dsp's minimum). |
 | `app/session.ts` | `loadDevice`, `saveDevice`, `loadSession`, `isSession`, `emptySession`, `createSessionStore(initial, {persist})`, keys, `DEFAULT_DEVICE` | Keys `sing.session.v1`, `sing.device.v1`. Store: immutable sessions, `set(next, undoPoint?)`, `undo()`, `clear()`, `flush()`; saves debounced 250 ms, flushed on `pagehide`/hidden; every idb call try/catch. Undo max 50. |
 | `app/controller.ts` | `createController(deps): Promise<EngineController>` | Deps = contract + optional `analysis`, `createVoice`, `restore`, `persist`. `EngineController` = `Controller` + `command()` returns **boolean** (accepted), `logs()`, `flush()`, `scheduler`, `dispose()`. |
 
 ## Timing formulas (context seconds)
 
-- `outLat = baseLatency + outputLatency` (missing → 0), read live on every tick.
+- `outLat = baseLatency + outputLatency + LIMITER_DELAY_SEC (0.006)` (missing → 0), read live on every tick.
 - Scheduler: event at loop pos `p`, cycle `k` is **heard** at `heard = origin + p + k·L`, scheduled at `when = heard − outLat`.
 - Each tick (15 ms) schedules, per eligible track (on, has take), the half-open **heard** window `[scheduledUntil, now + 0.12 + outLat)`; then `scheduledUntil` = that bound. Heard-domain windows: a drifting outLat can never double-schedule or skip.
 - Late (`when < now`): note ≤ 20 ms late → starts now, full; later note whose end is ahead (> 30 ms left) → starts now with `offset = now − when`; drum ≤ 30 ms late → now; anything else dropped (`drop` log). Enumeration is bounded per event, so a stale `scheduledUntil` costs nothing.
@@ -30,13 +31,17 @@ Owner files: `src/audio/{context,mic,mic-worklet,latency,capture,probe,wav-encod
 - Overdub: window `tc ∈ [ts, ts+L)`, `pos = (tc − origin) mod L`; a note starting up to 0.5 s before ts is clipped to ts, earlier ones dropped; the note open at the window end is closed there; notes < 50 ms after clipping are dropped.
 - Exclusion (hold): corrected span `[tDown, tUp)`: samples zeroed before analysis; post-filter drops notes/hits starting inside it and cuts a note open at `tDown`.
 
-**Worked example** (outLat 0.0373 = Chromium headless 0.0053 + 0.032; inLat 0.030):
+**Worked example** (outLat 0.0433 = Chromium headless base 0.0053 + output 0.032 + limiter 0.006; inLat 0.030):
 1. Tap at `t0 = 10.000` → recordingFirst. A note's onset reaches the mic tap with stamp 10.530 → `tc = 10.500` → `pos = 0.500`.
 2. Stop tap touched at 12.400, released 12.550 → `L = 2.400`; `scheduler.start(origin 10.000, L 2.4, from 12.400)`.
-   - pos 0.500, k=1: heard 12.900, when 12.8627 (normal).
-   - pos 0.050 (dur 0.5), k=1: heard 12.450, when 12.4127 < now 12.550 → late 0.1373 → `play(note, 12.550, offset 0.1373)`.
-3. Overdub tap at `ts = 15.000` (heard pos 0.200). The singer sings with what they hear at 15.600 (pos 0.800): stamp 15.630 → `tc = 15.600` → `pos = (15.6 − 10) mod 2.4 = 0.800` — lands exactly on what was heard. `activeFrom = 17.400`; first replay heard 18.000 (k=3), when 17.9627; it is scheduled as soon as the note is final (well before the commit at ≥ 17.400 + 0.030 + 0.15 = 17.580).
-4. Calibration with `mic.loopback(0.120)`: click heard at 20.000 is rendered at 19.9627, passes the 120 ms delay into the mic → stamp 20.0827 → `inLat = 0.0827 = d − outLat`. Consistency: with that loopback, a loop event heard at H enters the mic at H + 0.0827 → `tc = H`.
+   - pos 0.500, k=1: heard 12.900, when 12.8567 (normal).
+   - pos 0.050 (dur 0.5), k=1: heard 12.450, when 12.4067 < now 12.550 → late 0.1433 → `play(note, 12.550, offset 0.1433)`.
+3. Overdub tap at `ts = 15.000` (heard pos 0.200). The singer sings with what they hear at 15.600 (pos 0.800): stamp 15.630 → `tc = 15.600` → `pos = (15.6 − 10) mod 2.4 = 0.800` — lands exactly on what was heard. `activeFrom = 17.400`; first replay heard 18.000 (k=3), when 17.9567; it is scheduled as soon as the note is final (well before the commit at ≥ 17.400 + 0.030 + 0.15 = 17.580).
+4. Calibration with `mic.loopback(0.120)` (taps the limiter output = the speaker feed): click heard at 20.000 is rendered into master at 19.9567, leaves the limiter at 19.9627, passes the 120 ms delay → stamp 20.0827 → `inLat = 0.0827 = d − (base + output) = d − outLat + 0.006`. Consistency: with that loopback, a loop event heard at H enters the mic at H + 0.0827 → `tc = H`.
+
+**Commit margin** (`COMMIT_MARGIN_SEC` 0.15, kept): the overdub commit runs at window end + inLat + 0.15 (stamp clock: window end + 0.15). By then it needs the drum tail (0.100) + one 512-sample block (0.011) + message latency (a few ms) ≈ 0.115 s. dsp's 140 ms note-finalisation delay doesn't apply at the window end because the take closes the segmenter itself once the 35 ms pitch tail is in; notes that end earlier inside the window are flushed by that same `close`. If the tail is late anyway (main-thread jank), `finish()` closes with what it has: the take ends a few ms short, but nothing is lost (r2/r4 check the edges).
+
+**Legato hand-over** (instruments: a continuation must reach the voice before the previous note's end + 0.25 s): normally it is handed over 0.10–0.12 s before its own start, so the margin is 0.25 − gap + lead ≥ 0.25 − 0.12 + 0.10 = 0.23 s for any legato gap < 120 ms (measured min 248 ms, f3). On the late paths (start catch-up, switch-on, a note that became final late) a late continuation is handed over `now` while the caught-up previous note is still sounding (its end > now), so the margin is > 0.25 s (measured 255 ms, j2). Only a main-thread stall longer than ≈ 0.23 s breaks it, and then the voice falls back to a fresh attack.
 
 ## State table as implemented
 Mirrored in the header of `src/app/controller.ts`. `s` = state at `tDown` (state history, transitions stamped with the action's time, monotonic); action effects apply to the current reality.
@@ -85,25 +90,31 @@ Undo granularity: a lane created for a take belongs to that take (one undo remov
 - Note: `dev/engine/check.ts` covers all of the above against a fake analysis; e2e should repeat a–f with the real dsp + instruments.
 
 ## Check (`node dev/engine/check.ts`) — what it covers, measured values
-Chromium 28 checks (incl. k1 real getUserMedia via `--use-file-for-fake-audio-capture`), WebKit 27; ~50 s per engine.
+Chromium 35 checks (incl. k1 real getUserMedia via `--use-file-for-fake-audio-capture`), WebKit 34; ~70 s per engine. Real instrument voices.
+r1–r4 use the REAL analysis (`?analysis=real`, src/analysis) on dsp's fixtures, injected with inLat 20 ms: r1 first take from `sing-cmaj`
+(C4 starts in the pre-roll → clipped to pos 0; stop inside F4 → force-closed): 8/8 notes, worst 12.9 ms, midi exact, last end exactly L ·
+r2 overdub window inside `sing-cmaj` (G4 starts 0.31 s before ts → clipped, dur 0.366/0.365; A4 open at the end → closed, 0.523/0.524):
+8/8, worst 3.9 ms · r3 pending real notes play from ts + L before the commit · r4 drum overdub from `beatbox-basic`, first hit 20 ms after
+ts, tap-commit 30 ms after the last hat (released 60 ms later → `close()` path): 16/16, worst 4.0 ms, kinds exact.
+i2 limiter delay 288 frames · f3/j2 legato hand-over margins · e1 now expects d − outLat + 0.006 (loopback on the speaker feed).
+Fake-analysis scenarios (as before):
 a0 view mid-take · a1 L exact · a2 first-take positions (≤ 0.7 ms) · a3 start(origin=t0, from=tDown) · a4 when formula (0.00 ms) ·
 a5 catch-up offset of pos 0.05 = start lag · a6 exactly-once · a7 WAV length · b0–b4 overdub (positions ≤ 0.8 ms incl. clipped and
 force-closed notes; silent until ts+L; pending notes scheduled before commit) · c1–c3 23-step state walk, onChange, error logs ·
 g1–g3 hold exclusion, state at tDown · d1 reload restore · e1 loopback calibration (0.1 ms off) · h1 probe level · i1 capture frame (2 frames) ·
 f1 15 s × 4 tracks: 267/267 · f2 L = 50 ms · j1 on/off + catch-up · l1 suspend/resume resync.
-Headless numbers: Chromium outLat 37.3 ms (base 5.3 + output 32), WebKit 18.5 ms (2.7 + 15.8), both 48 kHz.
+Headless numbers: Chromium outLat 43.3 ms (base 5.3 + output 32 + limiter 6), WebKit 24.5 ms (2.7 + 15.8 + 6), both 48 kHz; Tone ticks every 18 ms (max 20).
 WebKit quirks seen: `currentTime` is still 0 right after boot (first take at t0 = 0 has no pre-roll) and advances in coarse steps.
 
 ## Known risks
+- **Worklet `currentFrame` glitches** (Chromium under load, fixed by `FrameClock`): if a browser ever skips render quanta for the node,
+  the counter re-syncs only on jumps ≥ 256 frames; a persistent 128-frame offset would go unnoticed (2.7 ms). `mic.stats()` shows gaps.
 - **Main-thread stalls > ~100 ms** (GC, heavy UI) make events late: the late rules keep it musical (catch-up/drop), but drums can be dropped. Lookahead 0.12 s is the trade-off against on/off latency.
-- **First-take drum tail**: `OnsetDetector` has no flush; a hit in the last ~70 ms before the stop is lost when the stop is processed < 70 ms after its touch-down (taps are released later than that, so rare).
 - **outputLatency jumps** (Bluetooth route change) don't double/skip events, but shift audible timing until recalibrated.
 - **iOS**: re-acquiring getUserMedia without a gesture after backgrounding may fail (logged); the loop keeps playing, takes get silence. Mic ring keeps context-frame stamps across the suspend (no gap in context time).
 - `Tone.setContext(ctx, true)` disposes the context created by `import 'tone'`: instruments must not use the deprecated module-level `Tone.Transport` / `Tone.Destination` / `Tone.Draw` consts (they belong to the disposed context).
 - `controller.view()` recomputes live notes per call (fine for dozens of notes per frame).
 
-## Proposed contract changes (for the coordinator)
-1. `Controller.command(c, tDown): boolean` (accepted). Today `main.ts run()` always plays the `ok` blip, so a refused command (create during overdub) plays my `err` blip **and** `ok`. Implemented already; main.ts should use the result.
-2. `Controller.logs(): LogEvent[]` (implemented on `EngineController`): `SingTestApi.log()` needs the buffered log; an `onLog` subscription installed after boot misses the boot events. `TestHookDeps.controller` could be typed `EngineController`.
-3. `OnsetDetector.close(at): RawHit[]` (like `NoteSegmenter.close`) to finalise a hit awaiting classification at take end.
-4. For instruments: `Voice.stopAll(at)` should also cancel notes scheduled after `at` (not required by the engine any more, see deviation 3); never connect `voice.output` anywhere (the engine connects it to the track's strip gain).
+## Contract changes
+Done by the coordinator (2026-10-17): `command()` → boolean, `Controller.logs()`, `OnsetDetector.close(at)` — all used.
+None open. FYI for the tester: `mic.loopback(d)` now feeds the speaker path (after the limiter): expect `inLat ≈ d − outLat + LIMITER_DELAY_SEC`.
