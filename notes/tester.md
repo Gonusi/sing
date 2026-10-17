@@ -1,11 +1,13 @@
 # Tester notes (area: tester)
 
 Owner files: `src/app/test-hooks.ts`, `playwright.config.ts`, `e2e/` (specs, `helpers.ts`, `global-setup.ts`), this file.
-Last full run: 2026-10-17, branch `tester` with main merged (instruments + engine follow-up), voice not merged yet.
+Last full run: 2026-10-17, branch `tester2` from main 0f5f3c9 (MVP+: vocal tracks, echo bus, voice merged).
 
 ## How to run
-- Everything (Chromium + WebKit, ≈ 5.2 min): `npx playwright test`
-- One engine: `npx playwright test --project=chromium` (≈ 2.6 min) · one spec: `npx playwright test overdub --project=webkit`
+- Everything (Chromium + WebKit, ≈ 7.5 min without voice-real, + 4.1 min with it): `npx playwright test`
+- voice-real needs the model (`npm run fetch-model`, VOSK_MODEL_CACHE=<tar.gz> copies a local one) and the speech
+  fixtures (`node dev/voice/make-speech.ts`, ≈ 80 s, gitignored); without them it skips with the reason.
+- One engine: `npx playwright test --project=chromium` (≈ 3.9 min without voice-real) · one spec: `npx playwright test overdub --project=webkit`
 - Headed: `npx playwright test ui --project=chromium --headed`
 - Fast iteration: `SING_SKIP_BUILD=1` reuses `dist/` (run `npx vite build` after product changes); `SING_URL=<url>` uses a
   running server; `PORT=<n>` fixes the preview port (default: a free port).
@@ -14,46 +16,48 @@ Last full run: 2026-10-17, branch `tester` with main merged (instruments + engin
   `overdub-<project>-<kind>[-frames].json`, traces of failures in `e2e/out/results/`.
 - Flakiness check: `npx playwright test overdub first-take states --project=chromium --repeat-each=3`.
 
-## Status (2026-10-17, after merging main with instruments + engine follow-up)
+## Status (2026-10-17, tester2 = main 0f5f3c9 + MVP+ specs)
 
 | spec | Chromium | WebKit | what it proves |
 |---|---|---|---|
 | boot | pass (2) | pass (2) | start → stage, idle, no console/page errors; SW active + controlling, scope `/sing/`; manifest + icons |
-| first-take | pass | pass | 16/16 notes, midi exact, pos err ≤ 13 ms; sched `when` err 0.0 ms; 16/16 exactly once; synth output re-detected 16/16 ± 40 ms (max 13–29 ms) |
-| overdub | pass | pass | synth + violin + bass + drums: takes 8/8, 8/8 (bass −12), 8/8, 16/16 hits (kinds right); new lanes silent until ts + L; 15 s × 4 lanes: 148/148 exactly once, 0 drops; every lane audible and on pitch; speaker-feed peak 0.505 |
-| states | pass | pass | full state-table walk incl. refusals + error logs, discard, too-short, commit-so-far, one-cycle overdub from stopped, voice on/off |
-| calibration | pass (4) | pass (4) | loopback 120/250 ms → inLat = d − outLat + 6 ms within 0.1 ms; no clap → not ok, device untouched; echo overdub of the looped-back loop lands within 8.7 ms of the original positions |
-| persist | pass | pass | flush → reload → same session, stopped, both lanes play; offline reload → boots from the SW, violin audible |
-| ui | pass (2) | pass (2) | screenshots; ＋ sheet creates + selects; strip tap selects, 2nd tap toggles; real pointer tap records/stops; real hold shows the overlay |
-| voice (logic) | pass (2) | pass (2) | hold + inject → command at the hold's tDown; non-grammar text → nothing; every grammar phrase |
-| voice-real | skipped | n/a | pending on the voice merge: needs `recognizer.status` → `ready` and `dev/fixtures/out/speech/manifest.json` |
-| fake-mic | pass | n/a | real getUserMedia (Chromium fake capture) → 9 notes in the line's order |
-| bugs | 2 expected failures | 2 expected failures | open product bugs, see below (`test.fail()`: flips to "unexpected pass" when fixed) |
+| first-take | pass | pass | 16/16 notes, midi exact, pos err ≤ 13 ms; sched `when` err 0.0 ms; exactly once; synth output re-detected 16/16 |
+| overdub | pass | pass | synth + violin + bass + drums takes exact; new lanes silent until ts + L; 148/148 exactly once; every lane audible and on pitch |
+| states | pass | pass | state-table walk (toggles are now `mute X` / `X back`) |
+| calibration | pass (4) | pass (4) | loopback → inLat = d − outLat + 6 ms within 0.1 ms; echo overdub of the loop within 8.7 ms |
+| persist | pass | pass | reload restores; offline reload boots from the SW, violin audible |
+| ui | pass (3) | pass (3) | screenshots incl. vocals waveform + 5-kind ＋ sheet; `create vocal track` by voice |
+| **vocals** | pass (3) | pass (3) | first take: lane output = injected audio at lag 0.0 ms, NCC 0.9992; exactly-once sched; overdub: 7/7 stored onsets at their loop pos (≤ 0.7 ms), lane exactly silent (peak 0) until ts + L, audible after; reload: audible, lag 0.0 ms NCC 0.9992; clear session → no `sing.audio.*` keys |
+| **echo** | pass (2) | pass (2) | echo 0: nothing after the hat (0 rms); echo 1: repeat at +330.0 ms at 0.50×, 2nd weaker at +665 ms; slider → `session.fx.echo`, survives reload, undo keeps it, no gesture |
+| voice (logic) | pass (2) | pass (2) | hold + inject; non-grammar → nothing; every phrase |
+| voice-real | pass (4.1 min) | n/a | real vosk on generated speech fixtures (Samantha clean, Daniel noisy, negatives) |
+| fake-mic | pass | n/a | real getUserMedia → 9 notes in order |
+| bugs | 2 regressions pass, 2 expected failures | 2 regressions pass, 2 expected failures | see below |
 
-Totals: 33 passed, 1 skipped, 2 expected-fail repros; 5.2 min for both engines. Flakiness: 0 failures in 3 repeats of
-first-take + overdub + states after the engine merge. Seen once before it: the violin overdub take placed one of 8
-notes > 30 ms off (76@2.085, "extra 1"); not reproduced since.
+Totals: full run 48 passed + 1 skipped (voice-real without fixtures) + 3 expected failures, 7.5 min (the seam repro
+was then made multi-take and is an expected failure on both engines: 4 expected failures in total); voice-real alone
+4.1 min (passes). Screenshots: `e2e/out/<project>-{empty,plus,plus-five,settings,command,recording,first-take-playing,
+four-stopped,four-playing,four-bass-off,vocals-recording,vocals-playing}.png`, absolute folder
+`/Users/kasparasanusauskas/Projects/personal/sing-worktrees/tester2/e2e/out/` (checked by eye: all fine).
 
-Screenshots (checked by eye, all render correctly): `e2e/out/chromium-{empty,plus,settings,command,recording,
-first-take-playing,four-stopped,four-playing,four-bass-off}.png` (+ the same for webkit). Absolute folder:
-`/Users/kasparasanusauskas/Projects/personal/sing-worktrees/tester/e2e/out/`.
+## Product bugs
 
-## Product bugs found
+Open (repro in `e2e/bugs.spec.ts`, `test.fail()`):
+1. **engine, both engines, intermittent: one-sample clicks at vocal loop seams.** A vocals first take with the seam
+   inside a sustained note (sing-cmaj, L 4.29 s): at cycle starts 2 and/or 3 exactly one output sample is doubled
+   (−0.338 → −0.693 → −0.365: old tail + new cycle both at full level), one-sample spike 0.33–0.35 vs 0.018 steady;
+   cycles 4, 5 always clean; in ~3 of 4 takes on Chromium and WebKit. All cycle starts were on integer frames. The
+   repro tries up to 3 fresh takes (≈ 1.5% chance of an "unexpected pass" while the bug exists). Suspect `src/audio/vocal-voice.ts` `play()`: the new
+   GainNode keeps its default gain 1 until `setValueAtTime(…, when)`, so a sample the source renders at its start
+   frame before the automation applies passes at full level. Fix idea: `g.gain.value = 0` (or
+   `setValueAtTime(0, ctx.currentTime)`) before the start automation; check with this repro.
+2. **engine/dsp: phantom hats in an empty drum first take at −45 dBFS room noise** (the fixtures' own level). Got
+   `hat@0.029, hat@0.227`; −60 dBFS and silence: none. The 2nd lands right after the 80 ms record-beep exclusion
+   (`src/loop/take.ts` zeroExcluded zeroes analysis input without ramps; noise resuming from 0 is a sharp onset);
+   the 1st is unexplained (near t0). Real rooms are often −50…−60 dBFS, so it may or may not show on the phone.
 
-1. **engine: undo right after record-from-stopped destroys the loop** (`e2e/bugs.spec.ts`, test.fail).
-   Repro: stopped → `record` (tDown t) → `undo` with tDown < origin (origin = t + outLat + 0.03, ≈ 50–75 ms window).
-   Got `{state: 'idle', loopLength: null, tracks: 0}`; expected the pending overdub discarded, state playing, first take kept.
-   Cause: `src/app/controller.ts` `startOverdub(origin, tDown)` → `setState('overdubbing', ts)` stamps the transition
-   at `ts = origin` (future); `stateAt(tDown)` then reads `playing` → `popUndo` pops the first-take commit, and the
-   active overdub take stays alive in idle (would commit into a loop-less session at its window end).
-   Reachable only through commands (voice), not taps; narrow window. Fix idea: stamp the overdubbing transition at
-   tDown (and keep ts = origin for the window), or treat `undo` while `take?.mode === 'overdub'` as discard regardless.
-2. **shell: a press within ~200 ms of closing a sheet is swallowed** (`e2e/bugs.spec.ts`, test.fail).
-   `src/ui/style.css` `.sheet-layer`: `visibility` stays `visible` for `--sheet-ms` after `.open` is removed (for the
-   fade-out), so the closing layer (data-no-gesture) catches the pointerdown. Fix: `pointer-events: none` on
-   `.sheet-layer:not(.open)`.
-3. **engine (cosmetic): a too-short first take logs `take discard` twice** (`too-short`, then `discarded` from
-   `discardTake()` in `finishFirstTake`). Log consumers counting discards double-count. Not failing any spec.
+Fixed since the last report (now regression tests): undo after record-from-stopped; press swallowed by a closing
+sheet; double discard log.
 
 ## Observations (not bugs, for the owner / area agents)
 - **dsp:** the segmenter's energy onset refinement can put an onset 60–70 ms early when the previous note's release tail
@@ -62,6 +66,10 @@ first-take-playing,four-stopped,four-playing,four-bass-off}.png` (+ the same for
 - **register fit:** the bass lane plays sing-low (A2–A3) at −12 → down to A1 (55 Hz). Below the pitch tracker's 70 Hz
   floor and below phone speakers' range (harmonics carry the pitch). Worth listening to on the iPhone.
 - **master level:** before the engine's limiter, 4 lanes peaked at 1.03 on the master; now the speaker feed peaks 0.505.
+- **vocals waveform:** the 80 ms record-beep exclusion (now applied to vocals too) shows as a thin gap at the start
+  of every vocal first take (screenshot vocals-playing); the audio there is silence.
+- **echo:** the 2nd repeat of a hat is 0.06× the first (feedback goes through a 3.5 kHz lowpass, hats are > 5 kHz):
+  expected by design.
 - **test mic:** in `?test` the mic is digital silence; a fixture starting out of it was a sharp onset (a spurious drum
   hit). Specs now inject a −45 dBFS room-noise bed (`mic.noise`). A real device delivering hard digital silence (a noise
   gate) could give a spurious first hit — low risk.
@@ -70,7 +78,8 @@ first-take-playing,four-stopped,four-playing,four-bass-off}.png` (+ the same for
 Contract fields + extras (type `SingE2eApi`): `command()` returns `accepted`; uncapped `log()`/`logSince(t)`; `outLat`,
 `sampleRate`, `waitUntil(t)` (context clock); `mic.load/put/cached/play(url, at, {from, dur, gain})/noise(dbfs)`;
 named captures `capture.begin(key, trackId | null | '__out')` / `end` / `analyze` (real dsp) / `frames` (pitch frames) /
-`level` / `salience` (Goertzel harmonics, for bass below 70 Hz); `analyze(pcm, sr, frame, kind)`; `loopback(d)` /
+`level` / `salience` (Goertzel harmonics, for bass below 70 Hz) / `xcorr` (NCC vs a fixture at an assumed offset,
+± lag search) / `envelope` / `maxJump` / `samples`; `setEcho(a)`; `mic.play(…, {fade})` (raised-cosine slice edges); `analyze(pcm, sr, frame, kind)`; `loopback(d)` /
 `loopbackOff()`; `calibrate()` (+ `outLatAtStart`); `flush()`; `voice.inject(text, tDown = open hold's tDown ?? now)` /
 `status()` / `injections()`; `ui()` (DOM: overlay, toast, pill).
 
@@ -97,3 +106,14 @@ named captures `capture.begin(key, trackId | null | '__out')` / `end` / `analyze
 - Shorter fixtures for overdub (L 6.4 s → 3 s) would halve overdub.spec (43 s) with the same assertions.
 - Parallel workers (not tried): the audio specs mostly wait on real time, so 2 workers could cut the 5.2 min nearly in half; check timing stability first.
 - WebKit could skip the audio-heavy specs on every merge and run them nightly; Chromium covers them.
+
+## MVP+ decisions (vocals, echo)
+- **Vocal alignment** is checked on the lane's own output (strip capture) by normalised cross-correlation against
+  the injected fixture at the offset the timing model predicts (`at − inLat − outLat + k·L`), lag searched ±10 ms:
+  measured 0.0 ms, NCC 0.9992 (Int16 storage + fades are the only differences).
+- **Stored audio** is read straight from IndexedDB (`sing.audio.<takeId>` = `{sampleRate, pcm: Int16Array}`); onsets
+  by a 1 ms RMS rise detector (> 3× the previous 20 ms) — plain thresholds miss hits that follow a ringing kick.
+- **Seam clicks** are measured as one-sample spikes `|x[n] − (x[n−1] + x[n+1])/2|` within ±2 ms of each cycle start
+  vs. the 20–200 ms before it; the seam is put inside a sustained sung note so a doubled sample is visible.
+- **Echo** uses a single hi-hat on a drums lane (short, > 5 kHz) and a 5 ms master envelope; the slider is driven with
+  `locator.fill()` on `input.echo-slider`. The echo spec runs without the noise bed (phantom hats, bug 2).

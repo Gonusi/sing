@@ -123,6 +123,24 @@ export async function idbPut(page: Page, key: string, value: unknown): Promise<v
   );
 }
 
+/** every key in idb-keyval's default store */
+export async function idbKeys(page: Page): Promise<string[]> {
+  return page.evaluate(
+    () =>
+      new Promise<string[]>((resolve, reject) => {
+        const req = indexedDB.open('keyval-store');
+        req.onupgradeneeded = () => req.result.createObjectStore('keyval');
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => {
+          const db = req.result;
+          const all = db.transaction('keyval', 'readonly').objectStore('keyval').getAllKeys();
+          all.onsuccess = () => (db.close(), resolve(all.result.map(String)));
+          all.onerror = () => reject(all.error);
+        };
+      }),
+  );
+}
+
 export async function idbGet<T>(page: Page, key: string): Promise<T | undefined> {
   return page.evaluate(
     (k) =>
@@ -163,6 +181,8 @@ export async function firstTake(
   page: Page,
   o: {
     fixture: string; L: number; lead?: number; from?: number; dur?: number; kind?: InstrumentKind;
+    /** fade (s) at the slice edges (mic.play PlayOptions.fade) */
+    fade?: number;
     /** begin a named capture of the take's lane output right before the stop tap */
     captureKey?: string;
   },
@@ -174,7 +194,7 @@ export async function firstTake(
     await s.mic.load(url);
     if (o.kind && !s.command({ type: 'create', kind: o.kind })) throw new Error(`create ${o.kind} refused`);
     const t0 = s.now();
-    const at = await s.mic.play(url, t0 + (o.lead ?? 0.1), { from: o.from, dur: o.dur });
+    const at = await s.mic.play(url, t0 + (o.lead ?? 0.1), { from: o.from, dur: o.dur, fade: o.fade });
     await s.waitUntil(t0 + 0.1);
     s.gesture({ type: 'tap', tDown: t0 });
     const start = s.logSince(t0).find((e) => e.type === 'take' && e.data?.phase === 'start');
@@ -276,7 +296,12 @@ export function duplicates(list: Sched[]): string[] {
   return d;
 }
 
-export const trackEvents = (t: Track): (Note | DrumHit)[] => (t.take ? (t.kind === 'drums' ? t.take.hits : t.take.notes) : []);
+/** the scheduler's events of a track; a vocal take is one event {pos 0, dur L} per cycle (clock.ts vocalEvent) */
+export const trackEvents = (t: Track, L = 0): (Note | DrumHit | { pos: number; dur: number })[] => {
+  if (!t.take) return [];
+  if (t.kind === 'vocals') return t.take.audio && L > 0 ? [{ pos: 0, dur: L }] : [];
+  return t.kind === 'drums' ? t.take.hits : t.take.notes;
+};
 
 export interface Exactness {
   runs: number;
@@ -324,9 +349,11 @@ export function exactness(log: LogEvent[], session: Session): Exactness {
     for (const t of session.tracks) {
       const hi = until[t.id];
       if (hi === undefined) continue;
-      const lo = Math.max(from, activeFrom.get(t.id) ?? -Infinity) - 1e-6;
-      for (const ev of trackEvents(t)) {
+      for (const ev of trackEvents(t, L)) {
         const dur = 'dur' in ev ? ev.dur : 0;
+        // a vocal occurrence still counts when it overlaps activeFrom (it starts part-way, clock.ts)
+        const af = activeFrom.get(t.id) ?? -Infinity;
+        const lo = Math.max(from, t.kind === 'vocals' ? af - dur + 1e-6 : af) - 1e-6;
         for (let k = Math.floor((lo - origin - ev.pos) / L) - 1; origin + ev.pos + k * L < hi; k++) {
           const heard = origin + ev.pos + k * L;
           if (heard < lo) continue;

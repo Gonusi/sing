@@ -56,6 +56,8 @@ export interface PlayOptions {
   dur?: Sec;
   /** linear gain applied to the samples */
   gain?: number;
+  /** raised-cosine fade-in and fade-out (seconds) at the slice edges, so a cut is not a sharp onset */
+  fade?: Sec;
 }
 
 export interface Analysed {
@@ -130,6 +132,18 @@ export interface SingE2eApi extends SingTestApi {
     /** RMS / peak of a finished named capture inside [from, to) */
     level(key: string, from?: Sec, to?: Sec): { rms: number; peak: number };
     /**
+     * normalised cross-correlation between the capture and the decoded fixture `url`, assuming fixture time x is
+     * captured at context time x + `offset` (± a lag searched in [−maxLag, +maxLag] s): compares capture [from, to).
+     * Returns the best lag (s; + = capture later than assumed) and its NCC (1 = identical up to gain).
+     */
+    xcorr(key: string, url: string, offset: Sec, from: Sec, to: Sec, maxLag: Sec): Promise<{ lag: Sec; ncc: number; nccAtZero: number }>;
+    /** RMS per `block` seconds inside [from, to) (envelope; element i covers from + i·block) */
+    envelope(key: string, from: Sec, to: Sec, block: Sec): number[];
+    /** largest |x[n] − x[n−1]| inside [from, to) (click / seam check) */
+    maxJump(key: string, from: Sec, to: Sec): number;
+    /** raw samples inside [from, to) as a plain array (small spans only, for diagnosis); t = time of the first */
+    samples(key: string, from: Sec, to: Sec): { t: Sec; x: number[] };
+    /**
      * harmonic salience of each candidate MIDI note in [from, to): sum of Hann-windowed Goertzel power at harmonics
      * 1..SALIENCE_HARMONICS. For pitches below the tracker's 70 Hz floor (low bass).
      */
@@ -140,6 +154,10 @@ export interface SingE2eApi extends SingTestApi {
   loopback(delaySec: Sec): void;
   loopbackOff(): void;
   calibrate(): Promise<CalibrationRun>;
+  /** controller.clearSession (stops, discards, removes stored audio) */
+  clearSession(): Promise<void>;
+  /** controller.setEcho (global echo 0..1, Session.fx.echo) */
+  setEcho(amount: number): void;
   flush(): Promise<void>;
   voice: {
     /** parsed command → deps.run; unparsable text → err blip, no command. Default tDown: the open hold's, else now */
@@ -204,11 +222,16 @@ export function installTestHooks(deps: TestHookDeps): void {
     const a = Math.max(0, Math.round((o.from ?? 0) * sr));
     const b = Math.min(buf.length, o.dur === undefined ? buf.length : a + Math.round(o.dur * sr));
     const gain = o.gain ?? 1;
-    if (a === 0 && b === buf.length && gain === 1) return buf;
+    const fade = Math.min(Math.round((o.fade ?? 0) * sr), Math.floor((b - a) / 2));
+    if (a === 0 && b === buf.length && gain === 1 && fade === 0) return buf;
     const out = ctx.createBuffer(1, Math.max(1, b - a), sr);
     const src = buf.getChannelData(0).subarray(a, b);
     const dst = out.getChannelData(0);
-    for (let i = 0; i < src.length; i++) dst[i] = src[i] * gain;
+    for (let i = 0; i < src.length; i++) {
+      const edge = Math.min(i, src.length - 1 - i);
+      const w = edge < fade ? 0.5 - 0.5 * Math.cos((Math.PI * edge) / fade) : 1;
+      dst[i] = src[i] * gain * w;
+    }
     return out;
   };
 
@@ -352,6 +375,58 @@ export function installTestHooks(deps: TestHookDeps): void {
       level(key, from, to) {
         return levels(sliceResult(finished(key), from, to).pcm);
       },
+      async xcorr(key, url, offset, from, to, maxLag) {
+        const r = finished(key);
+        const cap = sliceResult(r, from, to);
+        const fx = (await load(url)).getChannelData(0);
+        const sr = r.sampleRate;
+        const lags = Math.round(maxLag * sr);
+        // fixture index of capture sample i at lag l: round((cap.frame + i)/sr − offset)·sr − l ... in samples:
+        const base = cap.frame - Math.round(offset * sr);
+        const ncc = (l: number): number => {
+          let xy = 0;
+          let xx = 0;
+          let yy = 0;
+          for (let i = 0; i < cap.pcm.length; i++) {
+            const j = base + i - l;
+            const y = j >= 0 && j < fx.length ? fx[j] : 0;
+            const x = cap.pcm[i];
+            xy += x * y;
+            xx += x * x;
+            yy += y * y;
+          }
+          return xx > 0 && yy > 0 ? xy / Math.sqrt(xx * yy) : 0;
+        };
+        let best = 0;
+        let bestV = -Infinity;
+        for (let l = -lags; l <= lags; l++) {
+          const v = ncc(l);
+          if (v > bestV) {
+            bestV = v;
+            best = l;
+          }
+        }
+        return { lag: best / sr, ncc: bestV, nccAtZero: ncc(0) };
+      },
+      envelope(key, from, to, block) {
+        const r = finished(key);
+        const x = sliceResult(r, from, to).pcm;
+        const n = Math.max(1, Math.round(block * r.sampleRate));
+        const out: number[] = [];
+        for (let i = 0; i + n <= x.length; i += n) out.push(levels(x.subarray(i, i + n)).rms);
+        return out;
+      },
+      samples(key, from, to) {
+        const r = finished(key);
+        const s = sliceResult(r, from, to);
+        return { t: s.frame / r.sampleRate, x: Array.from(s.pcm) };
+      },
+      maxJump(key, from, to) {
+        const x = sliceResult(finished(key), from, to).pcm;
+        let m = 0;
+        for (let i = 1; i < x.length; i++) m = Math.max(m, Math.abs(x[i] - x[i - 1]));
+        return m;
+      },
       salience(key, from, to, midis) {
         const r = finished(key);
         const x = sliceResult(r, from, to).pcm;
@@ -378,6 +453,8 @@ export function installTestHooks(deps: TestHookDeps): void {
       return { ...r, outLatAtStart };
     },
     flush: () => controller.flush(),
+    setEcho: (a) => controller.setEcho(a),
+    clearSession: () => controller.clearSession(),
     voice: {
       inject(text, tDown) {
         const t = tDown ?? openHold ?? ctx.currentTime;

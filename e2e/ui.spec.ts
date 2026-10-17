@@ -119,3 +119,41 @@ test('4 lanes playing (seeded session); strip tap selects, second tap toggles', 
   expect(await page.evaluate(() => window.__sing!.state())).toBe('playing');
   expect(errors, errors.join('\n')).toEqual([]);
 });
+
+test('vocals: ＋ sheet has 5 kinds; "create vocal track" by voice; waveform lane recording + playing', async ({ page }) => {
+  const errors = await boot(page);
+  await page.locator('[data-action="new-track"]').click();
+  await expect(page.locator('.sheet-layer.open .kind-btn')).toHaveCount(5);
+  await expect(page.locator('.kind-btn[data-kind="vocals"]')).toBeVisible();
+  await page.waitForTimeout(400);
+  await shot(page, 'plus-five');
+  await page.locator('.sheet-layer.open .sheet-done').click();
+  await page.waitForTimeout(300);
+
+  await page.mouse.move(SPOT.x, SPOT.y);
+  await page.mouse.down();
+  await expect(page.locator('.cmd-overlay.on')).toBeVisible();
+  expect(await page.evaluate(() => window.__sing!.voice.inject('create vocal track'))).toBe(true);
+  await page.mouse.up();
+  const s = await getSession(page);
+  expect(s.tracks.map((t) => t.kind)).toEqual(['vocals']);
+  expect(s.selectedId).toBe(s.tracks[0].id);
+  await expect(page.locator('.lane-strip').first()).toHaveAttribute('aria-label', 'vocals lane');
+
+  await putFixtures(page, ['sing-cmaj']);
+  await page.evaluate(() => window.__sing!.mic.play('/__fixtures/sing-cmaj.wav', window.__sing!.now() + 0.15));
+  await page.waitForTimeout(300);
+  await page.mouse.click(SPOT.x, SPOT.y, { delay: 60 });
+  expect(await page.evaluate(() => window.__sing!.state())).toBe('recordingFirst');
+  await page.waitForTimeout(2500);
+  expect((await page.evaluate(() => window.__sing!.view().livePeaks))?.some((p) => p > 0.3)).toBe(true);
+  await shot(page, 'vocals-recording');
+  await page.waitForTimeout(1500);
+  await page.mouse.click(SPOT.x, SPOT.y, { delay: 60 });
+  await expect(page.locator('.pill')).toHaveClass(/playing/);
+  const lane = (await getSession(page)).tracks[0];
+  expect(lane.take!.peaks!.filter((p) => p > 0.3).length).toBeGreaterThan(50);
+  await page.waitForTimeout(800);
+  await shot(page, 'vocals-playing');
+  expect(errors, errors.join('\n')).toEqual([]);
+});

@@ -19,7 +19,7 @@ test('regression engine: undo right after record-from-stopped discards the overd
   expect(r).toEqual({ undo: true, state: 'playing', loopLength: expect.any(Number), tracks: 1 });
 });
 
-test('BUG shell: a press right after closing a sheet is swallowed by the closing sheet layer', async ({ page }) => {
+test('regression shell: a press right after closing a sheet starts a gesture', async ({ page }) => {
   await boot(page);
   await page.locator('[data-action="settings"]').click();
   await page.waitForTimeout(400);
@@ -31,4 +31,56 @@ test('BUG shell: a press right after closing a sheet is swallowed by the closing
   const gestures = await page.evaluate(() => window.__sing!.log().filter((e) => e.type === 'gesture').map((e) => e.data!.type));
   console.log(`[bug sheet-close press] gestures ${JSON.stringify(gestures)}`);
   expect(gestures).toEqual(['holdStart', 'holdEnd']);
+});
+
+test('BUG engine: one-sample clicks at vocal loop seams (intermittent: up to 3 takes)', async ({ page }) => {
+  test.fail(true, 'src/audio/vocal-voice.ts: at cycle starts 2 and 3 (in ~3 of 4 takes, both engines) exactly one sample is doubled (old tail + new cycle both at full level); suspect: the new GainNode is 1 (default) until its setValueAtTime(…, when)');
+  test.setTimeout(180_000);
+  await boot(page);
+  // seam inside a sustained sung A4 (sing-cmaj 3.84–4.59 s), as in vocals.spec.ts
+  const L = 4.29;
+  const lines: string[] = [];
+  let clicks = 0;
+  for (let attempt = 1; attempt <= 3 && clicks === 0; attempt++) {
+    await page.evaluate(() => window.__sing!.clearSession());
+    await page.evaluate(() => window.__sing!.command({ type: 'create', kind: 'vocals' }));
+    const run = await firstTake(page, { fixture: 'sing-cmaj', L, lead: 0.1, captureKey: 'lane' });
+    await page.evaluate((t) => window.__sing!.waitUntil(t), run.t0 + 4 * L + 0.2);
+    await page.evaluate(() => window.__sing!.capture.end('lane'));
+    const sched = (await page.evaluate(() => window.__sing!.log())).filter((e) => e.type === 'sched' && e.data!.trackId === run.trackId && Number(e.data!.offset) === 0);
+    expect(sched.length).toBeGreaterThanOrEqual(2);
+    for (const e of sched) {
+      const at = Number(e.data!.at);
+      // one-sample spike |x[n] − (x[n−1] + x[n+1]) / 2| within ±2 ms of the cycle start vs. 20–200 ms before it
+      const spike = async (a: number, b: number) => {
+        const { x } = await page.evaluate(([a, b]) => window.__sing!.capture.samples('lane', a, b), [a, b] as const);
+        let m = 0;
+        for (let i = 1; i + 1 < x.length; i++) m = Math.max(m, Math.abs(x[i] - (x[i - 1] + x[i + 1]) / 2));
+        return m;
+      };
+      const seam = await spike(at - 0.002, at + 0.002);
+      const steady = await spike(at - 0.2, at - 0.02);
+      if (seam > steady * 2 + 0.01) clicks++;
+      lines.push(`take ${attempt} cycle ${e.data!.cycle} at ${at.toFixed(4)}: seam ${seam.toFixed(3)} steady ${steady.toFixed(3)}`);
+    }
+  }
+  console.log(`[bug vocal seam]\n${lines.join('\n')}`);
+  expect(clicks, lines.join('\n')).toBe(0);
+});
+
+test('BUG engine/dsp: a drum first take of room noise only (−45 dBFS) records phantom hats', async ({ page }) => {
+  test.fail(true, 'src/loop/take.ts + src/analysis/drums.ts: with the fixtures\' own −45 dBFS room noise, an empty drum first take gets 2 hats (pos ≈ 0.03 and ≈ 0.23 s; the 2nd right after the 80 ms record-beep exclusion, which zeroes the noise without ramps: noise resuming from 0 is a sharp onset). −60 dBFS or silence: none.');
+  await boot(page, { noise: -45 });
+  const hits = await page.evaluate(async () => {
+    const s = window.__sing!;
+    s.command({ type: 'create', kind: 'drums' });
+    const t0 = s.now();
+    await s.waitUntil(t0 + 0.1);
+    s.gesture({ type: 'tap', tDown: t0 });
+    await s.waitUntil(t0 + 2.0);
+    s.gesture({ type: 'tap', tDown: t0 + 1.9 });
+    return s.session().tracks[0].take?.hits.map((h) => `${h.kind}@${h.pos.toFixed(3)}`) ?? [];
+  });
+  console.log(`[bug phantom hats] ${JSON.stringify(hits)}`);
+  expect(hits).toEqual([]);
 });
