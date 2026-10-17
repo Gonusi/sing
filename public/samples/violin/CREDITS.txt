@@ -1,0 +1,9 @@
+Violin samples G3 C4 E4 G4 C5 E5 G5 C6 (mp3, mono, 44.1 kHz, 192 kbps)
+
+Source: nbrosowsky/tonejs-instruments, samples/violin/
+        https://github.com/nbrosowsky/tonejs-instruments
+        License: CC-BY 3.0 (https://creativecommons.org/licenses/by/3.0/)
+Original recordings: VSCO 2 Community Edition (Versilian Studios), CC0.
+
+Downloaded unmodified on 2026-10-17. At load time the app converts them to mono, trims the leading silence,
+keeps the first 7.5 s, levels them and bakes a loop crossfade (src/instruments/violin-assets.ts).
