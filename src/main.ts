@@ -58,9 +58,10 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
 
   /** a command from voice, the ＋ sheet or tests: same path for all */
   const run = (c: Command, tDown: Sec) => {
-    controller.command(c, tDown);
-    playBlip(ctx, 'ok', undefined, engine.master);
-    toast(describeCommand(c));
+    const accepted = controller.command(c, tDown);
+    // a refused command already played the controller's error blip
+    if (accepted) playBlip(ctx, 'ok', undefined, engine.master);
+    toast(accepted ? describeCommand(c) : `can’t ${describeCommand(c)} now`, accepted ? 'ok' : 'err');
   };
 
   const stage = document.createElement('div');

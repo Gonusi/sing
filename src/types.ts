@@ -226,8 +226,8 @@ export interface Controller {
   readonly device: DeviceSettings;
   view(): View;
   gesture(g: Gesture): void;
-  /** apply a command read against the state at `tDown` */
-  command(c: Command, tDown: Sec): void;
+  /** apply a command read against the state at `tDown`; false = refused/ignored in that state */
+  command(c: Command, tDown: Sec): boolean;
   select(trackId: string): void;
   toggleTrack(trackId: string): void;
   setDevice(patch: Partial<DeviceSettings>): Promise<void>;
@@ -238,6 +238,8 @@ export interface Controller {
   voiceOutput(trackId: string): AudioNode | null;
   onChange(cb: () => void): () => void;
   onLog(cb: (e: LogEvent) => void): () => void;
+  /** the last LOG_MAX events, including those from before anyone subscribed */
+  logs(): LogEvent[];
 }
 
 export interface Recognizer {
