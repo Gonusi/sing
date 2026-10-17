@@ -661,6 +661,190 @@ async function checkRealAnalysis(page: Page, url: string): Promise<void> {
     (err3.some((e) => e === Infinity) ? `; missing/wrong: ${want3.filter((_, i) => err3[i] === Infinity).map((w) => `${w.kind}@${w.pos.toFixed(3)}`).join(' ')}; got ${got3.map((h) => `${h.kind[0]}@${h.pos.toFixed(3)}`).join(' ')}` : ''));
 }
 
+// ---------- v: vocal takes (raw audio), seams, persistence; echo bus ----------
+
+async function checkVocals(page: Page, url: string): Promise<void> {
+  const d = await page.evaluate(async () => {
+    const e = (window as unknown as W).__eng;
+    await e.c.clearSession();
+    const inLat = 0.02;
+    await e.c.setDevice({ inLat });
+    e.c.setEcho(0);
+    const sr = e.sampleRate;
+    const X = Math.round(0.02 * sr);
+    const PRE = 0.3;
+    /** best lag (samples) of loop[q] vs src[idx(q) + lag] over the sample positions qs */
+    const align = (loop: Float32Array, src: Float32Array, idx: (q: number) => number, qs: number[]) => {
+      let best = { lag: 0, err: Infinity };
+      for (let lag = -240; lag <= 240; lag++) {
+        let err = 0;
+        let n = 0;
+        for (const q of qs) {
+          const i = idx(q) + lag;
+          if (i < 0 || i >= src.length) continue;
+          err += Math.abs(loop[q] - src[i]);
+          n++;
+        }
+        if (n && err / n < best.err) best = { lag, err: err / n };
+      }
+      return best;
+    };
+    const spread = (from: number, to: number, skip: (q: number) => boolean) => {
+      const qs: number[] = [];
+      for (let k = 0; k < 3000; k++) {
+        const q = Math.floor(from + ((to - from) * (k + 0.5)) / 3000);
+        if (!skip(q)) qs.push(q);
+      }
+      return qs;
+    };
+    const nonzero = (p: number[] | null) => (p ?? []).filter((v) => v > 0).length;
+
+    // v1: vocal FIRST take (sets L); noise A starts 0.3 s before t0
+    e.command({ type: 'create', kind: 'vocals' });
+    const lane1 = e.c.session.selectedId!;
+    const t0 = e.now() + 0.5;
+    const A = e.noise(11, Math.round(3.0 * sr));
+    e.injectSamples(A, t0 - PRE + inLat);
+    await e.waitUntil(t0 + 0.05);
+    e.gesture({ type: 'tap', tDown: t0 });
+    await e.waitUntil(t0 + 1.2);
+    const live1 = nonzero(e.c.view().livePeaks);
+    await e.waitUntil(t0 + 2.4 + 0.15);
+    e.gesture({ type: 'tap', tDown: t0 + 2.4 });
+    const L = e.c.session.loopLength!;
+    const Ls = Math.round(L * sr);
+    const buf1 = e.c.vocalAudio(lane1);
+    const loop1 = buf1?.getChannelData(0) ?? new Float32Array(0);
+    // the record-start beep's 80 ms exclusion sits right after pos 0 (zeroed by design): compare from 0.25 s on
+    const a1 = align(loop1, A, (q) => q + Math.round(PRE * sr), spread(Math.round(0.25 * sr), Ls, () => false));
+    let tailSame = loop1.length === Ls + X;
+    for (let k = 0; k < X && tailSame; k++) tailSame = loop1[Ls + k] === loop1[k];
+    const peaks1 = e.c.session.tracks.find((t) => t.id === lane1)?.take?.peaks ?? [];
+
+    // v2: vocal OVERDUB into a new vocals lane (the selected one has a take); noise B from ts − 0.3
+    const origin = e.c.scheduler.origin!;
+    const ts = e.now() + 0.8;
+    const B = e.noise(22, Math.round((L + 0.8) * sr));
+    e.injectSamples(B, ts - PRE + inLat);
+    await e.waitUntil(ts + 0.05);
+    e.gesture({ type: 'tap', tDown: ts });
+    const lane2 = e.c.session.selectedId!;
+    await e.waitUntil(ts + 1.2);
+    const live2 = nonzero(e.c.view().livePeaks);
+    await e.waitUntil(ts + L + inLat + 0.05 + 0.2);
+    const ps = Math.round((((ts - origin) % L) + L) % L * sr) % Ls;
+    const loop2 = e.c.vocalAudio(lane2)?.getChannelData(0) ?? new Float32Array(0);
+    const a2 = align(loop2, B, (q) => ((q - ps + Ls) % Ls) + Math.round(PRE * sr), spread(0, Ls, (q) => ((q - ps + Ls) % Ls) < X));
+    const first2 = e.events.find((x) => x.type === 'sched' && (x.data as { trackId?: string }).trackId === lane2)?.data as { at: number; outLat: number; offset: number; heard: number } | undefined;
+
+    // v3: sine overdub (330 Hz, phase jump at both seams) → seams must be click-free in the lane's output
+    const ts3 = e.now() + 0.8;
+    const n3 = Math.round((L + 0.8) * sr);
+    const sine = new Float32Array(n3).map((_, i) => 0.3 * Math.sin((2 * Math.PI * 330 * i) / sr));
+    e.injectSamples(sine, ts3 - PRE + inLat);
+    await e.waitUntil(ts3 + 0.05);
+    e.gesture({ type: 'tap', tDown: ts3 });
+    const lane3 = e.c.session.selectedId!;
+    await e.waitUntil(ts3 + L + inLat + 0.05 + 0.3);
+    const cap = await e.captureNode(e.c.voiceOutput(lane3)!, L + 0.4);
+    const ps3 = Math.round((((ts3 - origin) % L) + L) % L * sr) % Ls;
+    const ol = e.outLat();
+    const seams: number[] = [];
+    for (let k = -2; k < 40; k++) for (const off of [0, ps3]) {
+      const f = Math.round((origin + k * L - ol) * sr) + off - cap.frame;
+      if (f > 0.03 * sr && f < cap.pcm.length - 0.03 * sr) seams.push(f);
+    }
+    const W = Math.round(0.025 * sr);
+    let seamJump = 0;
+    let steadyJump = 0;
+    for (let i = 1; i < cap.pcm.length; i++) {
+      const j = Math.abs(cap.pcm[i] - cap.pcm[i - 1]);
+      if (seams.some((f) => Math.abs(i - f) <= W)) seamJump = Math.max(seamJump, j);
+      else steadyJump = Math.max(steadyJump, j);
+    }
+    e.command({ type: 'stop' });
+
+    // v5 prep: checksums of all vocal audio, echo setting
+    const sum = (id: string) => {
+      const b = e.c.vocalAudio(id);
+      if (!b) return null;
+      let s = 0;
+      const x = b.getChannelData(0);
+      for (let i = 0; i < x.length; i++) s += Math.abs(x[i]) * ((i % 7) + 1);
+      return `${x.length}:${s.toFixed(3)}`;
+    };
+    e.c.setEcho(0.37);
+    await e.c.flush();
+    return {
+      sr, L, Ls, X, inLat, live1, live2, a1, a2, tailSame, peaks1, ts, first2, seams: seams.length, seamJump, steadyJump,
+      sums: [lane1, lane2, lane3].map((id) => [id, sum(id)]), keys: await e.audioKeys(),
+    };
+  });
+  check('v1 vocal first take: audio = injected samples at the right offset (≤ 1 ms after inLat), tail = loop start, peaks',
+    Math.abs(d.a1.lag) <= d.sr * 0.001 && d.a1.err < 1e-3 && d.tailSame && d.peaks1.length === 256 && d.peaks1.filter((p) => p > 0.3 && p <= 1).length >= 256 - 12,
+    `lag ${d.a1.lag} samples, mean err ${d.a1.err.toExponential(1)}, tail copy ${d.tailSame}, peaks ${d.peaks1.length} (${d.peaks1.filter((p) => p <= 0.3).length} quiet bins: the beep exclusion)`);
+  check('v2 vocal overdub: rotated audio = injected samples (≤ 1 ms), plays from the window end', Math.abs(d.a2.lag) <= d.sr * 0.001 && d.a2.err < 1e-3 &&
+    !!d.first2 && d.first2.at + d.first2.outLat >= d.ts + d.L - 0.001 && d.first2.at + d.first2.outLat <= d.ts + d.L + 0.16,
+    `lag ${d.a2.lag} samples, mean err ${d.a2.err.toExponential(1)}; first replay heard from ts+L+${d.first2 ? ms(d.first2.at + d.first2.outLat - d.ts - d.L) : '?'}`);
+  const wantLive1 = (1.2 / 4) * 256;
+  // first take: minus ≈ 5 bins of the beep exclusion (0.08 s of 4 s)
+  check('v4 livePeaks: bins across max(elapsed, 4 s) for a first take, across L for an overdub', d.live1 >= wantLive1 - 9 && d.live1 <= wantLive1 + 3 && Math.abs(d.live2 - (1.2 / d.L) * 256) <= 4,
+    `first take ${d.live1} bins (≈ ${wantLive1.toFixed(0)}), overdub ${d.live2} bins (≈ ${((1.2 / d.L) * 256).toFixed(0)})`);
+  check('v3 seams click-free (sine with phase jumps): max sample jump at seams ≤ 1.2 × steady', d.seams >= 2 && d.steadyJump > 0.005 && d.seamJump <= 1.2 * d.steadyJump,
+    `${d.seams} seams, jump ${d.seamJump.toFixed(4)} vs steady ${d.steadyJump.toFixed(4)}`);
+
+  await boot(page, url);
+  const after = await page.evaluate(async (ids) => {
+    const e = (window as unknown as W).__eng;
+    const sum = (id: string) => {
+      const b = e.c.vocalAudio(id);
+      if (!b) return null;
+      let s = 0;
+      const x = b.getChannelData(0);
+      for (let i = 0; i < x.length; i++) s += Math.abs(x[i]) * ((i % 7) + 1);
+      return `${x.length}:${s.toFixed(3)}`;
+    };
+    const out = { sums: ids.map((id) => [id, sum(id)]), echo: e.c.session.fx?.echo ?? null, keys: await e.audioKeys() };
+    e.c.setEcho(0);
+    return out;
+  }, d.sums.map(([id]) => id as string));
+  const same = JSON.stringify(after.sums) === JSON.stringify(d.sums);
+  check('v5 reload: vocal audio restored bit-exact, echo restored, stored keys = referenced', same && after.echo === 0.37 && after.keys.length === 3 && d.sums.every(([, s]) => s !== null),
+    `audio ${same ? 'same' : `differs ${JSON.stringify(after.sums)} vs ${JSON.stringify(d.sums)}`}, echo ${after.echo}, keys ${after.keys.length}`);
+}
+
+async function checkEcho(page: Page): Promise<void> {
+  const run = (amount: number) => page.evaluate((a) => (window as unknown as W).__eng.echoProbe(a), amount);
+  const dry = await run(0);
+  const wet = await run(1);
+  /** on the 2.5 ms RMS envelope (r.sampleRate = envelope frames per second) */
+  const stats = (r: typeof dry) => {
+    const n = (sec: number) => Math.round(sec * r.sampleRate);
+    let ci = 0; // the direct click: envelope maximum in the first 0.3 s
+    for (let i = 0; i < Math.min(r.pcm.length, n(0.3)); i++) if (r.pcm[i] > r.pcm[ci]) ci = i;
+    let tailMax = 0;
+    for (let i = ci + n(0.06); i < r.pcm.length; i++) tailMax = Math.max(tailMax, r.pcm[i]);
+    let ri = ci + n(0.25);
+    for (let i = ri; i < Math.min(r.pcm.length, ci + n(0.45)); i++) if (r.pcm[i] > r.pcm[ri]) ri = i;
+    return { clickPeak: r.pcm[ci], tailMax, repeatAt: (ri - ci) / r.sampleRate, repeat: r.pcm[ri] };
+  };
+  const sd = stats(dry);
+  const sw = stats(wet);
+  check('v6 echo 0 = dry (no tail); echo 1 = a repeat at ≈ 0.33 s on master', sd.tailMax < 1e-4 && Math.abs(sw.repeatAt - 0.33) < 0.012 && sw.repeat > 0.05 * sw.clickPeak,
+    `dry tail ${sd.tailMax.toExponential(1)}; wet repeat at ${ms(sw.repeatAt)} level ${(sw.repeat / sw.clickPeak).toFixed(2)} × click`);
+  const c = await page.evaluate(async () => {
+    const e = (window as unknown as W).__eng;
+    e.c.setEcho(1);
+    await e.sleep(0.3);
+    const r = await e.calibrateLoopback(0.12);
+    e.c.setEcho(0);
+    return r;
+  });
+  const expected = 0.12 - c.outLat + c.limiterDelay;
+  check('v7 calibration with echo 1 unaffected (clicks bypass the FX bus)', c.result.ok && Math.abs(c.result.inLat - expected) < 0.005,
+    `ok ${c.result.ok} inLat ${ms(c.result.inLat)} expected ${ms(expected)} spread ${ms(c.result.spread)}`);
+}
+
 // ---------- h, i: probe and capture ----------
 
 async function checkProbeCapture(page: Page): Promise<void> {
@@ -700,6 +884,8 @@ async function runEngine(engine: Engine, url: string): Promise<void> {
       ['j', () => checkToggle(page)],
       ['l', () => checkLifecycle(page)],
       ['f2', () => checkTinyLoop(page)],
+      ['v', () => checkVocals(page, url)],
+      ['echo', () => checkEcho(page)],
     ];
     for (const [name, fn] of steps) {
       if (ONLY && !ONLY.includes(name)) continue;

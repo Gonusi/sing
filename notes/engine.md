@@ -20,6 +20,21 @@ needs dsp's fixtures from `node dev/make-fixtures.ts`; `ONLY=r,f` runs a subset)
 | `app/session.ts` | `loadDevice`, `saveDevice`, `loadSession`, `isSession`, `emptySession`, `createSessionStore(initial, {persist})`, keys, `DEFAULT_DEVICE` | Keys `sing.session.v1`, `sing.device.v1`. Store: immutable sessions, `set(next, undoPoint?)`, `undo()`, `clear()`, `flush()`; saves debounced 250 ms, flushed on `pagehide`/hidden; every idb call try/catch. Undo max 50. |
 | `app/controller.ts` | `createController(deps): Promise<EngineController>` | Deps = contract + optional `analysis`, `createVoice`, `restore`, `persist`. `EngineController` = `Controller` + `command()` returns **boolean** (accepted), `logs()`, `flush()`, `scheduler`, `dispose()`. |
 
+## MVP+: vocal tracks and echo (2026-10-17)
+| piece | where | how |
+|---|---|---|
+| vocal take | `loop/take.ts` `buildVocalLoop` | kind 'vocals' runs no analysis; raw mic samples (from the pre-roll on) → `rec[d]` = audio sung at corrected `ws + d/sr` (stamp − inLat), d < Ls + X (Ls = round(L·sr), X = 20 ms); exclusions zeroed with 5 ms ramps (holds; the record-start beep's 80 ms, as for drums); rotated so loop pos q ↔ d = (q − ps) mod Ls (first take ps = 0, overdub ps = pos of ts); the window seam at ps is a linear crossfade over X between the window start and the audio recorded just after the window end; buffer = Ls + X with the tail = copy of samples [0, X). An early (tap) commit leaves the unrecorded part silent. |
+| peaks | take.ts `loopPeaks`, `livePeaks(displayLen)` | 256 bins, bin i = pos [i·L/256, (i+1)·L/256); value = peak on a dB scale (−50 dBFS → 0, 0 dBFS → 1). Live: from 128-sample chunk peaks; first take spans max(elapsed, 4 s) = the shell's FIRST_TAKE_MIN_LENGTH; exclusions show as 0. |
+| storage | `audio/audio-store.ts` | Int16 under `sing.audio.<takeId>` = `Take.audio.key` (`{sampleRate, pcm: Int16Array}`); the cache holds the Int16-decoded buffer (bit-identical before and after a reload). Loaded at boot before voices sync. GC invariant: after gc, stored keys ⊆ keys referenced by the session + undo stack; gc runs at boot, after a commit with an undo point (stack trim), after undo and after clear. |
+| voice | `audio/vocal-voice.ts` | one event per cycle from the scheduler (`vocalEvent`: Note {pos 0, dur L, midi 0}); `start(when, offset)`; cycle start fades in over X (complementary to the previous cycle's tail fade-out on identical samples → exact sum, no click); catch-up start fades in over 10 ms; stopAll fades in 15 ms. |
+| scheduler | `loop/clock.ts` | vocals: late = exact offset always (`vocalDecision`, audio never shifts); an occurrence straddling `activeFrom` starts at activeFrom with offset activeFrom − heard. |
+| commit | controller | vocal overdubs commit at window end + inLat + 0.05 s (`VOCAL_COMMIT_MARGIN_SEC`: 20 ms tail + a block); the first replay therefore starts ≈ 0.13 s after ts + L (inLat + 50 ms + tick + outLat; measured 134–139 ms), caught up with an offset. |
+| echo | `audio/context.ts` `createFxBus` | strips → `engine.fxSend` (gain = amount) → delay 0.33 s (feedback 0.2 + 0.3·a through a 3.5 kHz lowpass, return 0.5) + convolver (seeded 1.6 s decaying noise, τ 0.23 s, return 0.35) → wet (on when a > 0) → master → limiter. Clicks, blips, probe, beep connect to master only. `controller.setEcho(a)` ramps (50 ms) and stores `Session.fx.echo` with no undo point; undo and clear keep the current echo; boot: `fx.echo ?? (test ? 0 : 0.2)`. |
+
+Measured (check v1–v7, Chromium + WebKit): vocal first take and overdub audio = injected samples at lag 0 (mean error 8e-6 = Int16), tail = loop start;
+seams on a 330 Hz sine with phase jumps: max sample jump 0.0130 = steady 0.0130; reload restores bit-exact audio, echo and exactly the 3
+referenced keys; echo 0: tail 0, echo 1: repeat at 330 ms at 0.5 × the click; calibration with echo 1 unchanged (0.1 ms off).
+
 ## Timing formulas (context seconds)
 
 - `outLat = baseLatency + outputLatency + LIMITER_DELAY_SEC (0.006)` (missing → 0), read live on every tick.
@@ -90,7 +105,8 @@ Undo granularity: a lane created for a take belongs to that take (one undo remov
 - Note: `dev/engine/check.ts` covers all of the above against a fake analysis; e2e should repeat a–f with the real dsp + instruments.
 
 ## Check (`node dev/engine/check.ts`) — what it covers, measured values
-Chromium 35 checks (incl. k1 real getUserMedia via `--use-file-for-fake-audio-capture`), WebKit 34; ~70 s per engine. Real instrument voices.
+Chromium 42 checks (incl. k1 real getUserMedia via `--use-file-for-fake-audio-capture`), WebKit 41; ~90 s per engine. Real instrument voices.
+v1–v7: vocal takes, seams, audio persistence, echo (see MVP+ above).
 r1–r4 use the REAL analysis (`?analysis=real`, src/analysis) on dsp's fixtures, injected with inLat 20 ms: r1 first take from `sing-cmaj`
 (C4 starts in the pre-roll → clipped to pos 0; stop inside F4 → force-closed): 8/8 notes, worst 12.9 ms, midi exact, last end exactly L ·
 r2 overdub window inside `sing-cmaj` (G4 starts 0.31 s before ts → clipped, dur 0.366/0.365; A4 open at the end → closed, 0.523/0.524):
@@ -107,6 +123,11 @@ Headless numbers: Chromium outLat 43.3 ms (base 5.3 + output 32 + limiter 6), We
 WebKit quirks seen: `currentTime` is still 0 right after boot (first take at t0 = 0 has no pre-roll) and advances in coarse steps.
 
 ## Known risks
+- **Vocal first replay** misses ≈ 0.13 s after an overdub window (commit latency); a provisional commit before the window end could
+  close it, not built. **Beep exclusion** zeroes 80 ms of a vocal take right after the record tap (on speakers the mic hears the beep).
+- **Vocal memory**: 60 s take = 2.9 M samples ≈ 11.5 MB Float32 in the cache + 5.8 MB Int16 in IndexedDB per track; undo snapshots keep
+  their audio alive until trimmed.
+- The e2e `fake-mic` spec needs `public/vosk/` (gitignored model) in the checkout; without it vosk logs "Unrecognized archive format".
 - **Worklet `currentFrame` glitches** (Chromium under load, fixed by `FrameClock`): if a browser ever skips render quanta for the node,
   the counter re-syncs only on jumps ≥ 256 frames; a persistent 128-frame offset would go unnoticed (2.7 ms). `mic.stats()` shows gaps.
 - **Main-thread stalls > ~100 ms** (GC, heavy UI) make events late: the late rules keep it musical (catch-up/drop), but drums can be dropped. Lookahead 0.12 s is the trade-off against on/off latency.
