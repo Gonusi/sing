@@ -182,15 +182,15 @@ test('state table walk', async ({ page }) => {
     expect(m.matched).toBe(m.expected);
   });
 
-  await test.step('violin off (voice) silences every violin lane; violin on brings them back', async () => {
+  await test.step('mute violin (voice) silences every violin lane; violin back brings them back', async () => {
     const r = await page.evaluate(async () => {
       const s = window.__sing!;
       const tOff = s.now();
-      const off = s.voice.inject('violin off');
+      const off = s.voice.inject('mute violin');
       const offSession = s.session();
       await s.waitUntil(tOff + 2.5);
       const tOn = s.now();
-      const on = s.voice.inject('violin on');
+      const on = s.voice.inject('violin back');
       await s.waitUntil(tOn + 2 * s.session().loopLength!);
       return { tOff, tOn, off, on, offOn: offSession.tracks.map((t) => t.on), onOn: s.session().tracks.map((t) => t.on) };
     });

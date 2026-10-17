@@ -12,12 +12,12 @@
 - [x] Wave 2 — tester: test hooks + e2e suite — merged; 33 pass on Chromium+WebKit, 5.2 min
 - [x] Engine follow-up: real analysis in takes, drum close(), window clipping, master limiter — merged, 69/69 checks
 - [x] Wave 3 — fix rounds: e2e 33/34 on Chromium + WebKit (remaining: voice on/off swaps in noise → voice agent)
-- [ ] Voice: on/off confusions in noise (running)
+- [x] Voice: on/off swaps fixed by phrasing `mute X` / `X back` (100% noisy toggles; e2e voice 45/45)
 - [ ] MVP+ (owner, 2026-10-17): vocal track (record your real voice, looped) + global echo slider — design below
   - [ ] contract (coordinator): 'vocals' kind, Take.audio/peaks, Session.fx.echo, View.livePeaks, Controller.setEcho
   - [ ] engine: vocal take recording/rotation/storage (IDB, 16-bit), vocal playback voice with seam crossfade, echo/reverb send bus, calibration bypasses FX
   - [ ] shell: vocals lane (waveform, green, letter M), echo slider in the top bar, ＋ sheet 5th button
-  - [ ] voice: grammar `create vocal|vocals track`, `vocal|vocals on|off`; fixtures; gate
+  - [ ] voice: grammar `create vocal|vocals track`, `mute vocal|vocals`, `vocal|vocals back`; fixtures; gate
   - [ ] tester: e2e for vocal takes (first take + overdub, output correlates with input, seam) and echo (wet energy follows slider)
 - [ ] Final report for the owner (push + Pages steps, iPhone checklist, spec deviations)
 - [ ] Owner: "Push please" → push `main`, enable Pages, deploy, iPhone session 1
@@ -72,7 +72,7 @@
 - The lane strip and buttons are outside the gesture layer.
 
 **Commands:**
-- `create drum|drums|violin|synth|bass track` · `record` · `stop` · `play` · `undo` · `<instrument> on` / `<instrument> off`.
+- `create drum|drums|violin|synth|bass track` · `record` · `stop` · `play` · `undo` · `mute <instrument>` / `<instrument> back` (measured best of 5 phrasings; on/off swapped in noise).
 - Matching is exact in code. Commands fire only on vosk's FINAL result (at release + a 100 ms tail, or mid-hold when vosk closes the utterance itself). Early firing on partials was dropped: it caused false commands (measured by the voice agent, see notes/voice.md).
 - Fresh recognizer per hold. `dev/check-grammar.ts` checks every word against the model's `words.txt`.
 - A command is read against the **state at `tDown`**.
@@ -258,7 +258,7 @@ Gate costs: Node DSP checks, `tsc` and the build are nearly free → always. E2E
 - No low-voice gate: hold-to-talk instead.
 - Blips instead of spoken replies.
 - Headphones are required for overdubs.
-- `<instrument> on/off` instead of mute/unmute.
+- `mute <instrument>` / `<instrument> back` instead of mute/unmute ("unmute" is not in the model).
 
 ## Risks
 1. iOS EC/earpiece bug (326286).

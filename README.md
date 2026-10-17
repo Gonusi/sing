@@ -3,7 +3,7 @@
 Sing a melody, hear it back on an instrument, and loop it. Beatbox for drums. A PWA for iPhone, Android and desktop, served at https://kasparasanusauskas.com/sing/.
 
 - **Use:** tap to record; tap again to stop, and the loop starts. Hold anywhere and say a command, then release.
-- **Commands:** `create drum|violin|synth|bass track`, `record`, `stop`, `play`, `undo`, `<instrument> on|off`.
+- **Commands:** `create drum|violin|synth|bass track`, `record`, `stop`, `play`, `undo`, `mute <instrument>`, `<instrument> back`.
 - **＋** adds a track without voice. **⋯** opens settings: echo cancellation, latency calibration, audio probe, export the last take as WAV, clear the session.
 - Wear wired headphones when overdubbing.
 
