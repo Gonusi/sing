@@ -9,7 +9,7 @@
 - [x] Wave 1 — shell: UI (start, input, lanes, status, sheets), icons, deploy workflow — merged, screenshots reviewed
 - [x] Wave 1 merged, `tsc` + build green
 - [ ] Wave 2 — voice: fetch-model, check-grammar, recognizer, hold-to-talk (running)
-- [ ] Wave 2 — tester: test hooks + e2e suite (running)
+- [x] Wave 2 — tester: test hooks + e2e suite — merged; 33 pass on Chromium+WebKit, 5.2 min
 - [x] Engine follow-up: real analysis in takes, drum close(), window clipping, master limiter — merged, 69/69 checks
 - [ ] Wave 3 — fix rounds until the e2e suite passes on Chromium (+ WebKit non-voice)
 - [ ] Final report for the owner (push + Pages steps, iPhone checklist, spec deviations)
