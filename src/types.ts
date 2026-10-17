@@ -7,7 +7,8 @@
 
 export type Sec = number;
 
-export const INSTRUMENTS = ['drums', 'violin', 'synth', 'bass'] as const;
+/** 'vocals' = the singer's raw recorded voice (audio take), the others are played from notes/hits */
+export const INSTRUMENTS = ['drums', 'violin', 'synth', 'bass', 'vocals'] as const;
 export type InstrumentKind = (typeof INSTRUMENTS)[number];
 
 export const DRUM_KINDS = ['kick', 'snare', 'hat'] as const;
@@ -35,11 +36,22 @@ export interface DrumHit {
   vel: number;
 }
 
-/** One recorded take. Drum tracks use `hits`, all other instruments use `notes`. */
+/** Raw audio of a vocal take, stored apart (IndexedDB key `key`, Int16 PCM); sample 0 = loop pos 0. */
+export interface TakeAudio {
+  key: string;
+  sampleRate: number;
+  /** samples (L plus the seam tail) */
+  length: number;
+}
+
+/** One recorded take. Drum tracks use `hits`, vocal tracks use `audio` + `peaks`, all others use `notes`. */
 export interface Take {
   id: string;
   notes: Note[];
   hits: DrumHit[];
+  audio?: TakeAudio;
+  /** ~256 peak levels 0..1 across the loop, for drawing a vocal take */
+  peaks?: number[];
 }
 
 export interface Track {
@@ -55,6 +67,8 @@ export interface Session {
   loopLength: Sec | null;
   tracks: Track[];
   selectedId: string | null;
+  /** song-wide effects; missing in sessions saved before MVP+ (treat as defaults) */
+  fx?: { echo: number };
 }
 
 /** Per device, stored apart from the session (undo never touches it). */
@@ -206,6 +220,8 @@ export interface View {
   liveHits: DrumHit[];
   /** note currently being sung (pos + fractional midi) */
   openNote: { pos: Sec; midi: number } | null;
+  /** vocal take in progress: peak levels 0..1 per bin across the loop (same bins as Take.peaks), null otherwise */
+  livePeaks: number[] | null;
   /** loop position heard now (null when no loop is playing) */
   loopPos: Sec | null;
   /** seconds into the first take while recordingFirst; seconds left in the overdub window while overdubbing */
@@ -233,6 +249,8 @@ export interface Controller {
   command(c: Command, tDown: Sec): boolean;
   select(trackId: string): void;
   toggleTrack(trackId: string): void;
+  /** global echo/space amount 0..1 (saved in Session.fx, not an undo point) */
+  setEcho(amount: number): void;
   setDevice(patch: Partial<DeviceSettings>): Promise<void>;
   clearSession(): Promise<void>;
   /** WAV of the raw mic audio of the last take (for exporting real fixtures) */

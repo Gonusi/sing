@@ -56,7 +56,7 @@ const PLAYHEAD_W = 1.5;
 const PLAYHEAD_ALPHA = 0.7;
 const DASH: [number, number] = [4, 6];
 
-const LETTERS: Record<InstrumentKind, string> = { drums: 'D', violin: 'V', synth: 'S', bass: 'B' };
+const LETTERS: Record<InstrumentKind, string> = { drums: 'D', violin: 'V', synth: 'S', bass: 'B', vocals: 'M' };
 const KINDS: InstrumentKind[] = ['drums', 'violin', 'synth', 'bass'];
 
 // ---------- palette (from CSS) ----------

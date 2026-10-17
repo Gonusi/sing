@@ -68,6 +68,7 @@ function baseView(): UiView {
   return {
     state: 'idle',
     session: { v: 1, loopLength: null, tracks: [], selectedId: null },
+    livePeaks: null,
     recordingTrackId: null,
     liveNotes: [],
     liveHits: [],

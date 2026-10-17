@@ -11,6 +11,7 @@ export const SWEET_RANGES: Record<InstrumentKind, { lo: number; hi: number } | n
   bass: BASS_SWEET_RANGE,
   synth: null,
   drums: null,
+  vocals: null,
 };
 const MAX_OCTAVE_SHIFT = 6;
 

@@ -539,6 +539,9 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       return device;
     },
     scheduler,
+    setEcho() {
+      // MVP+ placeholder (engine)
+    },
     view(): View {
       const now = ctx.currentTime;
       const t = take;
@@ -548,6 +551,7 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
         session: store.current,
         recordingTrackId: t?.trackId ?? null,
         liveNotes: t ? t.rec.liveNotes() : [],
+        livePeaks: null, // MVP+ placeholder (engine)
         liveHits: t ? t.rec.liveHits() : [],
         openNote: t ? t.rec.openNote() : null,
         loopPos: scheduler.pos(now),

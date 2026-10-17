@@ -28,5 +28,8 @@ export function createVoice(kind: InstrumentKind, ctx: BaseAudioContext): Voice 
       return createSynthVoice(ctx);
     case 'drums':
       return createDrumVoice(ctx);
+    case 'vocals':
+      // raw audio playback is the engine's (src/audio), it owns the recorded buffers
+      throw new Error('createVoice: vocals voices are created by the engine');
   }
 }

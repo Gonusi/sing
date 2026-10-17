@@ -20,7 +20,7 @@ export interface SheetActions {
   credits: string;
 }
 
-const LETTERS: Record<InstrumentKind, string> = { drums: 'D', violin: 'V', synth: 'S', bass: 'B' };
+const LETTERS: Record<InstrumentKind, string> = { drums: 'D', violin: 'V', synth: 'S', bass: 'B', vocals: 'M' };
 const EXPORT_EMPTY_MS = 1500;
 const CLEAR_ARM_MS = 3000;
 const PULSE_MS = 300;
