@@ -147,9 +147,16 @@ function fakeSegmenter(): NoteSegmenter {
 function fakeOnsets(): OnsetDetector {
   let quietFrames = Infinity;
   let pending: { frame: number; crossings: number; samples: number; peak: number; prev: number } | null = null;
+  let rate = 48000;
+  const classify = (p: NonNullable<typeof pending>): RawHit => {
+    const hz = p.samples ? (p.crossings * rate) / p.samples : 0;
+    const kind: DrumKind = hz < 300 ? 'kick' : hz > 4000 ? 'hat' : 'snare';
+    return { t: p.frame / rate, kind, vel: Math.min(1, p.peak * 2) };
+  };
   return {
     push(block: MicBlock, sampleRate: number): RawHit[] {
       const out: RawHit[] = [];
+      rate = sampleRate;
       const classifyFrames = Math.round(HIT_CLASSIFY_SEC * sampleRate);
       for (let i = 0; i < block.samples.length; i++) {
         const x = block.samples[i];
@@ -160,9 +167,7 @@ function fakeOnsets(): OnsetDetector {
           pending.samples++;
           pending.peak = Math.max(pending.peak, Math.abs(x));
           if (f - pending.frame >= classifyFrames) {
-            const hz = (pending.crossings * sampleRate) / pending.samples;
-            const kind: DrumKind = hz < 300 ? 'kick' : hz > 4000 ? 'hat' : 'snare';
-            out.push({ t: pending.frame / sampleRate, kind, vel: Math.min(1, pending.peak * 2) });
+            out.push(classify(pending));
             pending = null;
           }
         }
@@ -175,9 +180,12 @@ function fakeOnsets(): OnsetDetector {
       }
       return out;
     },
-    close(): RawHit[] {
+    /** a pending onset before `at` is classified on what it has (contract: OnsetDetector.close) */
+    close(at: Sec): RawHit[] {
+      const p = pending;
       pending = null;
-      return [];
+      quietFrames = Infinity;
+      return p && p.frame / rate < at ? [classify(p)] : [];
     },
     reset() {
       quietFrames = Infinity;

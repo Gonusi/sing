@@ -2,7 +2,7 @@
 // and exposes window.__eng for dev/engine/check.ts. Times are context seconds; "stamp" = mic stamp time.
 import { del, set } from 'idb-keyval';
 import type { Command, Gesture, LogEvent, Sec, Session, Voice } from '../../src/types.ts';
-import { createAudioEngine, type AudioEngine } from '../../src/audio/context.ts';
+import { LIMITER_DELAY_SEC, MASTER_GAIN, createAudioEngine, type AudioEngine } from '../../src/audio/context.ts';
 import { createMic, type Mic } from '../../src/audio/mic.ts';
 import { calibrate, playClick, type CalibrationResult } from '../../src/audio/latency.ts';
 import { createCapture } from '../../src/audio/capture.ts';
@@ -32,7 +32,7 @@ export interface Eng {
   burst(at: Sec, hz: number, dur?: Sec): void;
   gesture(g: Gesture): void;
   command(c: Command, tDown?: Sec): boolean;
-  calibrateLoopback(delaySec: Sec): Promise<{ result: CalibrationResult; outLat: Sec }>;
+  calibrateLoopback(delaySec: Sec): Promise<{ result: CalibrationResult; outLat: Sec; limiterDelay: Sec }>;
   writeSession(s: Session | null): Promise<void>;
   clearStore(): Promise<void>;
   /** scheduler alone, fake voice, any loop length: counts plays vs. the expected occurrences */
@@ -41,6 +41,14 @@ export interface Eng {
   probeLevel(): Promise<{ level: number; expected: number }>;
   /** capture master while a click plays at a known time: onset frame vs. expected */
   captureClick(): Promise<{ onsetFrame: number; expectedFrame: number; frames: number }>;
+  /** a click through master → limiter: onset frames on both sides (the limiter's look-ahead delay) */
+  limiterDelay(): Promise<{ masterFrame: number; limiterFrame: number; sampleRate: number }>;
+  /** ?analysis=real: the controller uses src/analysis (dsp), not dev/engine/fake-analysis.ts */
+  realAnalysis: boolean;
+  /** fetch + decode dev/fixtures/out/<name>.wav and its ground-truth .json */
+  loadFixture(name: string): Promise<FixtureTruth>;
+  /** inject fixture seconds [from, to) so that fixture time `from` has mic stamp `at` (5 ms fade at the cut) */
+  injectFixture(name: string, from: Sec, to: Sec, at: Sec): void;
   /** onChange calls since boot */
   changes: number;
   /** ?real: the mic is getUserMedia (Chromium fake-capture WAV), not the test mic */
@@ -51,6 +59,13 @@ export interface Eng {
   suspendBriefly(): Promise<void>;
 }
 
+export interface FixtureTruth {
+  name: string;
+  durationSec: number;
+  notes: { t: Sec; dur: Sec; midi: number }[];
+  hits: { t: Sec; kind: 'kick' | 'snare' | 'hat' }[];
+}
+
 declare global {
   interface Window {
     __eng: Eng;
@@ -58,7 +73,9 @@ declare global {
 }
 
 const REAL_MIC = new URLSearchParams(location.search).has('real');
-const eng = { booted: false, error: null, events: [], changes: 0, realMic: REAL_MIC } as unknown as Eng;
+const REAL_ANALYSIS = new URLSearchParams(location.search).get('analysis') === 'real';
+const eng = { booted: false, error: null, events: [], changes: 0, realMic: REAL_MIC, realAnalysis: REAL_ANALYSIS } as unknown as Eng;
+const fixtures = new Map<string, AudioBuffer>();
 window.__eng = eng;
 const out = document.getElementById('out')!;
 const btn = document.getElementById('start') as HTMLButtonElement;
@@ -78,7 +95,7 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
   const mic = await createMic(engine, { test: !REAL_MIC, ec: false });
   const device = await loadDevice();
   await preloadInstruments(ctx);
-  const c = await createController({ engine, mic, device, test: true, analysis: fakeAnalysis() });
+  const c = await createController({ engine, mic, device, test: true, analysis: REAL_ANALYSIS ? undefined : fakeAnalysis() });
   eng.events.push(...c.logs());
   c.onLog((e) => eng.events.push(e));
   c.onChange(() => void eng.changes++);
@@ -104,7 +121,7 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
       const undo = mic.loopback(delaySec);
       const outLat = engine.outLat();
       try {
-        return { result: await calibrate(engine, mic, {}), outLat };
+        return { result: await calibrate(engine, mic, {}), outLat, limiterDelay: LIMITER_DELAY_SEC };
       } finally {
         undo();
       }
@@ -125,7 +142,7 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
       const level = p.level();
       p.stop();
       undo();
-      return { level, expected: 10 ** (-24 / 20) / Math.SQRT2 };
+      return { level, expected: (MASTER_GAIN * 10 ** (-24 / 20)) / Math.SQRT2 };
     },
     ringRms(sec: Sec) {
       const r = mic.read(mic.latest() - sec, mic.latest());
@@ -139,6 +156,37 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
         const poll = () => (ctx.state === 'running' ? resolve() : setTimeout(poll, 5));
         poll();
       });
+    },
+    async loadFixture(name: string) {
+      // (not new URL(`…${name}`, import.meta.url): Vite rewrites that pattern into a glob import)
+      const base = `${import.meta.env.BASE_URL}dev/fixtures/out/${name}`;
+      const [wav, truth] = await Promise.all([
+        fetch(`${base}.wav`).then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(`${name}.wav: ${r.status} (run node dev/make-fixtures.ts)`)))),
+        fetch(`${base}.json`).then((r) => r.json() as Promise<FixtureTruth>),
+      ]);
+      fixtures.set(name, await ctx.decodeAudioData(wav));
+      return truth;
+    },
+    injectFixture(name: string, from: Sec, to: Sec, at: Sec) {
+      const src = fixtures.get(name);
+      if (!src) throw new Error(`fixture ${name} not loaded`);
+      mic.inject(sliceBuffer(ctx, src, from, to), at);
+    },
+    async limiterDelay() {
+      const a = createCapture(engine);
+      const b = createCapture(engine);
+      a.start(engine.master);
+      b.start(engine.limiter);
+      const at = ctx.currentTime + 0.2;
+      playClick(ctx, engine.master, at);
+      await eng.sleep(0.4);
+      const [ra, rb] = await Promise.all([a.stop(), b.stop()]);
+      const onset = (r: { frame: number; pcm: Float32Array }) => {
+        const from = Math.max(0, Math.round((at - 0.05) * ctx.sampleRate) - r.frame);
+        for (let i = from; i < r.pcm.length; i++) if (Math.abs(r.pcm[i]) > 0.01) return r.frame + i;
+        return -1;
+      };
+      return { masterFrame: onset(ra), limiterFrame: onset(rb), sampleRate: ctx.sampleRate };
     },
     async captureClick() {
       const cap = createCapture(engine);
@@ -156,6 +204,17 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
   });
   eng.booted = true;
   out.textContent = `booted: ${ctx.sampleRate} Hz, outLat ${(engine.outLat() * 1000).toFixed(1)} ms`;
+}
+
+function sliceBuffer(ctx: BaseAudioContext, src: AudioBuffer, from: Sec, to: Sec): AudioBuffer {
+  const a = Math.max(0, Math.round(from * src.sampleRate));
+  const b = Math.min(src.length, Math.round(to * src.sampleRate));
+  const out = ctx.createBuffer(1, b - a, src.sampleRate);
+  const x = out.getChannelData(0);
+  x.set(src.getChannelData(0).subarray(a, b));
+  const fade = Math.round(0.005 * src.sampleRate);
+  for (let i = 0; i < fade && i < x.length; i++) x[x.length - 1 - i] *= i / fade;
+  return out;
 }
 
 function sineBuffer(ctx: BaseAudioContext, hz: number, dur: Sec, amp: number): AudioBuffer {

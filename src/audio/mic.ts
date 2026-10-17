@@ -14,10 +14,12 @@ export interface Mic extends MicFeed {
   reportedLatency(): Sec | null;
   dispose(): void;
   // ---- engine extensions ----
-  /** test only: route engine.master → DelayNode(delaySec) → mic input (simulated speaker→mic). Returns undo. */
+  /** test only: route the speaker feed (engine.limiter) → DelayNode(delaySec) → mic input (speaker→mic). Returns undo. */
   loopback(delaySec: Sec): () => void;
   /** context time just after the newest sample received (0 before the first block) */
   latest(): Sec;
+  /** diagnostics: blocks received, discontinuities (block.frame ≠ previous end) and frames missing in them */
+  stats(): { blocks: number; gaps: number; gapFrames: number; recent: [number, number, number][] };
 }
 
 export interface MicOptions {
@@ -40,8 +42,17 @@ export async function createMic(engine: AudioEngine, opts: MicOptions): Promise<
   const subs = new Set<(b: MicBlock) => void>();
   const tap = new AudioWorkletNode(ctx, 'mic-tap', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
   tap.connect(engine.sink);
+  const stats = { blocks: 0, gaps: 0, gapFrames: 0, recent: [] as [number, number, number][] };
   tap.port.onmessage = (e: MessageEvent<MicBlock>) => {
     const block = e.data;
+    const expected = ring.endFrame();
+    if (stats.blocks > 0 && block.frame !== expected) {
+      stats.gaps++;
+      stats.gapFrames += block.frame - expected;
+      stats.recent.push([block.frame, block.frame - expected, block.samples.length]);
+      if (stats.recent.length > 8) stats.recent.shift();
+    }
+    stats.blocks++;
     ring.write(block.frame, block.samples);
     for (const cb of [...subs]) {
       try {
@@ -100,14 +111,15 @@ export async function createMic(engine: AudioEngine, opts: MicOptions): Promise<
     loopback(delaySec) {
       const d = ctx.createDelay(Math.max(LOOPBACK_MAX_DELAY_SEC, delaySec + 0.1));
       d.delayTime.setValueAtTime(delaySec, ctx.currentTime);
-      engine.master.connect(d);
+      engine.limiter.connect(d);
       d.connect(tap);
       return () => {
-        engine.master.disconnect(d);
+        engine.limiter.disconnect(d);
         d.disconnect();
       };
     },
     latest: () => ring.endFrame() / sampleRate,
+    stats: () => ({ ...stats }),
   };
 }
 
