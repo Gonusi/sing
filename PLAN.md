@@ -269,7 +269,7 @@ Gate costs: Node DSP checks, `tsc` and the build are nearly free → always. E2E
 4. Headless timing jitter in e2e → assertions use the scheduler log, and audio re-detection gets a 40 ms tolerance.
 
 ## Known issues
-- WebKit only, ~1 run in 4: a vocal take or a stopped→play origin lands one render quantum (128 frames = 2.7 ms) late (e2e vocals.spec:63 lag, states.spec origin check). Inaudible; engine to investigate.
+- (fixed locally 2026-10-17, not yet deployed) WebKit advances currentTime mid-task: vocal starts lost a render quantum (2.7 ms late) → 10 ms start margin; the states.spec failure was a two-clock-reads test artefact.
 
 ## Ideas (later)
 - Violin: centre the 50 ms legato glide on the note boundary (start ~25 ms early) so glided notes land tighter (e2e re-detects them up to ~42 ms after the note start).
