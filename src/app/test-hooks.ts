@@ -154,6 +154,8 @@ export interface SingE2eApi extends SingTestApi {
   loopback(delaySec: Sec): void;
   loopbackOff(): void;
   calibrate(): Promise<CalibrationRun>;
+  /** controller.clearSession (stops, discards, removes stored audio) */
+  clearSession(): Promise<void>;
   /** controller.setEcho (global echo 0..1, Session.fx.echo) */
   setEcho(amount: number): void;
   flush(): Promise<void>;
@@ -452,6 +454,7 @@ export function installTestHooks(deps: TestHookDeps): void {
     },
     flush: () => controller.flush(),
     setEcho: (a) => controller.setEcho(a),
+    clearSession: () => controller.clearSession(),
     voice: {
       inject(text, tDown) {
         const t = tDown ?? openHold ?? ctx.currentTime;

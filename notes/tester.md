@@ -32,9 +32,10 @@ Last full run: 2026-10-17, branch `tester2` from main 0f5f3c9 (MVP+: vocal track
 | voice (logic) | pass (2) | pass (2) | hold + inject; non-grammar → nothing; every phrase |
 | voice-real | pass (4.1 min) | n/a | real vosk on generated speech fixtures (Samantha clean, Daniel noisy, negatives) |
 | fake-mic | pass | n/a | real getUserMedia → 9 notes in order |
-| bugs | 2 regressions pass, 2 expected failures | 3 pass, 1 expected failure | see below |
+| bugs | 2 regressions pass, 2 expected failures | 2 regressions pass, 2 expected failures | see below |
 
-Totals: full run 48 passed + 1 skipped (voice-real without fixtures) + 3 expected failures, 7.5 min; voice-real alone
+Totals: full run 48 passed + 1 skipped (voice-real without fixtures) + 3 expected failures, 7.5 min (the seam repro
+was then made multi-take and is an expected failure on both engines: 4 expected failures in total); voice-real alone
 4.1 min (passes). Screenshots: `e2e/out/<project>-{empty,plus,plus-five,settings,command,recording,first-take-playing,
 four-stopped,four-playing,four-bass-off,vocals-recording,vocals-playing}.png`, absolute folder
 `/Users/kasparasanusauskas/Projects/personal/sing-worktrees/tester2/e2e/out/` (checked by eye: all fine).
@@ -42,10 +43,11 @@ four-stopped,four-playing,four-bass-off,vocals-recording,vocals-playing}.png`, a
 ## Product bugs
 
 Open (repro in `e2e/bugs.spec.ts`, `test.fail()`):
-1. **engine, Chromium only: one-sample clicks at vocal loop seams.** A vocals first take with the seam inside a
-   sustained note (sing-cmaj, L 4.29 s): at cycle starts 2 and 3 exactly one output sample is doubled (−0.338 →
-   −0.693 → −0.365: old tail + new cycle both at full level), one-sample spike 0.329 vs 0.018 steady; cycles 4, 5 clean;
-   WebKit clean. All cycle starts were on integer frames. Suspect `src/audio/vocal-voice.ts` `play()`: the new
+1. **engine, both engines, intermittent: one-sample clicks at vocal loop seams.** A vocals first take with the seam
+   inside a sustained note (sing-cmaj, L 4.29 s): at cycle starts 2 and/or 3 exactly one output sample is doubled
+   (−0.338 → −0.693 → −0.365: old tail + new cycle both at full level), one-sample spike 0.33–0.35 vs 0.018 steady;
+   cycles 4, 5 always clean; in ~3 of 4 takes on Chromium and WebKit. All cycle starts were on integer frames. The
+   repro tries up to 3 fresh takes (≈ 1.5% chance of an "unexpected pass" while the bug exists). Suspect `src/audio/vocal-voice.ts` `play()`: the new
    GainNode keeps its default gain 1 until `setValueAtTime(…, when)`, so a sample the source renders at its start
    frame before the automation applies passes at full level. Fix idea: `g.gain.value = 0` (or
    `setValueAtTime(0, ctx.currentTime)`) before the start automation; check with this repro.
