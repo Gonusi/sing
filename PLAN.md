@@ -21,7 +21,8 @@
   - [x] tester: e2e for vocal takes (first take + overdub, output correlates with input, seam) and echo (wet energy follows slider)
 - [x] Final report for the owner (README: push + Pages steps, iPhone checklist; spec deviations in PLAN)
 - [x] Full e2e: 48/50 on Chromium + WebKit (2 = the WebKit 2.7 ms quantum issue, intermittent)
-- [ ] Owner: "Push please" → push `main`, enable Pages, deploy, iPhone session 1
+- [x] Pushed `main` to Gonusi/sing, Pages enabled, deployed to https://kasparasanusauskas.com/sing/ (2026-10-17); live smoke OK on Chromium + WebKit
+- [ ] Owner: iPhone session 1 (README checklist)
 
 
 ## Context
