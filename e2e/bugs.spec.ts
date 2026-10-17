@@ -21,7 +21,6 @@ test('BUG engine: undo right after record-from-stopped pops the first take inste
 });
 
 test('BUG shell: a press right after closing a sheet is swallowed by the closing sheet layer', async ({ page }) => {
-  test.fail(true, 'src/ui/style.css .sheet-layer: visibility stays visible for --sheet-ms after close and catches pointer events (no pointer-events: none)');
   await boot(page);
   await page.locator('[data-action="settings"]').click();
   await page.waitForTimeout(400);

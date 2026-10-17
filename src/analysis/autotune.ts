@@ -4,7 +4,7 @@ import type { InstrumentKind } from '../types.ts';
 // ---------- constants ----------
 /** inclusive MIDI range each instrument sounds best in; the take's median note is moved into it by octaves */
 export const VIOLIN_SWEET_RANGE = { lo: 69, hi: 76 } as const; // A4–E5
-export const BASS_SWEET_RANGE = { lo: 40, hi: 45 } as const; // E2–A2
+export const BASS_SWEET_RANGE = { lo: 45, hi: 52 } as const; // A2–E3: low enough to be bass, high enough for phone speakers
 /** null = no register fit (synth plays as sung, drums have no pitch) */
 export const SWEET_RANGES: Record<InstrumentKind, { lo: number; hi: number } | null> = {
   violin: VIOLIN_SWEET_RANGE,

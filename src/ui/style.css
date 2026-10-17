@@ -235,9 +235,10 @@ button:focus-visible { outline: 2px solid var(--cmd); outline-offset: 2px; }
   inset: 0;
   z-index: 40;
   visibility: hidden;
+  pointer-events: none; /* a closing (fading) sheet must not swallow presses */
   transition: visibility 0s linear var(--sheet-ms);
 }
-.sheet-layer.open { visibility: visible; transition-delay: 0s; }
+.sheet-layer.open { visibility: visible; pointer-events: auto; transition-delay: 0s; }
 .sheet-backdrop { position: absolute; inset: 0; background: #000; opacity: 0; transition: opacity var(--sheet-ms) ease; }
 .sheet-layer.open .sheet-backdrop { opacity: 0.5; }
 .sheet {
