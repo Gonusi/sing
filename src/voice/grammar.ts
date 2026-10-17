@@ -1,5 +1,8 @@
 // [voice] The command list, the phrase list fed to vosk, and exact parsing of recogniser text.
-// "unmute" is not in the vosk small-en model, so on/off is `<instrument> on|off`.
+// On/off of an instrument is `mute <instrument>` / `<instrument> back` ("unmute" is not in the vosk small-en model).
+// Not `<instrument> on|off`: those differ only in a weak final consonant and swapped in noise (91.7–95.8 % on noisy
+// TTS, e2e-shaped holds worst); mute/back scored 100 % in every hold condition and a habitual "violin off" mostly
+// does nothing instead of the opposite (dev/voice/compare-grammars.ts, notes/voice.md).
 // The vosk grammar is a loose bigram LM: it can emit word sequences that are not phrases (and "[unk]" for
 // other speech). Only parseCommand decides, and it is exact: one phrase, nothing else.
 import type { Command, InstrumentKind } from '../types.ts';
@@ -16,7 +19,7 @@ const SIMPLE: Record<string, Command> = {
 export const COMMAND_PHRASES: readonly string[] = [
   ...Object.keys(KIND_WORDS).map((w) => `create ${w} track`),
   ...Object.keys(SIMPLE),
-  ...Object.keys(KIND_WORDS).flatMap((w) => [`${w} on`, `${w} off`]),
+  ...Object.keys(KIND_WORDS).flatMap((w) => [`mute ${w}`, `${w} back`]),
 ];
 
 /** vosk's token for out-of-grammar speech */
@@ -41,8 +44,10 @@ export function parseCommand(text: string): Command | null {
   if (Object.hasOwn(SIMPLE, t)) return SIMPLE[t];
   const create = /^create (\w+) track$/.exec(t);
   if (create && Object.hasOwn(KIND_WORDS, create[1])) return { type: 'create', kind: KIND_WORDS[create[1]] };
-  const toggle = /^(\w+) (on|off)$/.exec(t);
-  if (toggle && Object.hasOwn(KIND_WORDS, toggle[1])) return { type: 'toggle', kind: KIND_WORDS[toggle[1]], on: toggle[2] === 'on' };
+  const mute = /^mute (\w+)$/.exec(t);
+  if (mute && Object.hasOwn(KIND_WORDS, mute[1])) return { type: 'toggle', kind: KIND_WORDS[mute[1]], on: false };
+  const back = /^(\w+) back$/.exec(t);
+  if (back && Object.hasOwn(KIND_WORDS, back[1])) return { type: 'toggle', kind: KIND_WORDS[back[1]], on: true };
   return null;
 }
 
@@ -80,7 +85,7 @@ export function earlyCommand(text: string, repeats: number, rule: EarlyRule = EA
 export function describeCommand(c: Command): string {
   switch (c.type) {
     case 'create': return `${c.kind} track`;
-    case 'toggle': return `${c.kind} ${c.on ? 'on' : 'off'}`;
+    case 'toggle': return c.on ? `${c.kind} back` : `mute ${c.kind}`;
     default: return c.type;
   }
 }

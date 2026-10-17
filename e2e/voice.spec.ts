@@ -43,8 +43,8 @@ test('every grammar phrase parses to its command and applies', async ({ page }) 
     const out: Record<string, boolean | null> = {};
     for (const k of ['drum', 'drums', 'violin', 'synth', 'bass']) out[`create ${k} track`] = s.voice.inject(`create ${k} track`);
     for (const k of ['drums', 'violin', 'synth', 'bass']) {
-      out[`${k} off`] = s.voice.inject(`${k} off`);
-      out[`${k} on`] = s.voice.inject(`${k} on`);
+      out[`mute ${k}`] = s.voice.inject(`mute ${k}`);
+      out[`${k} back`] = s.voice.inject(`${k} back`);
     }
     out['  Create   SYNTH track '] = s.voice.inject('  Create   SYNTH track ');
     out['undo'] = s.voice.inject('undo');

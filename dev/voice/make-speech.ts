@@ -171,12 +171,12 @@ function jobs(): Job[] {
 }
 
 /** write the clean and the noisy copy of one recording; returns both manifest rows */
-function writePair(base: Omit<SpeechFixture, 'file' | 'noisy' | 'durationSec'>, name: string, audio: Float32Array, seed: number): SpeechFixture[] {
+function writePair(base: Omit<SpeechFixture, 'file' | 'noisy' | 'durationSec'>, name: string, audio: Float32Array, seed: number, dir = SPEECH_DIR): SpeechFixture[] {
   const noisy = addInto(audio, pinkNoise(audio.length, NOISE_RMS_DBFS, seed));
   const rows: SpeechFixture[] = [];
   for (const [isNoisy, data] of [[false, audio], [true, noisy]] as const) {
     const file = `${name}${isNoisy ? '__noisy' : ''}.wav`;
-    writeWav(join(SPEECH_DIR, file), data, SAMPLE_RATE_HZ, 'pcm16');
+    writeWav(join(dir, file), data, SAMPLE_RATE_HZ, 'pcm16');
     rows.push({ ...base, file, noisy: isNoisy, durationSec: data.length / SAMPLE_RATE_HZ });
   }
   return rows;
@@ -226,6 +226,38 @@ export async function makeSpeech(): Promise<SpeechManifest> {
   rows.sort((p, q) => p.file.localeCompare(q.file));
   const manifest: SpeechManifest = { sampleRate: SAMPLE_RATE_HZ, leadSilenceSec: LEAD_SILENCE_SEC, fixtures: rows };
   writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 1) + '\n');
+  return manifest;
+}
+
+/** seed from a name (same fixture name → same noise) */
+const nameSeed = (name: string) => [...name].reduce((h, c) => (Math.imul(h, 31) + c.charCodeAt(0)) >>> 0, 0x9e37);
+
+/**
+ * Command-style fixtures for arbitrary phrases (grammar candidates, dev/voice/compare-grammars.ts): every phrase ×
+ * VOICES × RATES_WPM, clean + noisy, same levels and layout as makeSpeech; `command` is null (judged by `text`).
+ * Writes the WAVs and `<dir>/manifest.json`.
+ */
+export async function makePhraseFixtures(phrases: readonly string[], dir: string): Promise<SpeechManifest> {
+  mkdirSync(dir, { recursive: true });
+  const scratch = join(tmpdir(), `sing-speech-alt-${process.pid}`);
+  mkdirSync(scratch, { recursive: true });
+  const rows: SpeechFixture[] = [];
+  const todo: Job[] = [];
+  for (const text of phrases) for (const voice of VOICES) for (const rateWpm of RATES_WPM) todo.push({ text, voice, rateWpm, kind: 'command' });
+  try {
+    await pool(todo, TTS_CONCURRENCY, async (j) => {
+      const name = `alt-${slug(j.text)}__${j.voice}__${j.rateWpm}`;
+      const base = { text: j.text, command: null, kind: 'command' as const, voice: j.voice, rateWpm: j.rateWpm, speechStart: LEAD_SILENCE_SEC };
+      const utterance = await speak(j.text, j.voice, j.rateWpm, scratch);
+      const { audio, speechEnd } = layout(utterance);
+      rows.push(...writePair({ ...base, speechEnd }, name, audio, nameSeed(name), dir));
+    });
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+  rows.sort((p, q) => p.file.localeCompare(q.file));
+  const manifest: SpeechManifest = { sampleRate: SAMPLE_RATE_HZ, leadSilenceSec: LEAD_SILENCE_SEC, fixtures: rows };
+  writeFileSync(join(dir, 'manifest.json'), JSON.stringify(manifest, null, 1) + '\n');
   return manifest;
 }
 

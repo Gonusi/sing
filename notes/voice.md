@@ -1,7 +1,7 @@
 # Voice notes (area: voice)
 
 Owner files: `src/voice/{grammar,recognizer,load-progress}.ts`, `scripts/fetch-model.mjs`, `dev/check-grammar.ts`,
-`dev/voice/*` (`make-speech.ts`, `index.html`, `page.ts`, `check.ts`, `replay.ts`, `memory.ts`). Fixtures: `dev/fixtures/out/speech/`
+`dev/voice/*` (`make-speech.ts`, `index.html`, `page.ts`, `check.ts`, `replay.ts`, `memory.ts`, `compare-grammars.ts`). Fixtures: `dev/fixtures/out/speech/`
 (generated, gitignored). Results: `dev/voice/out/*.json` (gitignored).
 
 ## Progress (voice agent, branch `voice`)
@@ -16,6 +16,7 @@ Owner files: `src/voice/{grammar,recognizer,load-progress}.ts`, `scripts/fetch-m
 - [x] WebKit attempt — loads and recognises (same accuracy)
 - [x] memory: peak + steady (phys_footprint), cold/warm, both engines
 - [x] notes complete
+- [x] round 2: in-app on/off swaps explained; toggles are now `mute X` / `X back` (compare-grammars), gate + e2e green
 
 ## Commands
 
@@ -29,16 +30,18 @@ node dev/voice/check.ts --prod --filter …   # production build under /sing/ (+
 node dev/voice/check.ts --engine webkit     # WebKit (report only)
 node dev/voice/replay.ts [results.json]     # score EarlyRule candidates from recorded traces, no browser
 node dev/voice/memory.ts [webkit|chromium]  # phys_footprint (jetsam metric) + kernel peak, cold/warm load (macOS)
+node dev/voice/compare-grammars.ts          # toggle phrasings × hold conditions (~40 min; fixtures in speech-alt/)
 ```
 Flags of check.ts: `--fast`, `--engine webkit`, `--prod`, `--filter a,b`, `--pages n`, `--release sec`, `--speedup x`,
-`--tag name`, `--no-gate`. The model's IndexedDB cache key is the full URL **including the dev server's free port**,
+`--tag name`, `--bed dBFS` (noise bed under the hold, e2e uses −45), `--lead sec` (speech starts later in the hold),
+`--no-gate`. e2e-shaped hold: `--bed -45 --lead 0.4 --release 0.95`. The model's IndexedDB cache key is the full URL **including the dev server's free port**,
 so the check wipes its profile each run (unless `PORT` is pinned): page 1 = cold load, pages 2+ = warm.
 
 ## API as built
 
 | module | exports | notes |
 |---|---|---|
-| `voice/grammar.ts` | `COMMAND_PHRASES`, `UNK`, `GRAMMAR_JSON`, `normalizeText`, `displayText`, `parseCommand`, `canFireEarly`, `EarlyRule`, `EARLY_RULE`, `earlyCommand`, `describeCommand` | 19 phrases: `create drum|drums|violin|synth|bass track`, `record`, `stop`, `play`, `undo`, `<drum|drums|violin|synth|bass> on|off`. `GRAMMAR_JSON` = phrases + `"[unk]"`. `parseCommand` is exact (one phrase, nothing else; any `[unk]` → null; `Object.hasOwn`, so "constructor" can't match). `displayText` drops `[unk]` for the screen. `EARLY_RULE` = ∞ (off), see below. |
+| `voice/grammar.ts` | `COMMAND_PHRASES`, `UNK`, `GRAMMAR_JSON`, `normalizeText`, `displayText`, `parseCommand`, `canFireEarly`, `EarlyRule`, `EARLY_RULE`, `earlyCommand`, `describeCommand` | 19 phrases: `create drum|drums|violin|synth|bass track`, `record`, `stop`, `play`, `undo`, `mute <drum|drums|violin|synth|bass>` (→ `{toggle, on:false}`), `<drum|drums|violin|synth|bass> back` (→ `{toggle, on:true}`). `GRAMMAR_JSON` = phrases + `"[unk]"`. `parseCommand` is exact (one phrase, nothing else; any `[unk]` → null; `Object.hasOwn`, so "constructor" can't match). `displayText` drops `[unk]` for the screen. `EARLY_RULE` = ∞ (off), see below. |
 | `voice/recognizer.ts` | `createRecognizer({ctx, mic, modelUrl, onTrace?}): Recognizer`, `TraceEvent`, `CHUNK_SEC`, `RELEASE_TAIL_SEC` | Contract unchanged. `onTrace` (optional, dev only) gets every reply `{kind: partial|endpoint|final, text}`. |
 | `voice/load-progress.ts` | `constructWithProgress(modelUrl, construct)`, `PROGRESS_EVENT`, `ProgressDetail` | Real byte progress of the one model download (see Progress). |
 
@@ -102,6 +105,31 @@ releasing feeds that onset into the hold; untested (a reaction that fast is unli
 
 **3. Exact parsing, no variants.** vosk emitted no harmless variants worth accepting (the `[unk]`-padded texts are
 exactly the false-positive sources: "track [unk] record", "[unk] play violin"). `drum`/`drums` both stay phrases.
+
+**5. Toggles are `mute <instrument>` / `<instrument> back`, not `<instrument> on|off`** (round 2).
+The e2e (`voice-real.spec.ts`, full app) swapped 3/19 noisy on/off commands although my check had them right. Cause
+(reproduced with `--bed -45 --lead 0.4`): not the app path or the release — the in-app hold has a −45 dBFS noise bed
+and the speech starts ~0.4 s later in the hold; each change alone flips 2–6 Daniel/noisy toggles (the long release /
+endpoint path alone changes nothing). vosk's online CMVN / i-vector adaptation sees different lead-in audio, and on/off
+decisions — the words differ only in the weak final /n/ vs /f/ — sit on the boundary. So the phrasing was the bug.
+`compare-grammars.ts`: each candidate grammar in the real recogniser, 3 hold conditions (plain; e2e-shaped; lead
+0.2 s), scored by Command (drum = drums); "habit" = the other candidates' phrases spoken to this grammar:
+
+| toggle phrasing (on / off) | noisy toggles plain / e2e / lead | false positives | habit phrase → OPPOSITE action |
+|---|---|---|---|
+| X on / X off (old) | 95.8 / 91.7 / 95.0 % | 0/64 | — |
+| **X back / mute X** | **100 / 100 / 100 %** | 0/64 | **2–3 %** (mostly "synth off" → "synth back") |
+| X back / X off | 100 / 100 / 100 % | 0/64 | 27–29 % ("X on" → "X off") |
+| X on / mute X | 100 / 100 / 100 % | 0/64 | 32–33 % ("X off" → "X on") |
+| X back / X off \| mute X | 100 / 100 / 100 % | 0/64 | 27–28 % |
+| play X / mute X | (round 1: 100 % by command) | 0/64 | not run: `play` alone is transport |
+
+Clean toggles 100 % everywhere; other commands 99.5–100 % (unchanged). With mute/back a habitual "violin off" mostly
+does nothing (error blip → retry) instead of the opposite. After the switch (main fixtures regenerated): fast check
+clean 228/228, noisy 226/228 (99.1 %), 0/64 FP; e2e-shaped fast run same; real gate 228/228, 226/228, 0 FP,
+release→command 160/176 ms; `e2e/voice-real.spec.ts` 45/45 and `e2e/voice.spec.ts` pass. Remaining misses:
+"mute bass" → "mute synth" (Samantha 170 noisy), "mute bass" → nothing (Fred 220 noisy, e2e-shaped), "play" →
+nothing (Rishi 220 noisy).
 
 **4. One warm spare recogniser.** Creation has no ack, but the worker queue is FIFO, so correctness never depends on
 it; the spare only moves grammar compilation out of the hold.
@@ -183,6 +211,10 @@ uses the global `Worker` at construction; the worker uses the global `fetch`); p
 Chromium dev + prod build and WebKit.
 
 ## Contract / coordination notes
+0. **Phrases changed (round 2):** `mute <instrument>` / `<instrument> back`; `Command` shape unchanged. Still to update
+   outside my area: `e2e/states.spec.ts` lines 185–193 inject `'violin off'` / `'violin on'` (→ `'mute violin'` /
+   `'violin back'`), PLAN.md ("`violin off` switches all of them"), the shell's empty-state/help hint.
+   `describeCommand` toasts now say `mute violin` / `violin back`.
 1. **Behaviour change vs PLAN** ("fires early on a partial … on/off needs 2 identical partials"): partials don't fire
    (decision 1); a command fires at an endpoint during the hold, else ~155 ms after release. The `Recognizer`
    interface and its docs ("fires once per hold, as soon as a command is certain") are unchanged. Please update the
@@ -204,8 +236,8 @@ Chromium dev + prod build and WebKit.
 1. **First launch memory** (834 MB peak in desktop WebKit, ~1 s during unpack): watch for a page reload/kill during
    the first model load, especially on 4 GB-RAM iPhones; Settings → info shows `voice loading NN%` / `ready`.
 2. **Download on cellular**: 41 MB + 2.4 MB (gzip) lazy chunk; progress should move smoothly.
-3. **Real voices**: TTS is a proxy. Try every command at normal speed, fast, mumbled; release early and late. If
-   on/off confusions appear, consider other words (e.g. "violin mute"/"violin back") — "unmute" is not in the model.
+3. **Real voices**: TTS is a proxy. Try every command at normal speed, fast, mumbled; release early and late;
+   say "violin off" from habit (should mostly do nothing).
 4. **Loop playing through the speaker during a hold** (the mic hears the music): untested; the noise tests were pink
    noise only. With EC on (iOS voice processing) vs off.
 5. **Latency**: release→command on the phone (desktop 155 ms of which 100 ms is the fixed tail).
