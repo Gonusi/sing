@@ -18,8 +18,9 @@
   - [x] engine: vocal take recording/rotation/storage (IDB, 16-bit), vocal playback voice with seam crossfade, echo/reverb send bus, calibration bypasses FX
   - [x] shell: vocals lane (waveform, green, letter M), echo slider in the top bar, ＋ sheet 5th button
   - [x] voice: grammar `create vocal|vocals track`, `mute vocal|vocals`, `vocal|vocals back`; fixtures; gate — clean 300/300, noisy 99.7%, 0 FP
-  - [ ] tester: e2e for vocal takes (first take + overdub, output correlates with input, seam) and echo (wet energy follows slider)
-- [ ] Final report for the owner (push + Pages steps, iPhone checklist, spec deviations)
+  - [x] tester: e2e for vocal takes (first take + overdub, output correlates with input, seam) and echo (wet energy follows slider)
+- [x] Final report for the owner (README: push + Pages steps, iPhone checklist; spec deviations in PLAN)
+- [x] Full e2e: 48/50 on Chromium + WebKit (2 = the WebKit 2.7 ms quantum issue, intermittent)
 - [ ] Owner: "Push please" → push `main`, enable Pages, deploy, iPhone session 1
 
 
@@ -265,6 +266,9 @@ Gate costs: Node DSP checks, `tsc` and the build are nearly free → always. E2E
 2. vosk memory and load time on iPhone (hard ceiling: iPhone Safari kills a page above ~2 GB — owner observed; our estimate is 150–250 MB peak) → the lichess fork, then the ＋/strip buttons only (the app stays fully usable without voice).
 3. Drum thresholds on phone mics → retune on real takes.
 4. Headless timing jitter in e2e → assertions use the scheduler log, and audio re-detection gets a 40 ms tolerance.
+
+## Known issues
+- WebKit only, ~1 run in 4: a vocal take or a stopped→play origin lands one render quantum (128 frames = 2.7 ms) late (e2e vocals.spec:63 lag, states.spec origin check). Inaudible; engine to investigate.
 
 ## Ideas (later)
 - Violin: centre the 50 ms legato glide on the note boundary (start ~25 ms early) so glided notes land tighter (e2e re-detects them up to ~42 ms after the note start).
