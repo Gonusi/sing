@@ -14,10 +14,10 @@
 - [x] Wave 3 — fix rounds: e2e 33/34 on Chromium + WebKit (remaining: voice on/off swaps in noise → voice agent)
 - [x] Voice: on/off swaps fixed by phrasing `mute X` / `X back` (100% noisy toggles; e2e voice 45/45)
 - [ ] MVP+ (owner, 2026-10-17): vocal track (record your real voice, looped) + global echo slider — design below
-  - [ ] contract (coordinator): 'vocals' kind, Take.audio/peaks, Session.fx.echo, View.livePeaks, Controller.setEcho
+  - [x] contract (coordinator): 'vocals' kind, Take.audio/peaks, Session.fx.echo, View.livePeaks, Controller.setEcho
   - [ ] engine: vocal take recording/rotation/storage (IDB, 16-bit), vocal playback voice with seam crossfade, echo/reverb send bus, calibration bypasses FX
-  - [ ] shell: vocals lane (waveform, green, letter M), echo slider in the top bar, ＋ sheet 5th button
-  - [ ] voice: grammar `create vocal|vocals track`, `mute vocal|vocals`, `vocal|vocals back`; fixtures; gate
+  - [x] shell: vocals lane (waveform, green, letter M), echo slider in the top bar, ＋ sheet 5th button
+  - [x] voice: grammar `create vocal|vocals track`, `mute vocal|vocals`, `vocal|vocals back`; fixtures; gate — clean 300/300, noisy 99.7%, 0 FP
   - [ ] tester: e2e for vocal takes (first take + overdub, output correlates with input, seam) and echo (wet energy follows slider)
 - [ ] Final report for the owner (push + Pages steps, iPhone checklist, spec deviations)
 - [ ] Owner: "Push please" → push `main`, enable Pages, deploy, iPhone session 1
