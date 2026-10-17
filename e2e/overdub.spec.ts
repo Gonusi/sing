@@ -56,9 +56,10 @@ test('four lanes overdubbed: positions, silent until ts + L, exact looping, ever
     const s = window.__sing!;
     for (const id of ids) s.capture.begin(id, id);
     s.capture.begin('master', null);
+    s.capture.begin('out', '__out');
     await s.waitUntil(s.now() + sec);
     const sums: Record<string, Awaited<ReturnType<typeof s.capture.end>>> = {};
-    for (const k of [...ids, 'master']) sums[k] = await s.capture.end(k);
+    for (const k of [...ids, 'master', 'out']) sums[k] = await s.capture.end(k);
     s.command({ type: 'stop' });
     return sums;
   }, { ids, sec: LOOP_SEC });
@@ -106,14 +107,14 @@ test('four lanes overdubbed: positions, silent until ts + L, exact looping, ever
   expect(worstWhenError(log)).toBeLessThanOrEqual(0.002);
 
   // ---- audio ----
-  const real = Object.values(cap).some((c) => c.rms > 1e-4);
+  const real = ids.some((id) => cap[id].rms > 1e-4);
   if (!real) {
     test.info().annotations.push({ type: 'pending', description: 'voices silent (instruments not merged)' });
     return;
   }
-  console.log(`[overdub] master peak ${cap.master.peak.toFixed(3)} rms ${cap.master.rms.toFixed(4)}`);
-  // 4 lanes can exceed 0 dBFS (notes/instruments.md); the engine's master limiter is pending: report, don't fail yet
-  if (cap.master.peak > 1) test.info().annotations.push({ type: 'pending', description: `master clips: peak ${cap.master.peak.toFixed(3)} (engine limiter not merged)` });
+  console.log(`[overdub] master bus peak ${cap.master.peak.toFixed(3)} rms ${cap.master.rms.toFixed(4)}; limiter output (speakers) peak ${cap.out.peak.toFixed(3)} rms ${cap.out.rms.toFixed(4)}`);
+  // 4 lanes can exceed 0 dBFS (notes/instruments.md): the master has −6 dB headroom + a limiter at −3 dBFS
+  expect(cap.out.peak, 'speaker feed clips').toBeLessThan(1);
   for (const track of session.tracks) {
     const c = cap[track.id];
     const kind = track.kind === 'drums' ? 'drums' : 'notes';

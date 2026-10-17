@@ -46,6 +46,8 @@ const NOISE_AHEAD_SEC = 1;
 const NOISE_REFILL_MS = 200;
 const NOISE_LOWPASS_HZ = 9000;
 const SALIENCE_HARMONICS = 6;
+/** capture.begin(key, OUT_KEY) taps the limiter output (what the speakers get) instead of a track */
+export const OUT_KEY = '__out';
 
 export interface PlayOptions {
   /** start this far into the file (seconds) */
@@ -118,7 +120,7 @@ export interface SingE2eApi extends SingTestApi {
     play(url: string, at?: Sec, opts?: PlayOptions): Promise<Sec>;
   };
   capture: SingTestApi['capture'] & {
-    /** named capture of a track's strip output (after on/off) or the master bus (trackId null/undefined) */
+    /** named capture of a track's strip output (after on/off), the master bus (trackId null/undefined) or the limiter output ('__out') */
     begin(key: string, trackId?: string | null): void;
     end(key: string): Promise<CaptureSummary>;
     /** real-dsp re-detection on a finished named capture, optionally only [from, to) context time */
@@ -240,6 +242,7 @@ export function installTestHooks(deps: TestHookDeps): void {
   // ---- captures ----
   const nodeFor = (trackId?: string | null): AudioNode => {
     if (!trackId) return engine.master;
+    if (trackId === OUT_KEY) return engine.limiter;
     const n = controller.voiceOutput(trackId);
     if (!n) throw new Error(`no output for track ${trackId}`);
     return n;

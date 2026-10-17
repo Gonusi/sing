@@ -1,12 +1,17 @@
 // [tester] Clap calibration against a simulated speaker→mic path: mic.loopback(d) routes master → DelayNode(d) → mic.
-// The click heard at H is rendered at H − outLat, so its stamp is H − outLat + d → expected inLat = d − outLat (± 5 ms).
+// mic.loopback taps the speaker feed (limiter output). The click heard at H enters the master at H − outLat and leaves
+// the limiter LIMITER_DELAY_SEC later, so its stamp is H − outLat + LIMITER_DELAY + d → expected inLat = d − outLat +
+// LIMITER_DELAY (± 5 ms; notes/engine.md worked example 4).
 // Then the calibrated inLat makes an overdub land where it was heard: a take sung along with the loopback's own
 // playback is placed at the loop positions it echoes.
 import { expect, test } from '@playwright/test';
 import { boot, firstTake, getSession, matchNotes, maxAbs, ms, overdub } from './helpers.ts';
 
+/** src/audio/context.ts LIMITER_DELAY_SEC (not imported: that module needs a browser) */
+const LIMITER_DELAY_SEC = 0.006;
+
 for (const d of [0.12, 0.25]) {
-  test(`loopback ${d * 1000} ms → calibrate → inLat = d − outLat`, async ({ page }) => {
+  test(`loopback ${d * 1000} ms → calibrate → inLat = d − outLat + limiter delay`, async ({ page }) => {
     const errors = await boot(page, { noise: null });
     const r = await page.evaluate(async (d) => {
       const s = window.__sing!;
@@ -16,7 +21,7 @@ for (const d of [0.12, 0.25]) {
       if (res.ok) await s.setDevice({ inLat: res.inLat, calibrated: true });
       return { ...res, device: s.device() };
     }, d);
-    const expected = d - r.outLatAtStart;
+    const expected = d - r.outLatAtStart + LIMITER_DELAY_SEC;
     console.log(`[calibration] d ${ms(d)}: ok ${r.ok}, inLat ${ms(r.inLat)} (expected ${ms(expected)}, err ${ms(r.inLat - expected)}), spread ${ms(r.spread)}, matched ${r.matched}`);
     expect(r.ok).toBe(true);
     expect(r.matched).toBeGreaterThanOrEqual(5);
