@@ -11,7 +11,14 @@
 - [x] Wave 2 — voice: fetch-model, check-grammar, recognizer, hold-to-talk — merged; 100% clean / 98.7% noisy / 0 false positives, release→command 155 ms; WebKit peak 834 MB first launch
 - [x] Wave 2 — tester: test hooks + e2e suite — merged; 33 pass on Chromium+WebKit, 5.2 min
 - [x] Engine follow-up: real analysis in takes, drum close(), window clipping, master limiter — merged, 69/69 checks
-- [ ] Wave 3 — fix rounds until the e2e suite passes on Chromium (+ WebKit non-voice)
+- [x] Wave 3 — fix rounds: e2e 33/34 on Chromium + WebKit (remaining: voice on/off swaps in noise → voice agent)
+- [ ] Voice: on/off confusions in noise (running)
+- [ ] MVP+ (owner, 2026-10-17): vocal track (record your real voice, looped) + global echo slider — design below
+  - [ ] contract (coordinator): 'vocals' kind, Take.audio/peaks, Session.fx.echo, View.livePeaks, Controller.setEcho
+  - [ ] engine: vocal take recording/rotation/storage (IDB, 16-bit), vocal playback voice with seam crossfade, echo/reverb send bus, calibration bypasses FX
+  - [ ] shell: vocals lane (waveform, green, letter M), echo slider in the top bar, ＋ sheet 5th button
+  - [ ] voice: grammar `create vocal|vocals track`, `vocal|vocals on|off`; fixtures; gate
+  - [ ] tester: e2e for vocal takes (first take + overdub, output correlates with input, seam) and echo (wet energy follows slider)
 - [ ] Final report for the owner (push + Pages steps, iPhone checklist, spec deviations)
 - [ ] Owner: "Push please" → push `main`, enable Pages, deploy, iPhone session 1
 
@@ -258,3 +265,11 @@ Gate costs: Node DSP checks, `tsc` and the build are nearly free → always. E2E
 2. vosk memory and load time on iPhone (hard ceiling: iPhone Safari kills a page above ~2 GB — owner observed; our estimate is 150–250 MB peak) → the lichess fork, then the ＋/strip buttons only (the app stays fully usable without voice).
 3. Drum thresholds on phone mics → retune on real takes.
 4. Headless timing jitter in e2e → assertions use the scheduler log, and audio re-detection gets a 40 ms tolerance.
+
+## MVP+ — vocal track and echo (added 2026-10-17, owner request)
+- **Vocal track**: `create vocal track` (also `vocals`), on/off as other instruments; ＋ sheet button; lane letter **M**, colour green `#5ad17a`, drawn as a waveform (peaks).
+  - Take = raw mic audio, exactly L long (+20 ms tail for the seam), corrected by `inLat`, rotated so sample 0 = loop pos 0 (overdub window `[ts, ts+L)` mod L). Exclusion ranges (holds) are zeroed.
+  - Playback: one event per cycle (`pos 0, dur L`) through the normal scheduler; the vocal voice starts an AudioBufferSourceNode at `when` with `offset` (catch-up works unchanged), 10 ms fade-in, 20 ms overlapping fade-out at the seam.
+  - Storage: Int16 PCM in IndexedDB under `sing.audio.<takeId>`, loaded at boot; `Take.audio = {key, sampleRate, length}`, `Take.peaks` (256 values) for drawing. Undo/clear drop unreferenced audio.
+  - May be the first take (sets L). Max 60 s → ≤ 5.8 MB per track.
+- **Echo**: one global slider 0..1 ("echo", top bar). All track strips send to a shared FX bus: feedback delay ~0.33 s (feedback 0.2→0.5, wet up to −6 dB) + a short generated-impulse reverb, both scaled by the slider; 0 = dry. Stored in `Session.fx.echo` (not an undo point). Calibration clicks bypass the FX bus.
