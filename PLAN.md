@@ -6,7 +6,7 @@
 - [ ] Wave 1 — dsp: analysis + fixtures + `dev/analyze.ts` passing
 - [ ] Wave 1 — engine: context, mic, worklet, ring, latency, capture, probe, scheduler, take, controller, session
 - [ ] Wave 1 — instruments: synth, bass, drums, violin phrase voice, blip, samples
-- [ ] Wave 1 — shell: UI (start, input, lanes, status, sheets), icons, deploy workflow
+- [x] Wave 1 — shell: UI (start, input, lanes, status, sheets), icons, deploy workflow — merged, screenshots reviewed
 - [ ] Wave 1 merged, `tsc` + build green
 - [ ] Wave 2 — voice: fetch-model, check-grammar, recognizer, hold-to-talk
 - [ ] Wave 2 — tester: test hooks + e2e suite
