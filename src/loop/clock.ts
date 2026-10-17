@@ -112,8 +112,8 @@ export function createScheduler(engine: AudioEngine, opts: SchedulerOptions = {}
       if (only && !only.has(ev)) continue;
       const drum = isDrumTrack(s.st);
       const dur = drum ? 0 : (ev as Note).dur;
-      // occurrences that the late rules would drop anyway are not even enumerated
-      const minHeard = now + ol - (drum ? DRUM_LATE_MAX_SEC : dur) - 1e-6;
+      // occurrences that the late rules would drop anyway are not even enumerated (never tighter than lateDecision)
+      const minHeard = now + ol - (drum ? DRUM_LATE_MAX_SEC : Math.max(dur, NOTE_LATE_FULL_SEC)) - 1e-6;
       const evLo = Math.max(lo, from - EDGE_EPS_SEC, (s.st.activeFrom ?? -Infinity) - EDGE_EPS_SEC, minHeard);
       const evHi = Math.min(hi, (s.st.activeUntil ?? Infinity) - EDGE_EPS_SEC);
       forEachOccurrence(origin, L, ev.pos, evLo, evHi, (k, heard) => {

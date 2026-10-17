@@ -84,8 +84,9 @@ async function checkFirstTake(page: Page): Promise<void> {
     for (const [p, dur, m] of notes) e.tone(t0 + p + inLat, m, dur);
     const stopT = t0 + 2.4;
     await e.waitUntil(t0 + 2.1); // mid-take: 3 notes final, the 4th (1.9 + 0.3) being sung
+    const before = e.now();
     const v = e.c.view();
-    const mid = { state: v.state, rec: v.recordingTrackId, live: v.liveNotes.map((n) => n.pos), open: v.openNote, elapsed: v.elapsed, now: e.now(), loopPos: v.loopPos };
+    const mid = { state: v.state, rec: v.recordingTrackId, live: v.liveNotes.map((n) => n.pos), open: v.openNote, elapsed: v.elapsed, before, after: e.now(), loopPos: v.loopPos };
     await e.waitUntil(stopT + 0.15); // the tap is released 150 ms after touch-down
     e.gesture({ type: 'tap', tDown: stopT });
     const startAt = e.now();
@@ -95,12 +96,21 @@ async function checkFirstTake(page: Page): Promise<void> {
     return { t0, stopT, startAt, notes, mid, wavBytes: wav?.size ?? 0, sampleRate: e.sampleRate, session: e.c.session, events: e.events.filter((x) => x.t >= t0 - 0.001) };
   });
   const m = d.mid;
-  check('a0 view mid-take: state, recording lane, live notes, open note, elapsed', m.state === 'recordingFirst' && m.rec === d.session.tracks[0]?.id &&
-    m.live.length === 3 && Math.abs(m.live[2] - 1.3) < 0.003 && !!m.open && Math.abs(m.open.pos - 1.9) < 0.003 && Math.abs(m.open.midi - 72) < 0.1 &&
-    Math.abs((m.elapsed ?? 0) - (m.now - d.t0)) < 0.002 && m.loopPos === null,
-    `live ${m.live.map((p) => p.toFixed(3)).join(',')} open ${m.open ? `${m.open.pos.toFixed(3)}/${m.open.midi.toFixed(2)}` : 'null'} elapsed ${m.elapsed?.toFixed(3)}`);
+  const elapsed = m.elapsed ?? -1;
+  const viewOk = {
+    state: m.state === 'recordingFirst',
+    lane: m.rec === d.session.tracks[0]?.id,
+    live: m.live.length === 3 && Math.abs(m.live[2] - 1.3) < 0.003,
+    open: !!m.open && Math.abs(m.open.pos - 1.9) < 0.003 && Math.abs(m.open.midi - 72) < 0.1,
+    elapsed: elapsed >= m.before - d.t0 - 1e-6 && elapsed <= m.after - d.t0 + 1e-6,
+    loopPos: m.loopPos === null,
+  };
+  check('a0 view mid-take: state, recording lane, live notes, open note, elapsed', Object.values(viewOk).every(Boolean),
+    `${Object.entries(viewOk).filter(([, ok]) => !ok).map(([k]) => `${k} wrong; `).join('')}live ${m.live.map((p) => p.toFixed(3)).join(',')} open ${m.open ? `${m.open.pos.toFixed(3)}/${m.open.midi.toFixed(2)}` : 'null'} elapsed ${elapsed.toFixed(3)}`);
+  // raw audio = pre-roll (from t0 + inLat − 0.2, or the context's first frame) up to the last block before the stop ran
   const wavSec = (d.wavBytes - 44) / 2 / d.sampleRate;
-  check('a7 lastTakeWav: 16-bit WAV of pre-roll + take', wavSec > 2.4 + 0.15 && wavSec < 2.4 + 0.2 + 0.4, `${d.wavBytes} bytes = ${wavSec.toFixed(3)} s`);
+  const wantSec = d.startAt - Math.max(0, d.t0 + 0.01 - 0.2);
+  check('a7 lastTakeWav: 16-bit WAV of pre-roll + take', Math.abs(wavSec - wantSec) < 0.03, `${d.wavBytes} bytes = ${wavSec.toFixed(3)} s, expected ≈ ${wantSec.toFixed(3)} s`);
   const L = d.session.loopLength ?? 0;
   check('a1 first take L = tap difference', Math.abs(L - (d.stopT - d.t0)) < 0.001, `L=${L.toFixed(6)} expected ${(d.stopT - d.t0).toFixed(6)}`);
   const track = d.session.tracks[0];
