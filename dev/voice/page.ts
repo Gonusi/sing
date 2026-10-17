@@ -17,8 +17,12 @@ export interface HoldOptions {
   speechEnd: Sec;
   /** begin() this long after touch-down (holdStart fires at 300 ms) */
   holdDelaySec: Sec;
-  /** end() this long after speechEnd */
+  /** end() this long after speechEnd (may be past the file's end: the bed / silence continues) */
   releaseAfterSec: Sec;
+  /** the fixture starts this long after touch-down (bed only before it); default 0 */
+  leadSec?: Sec;
+  /** continuous room-noise bed under everything, RMS dBFS (like test-hooks mic.noise: white, low-passed 9 kHz) */
+  bedDbfs?: number | null;
 }
 
 export interface HoldReport {
@@ -67,12 +71,38 @@ declare global {
 }
 
 const FAST = new URLSearchParams(location.search).has('fast');
+/** ?grammar=<JSON phrase list>: evaluate another grammar (dev/voice/compare-grammars.ts) */
+const GRAMMAR = new URLSearchParams(location.search).get('grammar') ?? undefined;
 const MODEL_URL = new URL(`${import.meta.env.BASE_URL}vosk/vosk-model-small-en-us-0.15.tar.gz`, location.href).href;
 /** the worklet's block size (mic blocks are this long) */
 const BLOCK_SAMPLES = 512;
 /** inject this far ahead so the buffer source starts exactly at `at` */
 const INJECT_LEAD_SEC = 0.15;
 const POLL_MS = 4;
+/** the composed hold audio runs this long past the release (covers end()'s tail) */
+const TIMELINE_AFTER_RELEASE_SEC = 0.3;
+const BED_LOWPASS_HZ = 9000;
+const BED_SEED = 0x5eed;
+
+/** add seeded white noise through an RBJ 2nd-order low-pass, RMS `dbfs` (the e2e test mic's noise bed) */
+function bedNoise(out: Float32Array, sampleRate: number, dbfs: number): void {
+  const w = (2 * Math.PI * BED_LOWPASS_HZ) / sampleRate;
+  const alpha = Math.sin(w) / (2 * Math.SQRT1_2);
+  const cos = Math.cos(w);
+  const a0 = 1 + alpha;
+  const b0 = (1 - cos) / 2 / a0, b1 = (1 - cos) / a0, a1 = (-2 * cos) / a0, a2 = (1 - alpha) / a0;
+  const y = new Float32Array(out.length);
+  let rng = BED_SEED, x1 = 0, x2 = 0, y1 = 0, y2 = 0, sum = 0;
+  for (let i = 0; i < y.length; i++) {
+    const x0 = ((rng = (rng * 1664525 + 1013904223) >>> 0) / 2 ** 32) * 2 - 1;
+    const y0 = b0 * x0 + b1 * x1 + b0 * x2 - a1 * y1 - a2 * y2;
+    (x2 = x1), (x1 = x0), (y2 = y1), (y1 = y0);
+    y[i] = y0;
+    sum += y0 * y0;
+  }
+  const g = 10 ** (dbfs / 20) / Math.sqrt(sum / Math.max(1, y.length));
+  for (let i = 0; i < out.length; i++) out[i] += y[i] * g;
+}
 /** fast mode pushes audio at this multiple of real time (the worker must keep up: see notes/voice.md) */
 const FAST_SPEEDUP = Number(new URLSearchParams(location.search).get('speedup')) || 4;
 
@@ -151,7 +181,7 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
   // fast mode: the recogniser only reads ctx.currentTime, so a fake clock is enough
   const recCtx = fake ? ({ get currentTime() { return fake.now(); } } as AudioContext) : ctx;
   let trace: TraceEvent[] = [];
-  const recognizer = createRecognizer({ ctx: recCtx, mic, modelUrl: MODEL_URL, onTrace: (e) => trace.push(e) });
+  const recognizer = createRecognizer({ ctx: recCtx, mic, modelUrl: MODEL_URL, onTrace: (e) => trace.push(e), grammarJson: GRAMMAR });
 
   const decode = async (url: string): Promise<AudioBuffer> => {
     const res = await fetch(url);
@@ -177,14 +207,28 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
     return { r, trace: () => trace, off: () => (offC(), offP()) };
   };
 
+  /** the hold's audio from touch-down: bed + fixture at leadSec, long enough for the release + tail */
+  async function timeline(o: HoldOptions): Promise<{ x: Float32Array<ArrayBuffer>; speechEnd: Sec }> {
+    const f = (await decode(o.url)).getChannelData(0);
+    const sr = ctx.sampleRate;
+    const lead = Math.round((o.leadSec ?? 0) * sr);
+    const speechEnd = (o.leadSec ?? 0) + o.speechEnd;
+    const x = new Float32Array(Math.max(lead + f.length, Math.ceil((speechEnd + o.releaseAfterSec + TIMELINE_AFTER_RELEASE_SEC) * sr)));
+    if (o.bedDbfs !== undefined && o.bedDbfs !== null) bedNoise(x, sr, o.bedDbfs);
+    for (let i = 0; i < f.length; i++) x[lead + i] += f[i];
+    return { x, speechEnd };
+  }
+
   async function holdReal(o: HoldOptions): Promise<HoldReport> {
-    const buf = await decode(o.url);
+    const tl = await timeline(o);
+    const buf = ctx.createBuffer(1, tl.x.length, ctx.sampleRate);
+    buf.copyToChannel(tl.x, 0);
     const tDown = ctx.currentTime + INJECT_LEAD_SEC;
     (mic as MicFeed).inject(buf, tDown);
     await waitUntil(tDown + o.holdDelaySec);
     const w = watch(() => ctx.currentTime);
     recognizer.begin(tDown);
-    const speechEndAt = tDown + o.speechEnd;
+    const speechEndAt = tDown + tl.speechEnd;
     await waitUntil(speechEndAt + o.releaseAfterSec);
     const releaseAt = ctx.currentTime;
     const command = await recognizer.end();
@@ -204,13 +248,13 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
 
   async function holdFast(o: HoldOptions): Promise<HoldReport> {
     const feed = fake!;
-    const x = (await decode(o.url)).getChannelData(0);
+    const { x, speechEnd } = await timeline(o);
     feed.reset();
     let replies = 0;
     const w = watch(() => replies++);
     const sr = ctx.sampleRate;
     const beginAt = Math.round(o.holdDelaySec * sr);
-    const endAt = Math.min(x.length, Math.round((o.speechEnd + o.releaseAfterSec) * sr));
+    const endAt = Math.min(x.length, Math.round((speechEnd + o.releaseAfterSec) * sr));
     const t0 = performance.now();
     /** keep the worker from falling behind: at most FAST_SPEEDUP × real time */
     const pace = async (frame: number) => {

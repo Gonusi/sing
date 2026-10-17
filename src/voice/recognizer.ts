@@ -38,6 +38,8 @@ export interface RecognizerDeps {
   modelUrl: string;
   /** dev only: every reply of a hold, with the text heard so far (dev/voice/replay.ts tunes EARLY_RULE from these) */
   onTrace?: (e: TraceEvent) => void;
+  /** dev only: another vosk grammar (dev/voice/compare-grammars.ts); default GRAMMAR_JSON */
+  grammarJson?: string;
 }
 
 export interface TraceEvent {
@@ -159,7 +161,7 @@ function waitFor(ms: number, arm: (done: () => void) => void): Promise<void> {
 }
 
 export function createRecognizer(deps: RecognizerDeps): Recognizer {
-  const { ctx, mic, modelUrl, onTrace } = deps;
+  const { ctx, mic, modelUrl, onTrace, grammarJson = GRAMMAR_JSON } = deps;
   const sampleRate = mic.sampleRate;
   const chunkSamples = Math.round(CHUNK_SEC * sampleRate);
   const commandSubs = new Set<(c: Command) => void>();
@@ -203,7 +205,7 @@ export function createRecognizer(deps: RecognizerDeps): Recognizer {
   function createSlot(): Slot | null {
     if (!model || status !== 'ready') return null;
     try {
-      const rec = new model.KaldiRecognizer(sampleRate, GRAMMAR_JSON);
+      const rec = new model.KaldiRecognizer(sampleRate, grammarJson);
       const slot: Slot = { rec, hold: null };
       const onReply = (m: RecognizerMessage) => onMessage(slot, m);
       rec.on('partialresult', onReply);
