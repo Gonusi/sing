@@ -2,8 +2,10 @@
 // (e2e/out/voice-profile), speech fixtures from dev/fixtures/out/speech/ injected into the mic during a real pointer
 // hold → the expected command happened (or nothing, for negative fixtures).
 // Skips (with the reason) until the voice branch is merged: recogniser status never leaves 'off', or no fixtures.
-// Manifest (assumed, written by the voice agent): dev/fixtures/out/speech/manifest.json =
-//   [{ "file": "x.wav", "text": "create violin track", "command": {Command} | null }]  (command null = must do nothing)
+// Manifest (written by dev/voice/make-speech.ts): dev/fixtures/out/speech/manifest.json =
+//   { fixtures: [{ file, text, command: Command | null, kind: 'command'|'negative', voice, rateWpm, noisy }] }
+// The full 520-fixture accuracy gate lives in `node dev/voice/check.ts`; here a sample proves the app wiring:
+// every phrase once (Samantha, clean, 170 wpm, plus one noisy voice per phrase) and the clean negatives of two voices.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { chromium, expect, test } from '@playwright/test';
@@ -14,7 +16,16 @@ interface SpeechCase {
   file: string;
   text?: string;
   command: Command | null;
+  kind: 'command' | 'negative';
+  voice: string;
+  rateWpm: number;
+  noisy: boolean;
 }
+const pickCases = (all: SpeechCase[]): SpeechCase[] => [
+  ...all.filter((c) => c.kind === 'command' && c.voice === 'Samantha' && c.rateWpm === 170 && !c.noisy),
+  ...all.filter((c) => c.kind === 'command' && c.voice === 'Daniel' && c.rateWpm === 170 && c.noisy),
+  ...all.filter((c) => c.kind === 'negative' && !c.noisy && (c.voice === 'Fred' || c.voice === '-')),
+];
 const MANIFEST = join(FIXTURE_DIR, 'speech', 'manifest.json');
 const SPOT = { x: 230, y: 470 };
 
@@ -22,7 +33,7 @@ test('real recogniser: speech fixtures during a hold → the expected command', 
   test.skip(browserName !== 'chromium', 'voice e2e runs on Chromium only');
   test.skip(!existsSync(MANIFEST), `no speech fixtures (${MANIFEST}): voice branch not merged`);
   test.setTimeout(600_000);
-  const cases = JSON.parse(readFileSync(MANIFEST, 'utf8')) as SpeechCase[];
+  const cases = pickCases((JSON.parse(readFileSync(MANIFEST, 'utf8')) as { fixtures: SpeechCase[] }).fixtures);
   const context = await chromium.launchPersistentContext(join(OUT_DIR, 'voice-profile'), {
     viewport: { width: 390, height: 844 },
     args: ['--autoplay-policy=no-user-gesture-required'],
