@@ -16,6 +16,8 @@ const ATTACK_TAU: Sec = 0.013;
 const RELEASE_TAU: Sec = 0.1;
 /** level change at a legato note (follows each note's vel) */
 const VEL_TAU: Sec = 0.05;
+/** portato dip before a repeated pitch inside a phrase (phrase.ts): −6 dB at the envelope, ≈ −3.5 dB heard (room) */
+const REPEAT_DIP = 0.5;
 /** pitch glide between legato notes (exponential playbackRate ramp from the note's start) */
 const GLIDE: Sec = 0.05;
 /** within this many semitones of the playing sample's root the sample is only re-pitched */
@@ -60,7 +62,15 @@ export function createViolinVoice(ctx: Ctx): Voice {
     ctx,
     destination: lowpass,
     gate,
-    envelope: { attackTau: ATTACK_TAU, sustain: 1, decayDelay: 0, decayTau: 1, velTau: VEL_TAU, releaseTau: RELEASE_TAU },
+    envelope: {
+      attackTau: ATTACK_TAU,
+      sustain: 1,
+      decayDelay: 0,
+      decayTau: 1,
+      velTau: VEL_TAU,
+      releaseTau: RELEASE_TAU,
+      repeatDip: REPEAT_DIP,
+    },
     start: (note, span, env) => startViolinSound(ctx, assets.samples, note, span, env),
   });
 

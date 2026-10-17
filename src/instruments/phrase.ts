@@ -15,7 +15,7 @@
 // Source stop() is re-issued on a continuation: the Web Audio spec applies the last call (checked in Chromium and
 // WebKit, dev/instruments/check.ts).
 import type { Note, Sec } from '../types.ts';
-import { KILL_TAU, KILL_TIME, noteSpan, velGain, type Ctx, type Gate, type NoteSpan } from './shared.ts';
+import { earliestStart, KILL_TAU, KILL_TIME, noteSpan, velGain, type Ctx, type Gate, type NoteSpan } from './shared.ts';
 
 /** An open phrase releases on its own this long after its last note ends if no continuation arrived. */
 export const LEGATO_GRACE: Sec = 0.3;
@@ -25,6 +25,9 @@ const CANCEL_SAFETY: Sec = 0.05;
 const RELEASE_TAU_COUNT = 7;
 /** Disconnect a closed phrase this long after its sources stopped. */
 const REAP_MARGIN: Sec = 0.1;
+/** Portato: a repeated pitch inside a phrase dips this long before its start, with this time constant. */
+const REPEAT_DIP_LEAD: Sec = 0.04;
+const REPEAT_DIP_TAU: Sec = 0.012;
 
 export interface PhraseEnvelope {
   /** attack time constant (≈ 95 % after 3 τ) */
@@ -38,6 +41,12 @@ export interface PhraseEnvelope {
   velTau: Sec;
   /** release time constant */
   releaseTau: Sec;
+  /**
+   * Portato for a repeated pitch inside a phrase (two legato notes on the same pitch would otherwise merge into one
+   * tone and lose the rhythm): the level dips to this fraction just before the repeat, then returns. 1 = no dip.
+   * Keep it at 0.5 or above (a deeper dip reads as a gap).
+   */
+  repeatDip: number;
 }
 
 /** The instrument-specific sound of one phrase, playing into the phrase envelope. */
@@ -69,6 +78,8 @@ export interface PhraseVoice {
 
 interface Phrase {
   id: string;
+  /** pitch of its latest note (a same-pitch continuation gets the portato dip) */
+  midi: number;
   env: GainNode;
   sound: PhraseSound;
   /** OPEN: the provisional release time; CLOSED: the final release time */
@@ -107,7 +118,7 @@ export function createPhraseVoice(o: PhraseVoiceOptions): PhraseVoice {
     env.gain.setTargetAtTime(peak, span.start, e.attackTau);
     if (e.sustain < 1) env.gain.setTargetAtTime(peak * e.sustain, span.start + e.decayDelay, e.decayTau);
     const sound = o.start(note, span, env);
-    return { id: note.phrase, env, sound, releaseAt: Infinity, stopAt: Infinity };
+    return { id: note.phrase, midi: note.midi, env, sound, releaseAt: Infinity, stopAt: Infinity };
   }
 
   /** the OPEN phrase is abandoned (another phrase starts at `at`): release it no later than `at` */
@@ -137,8 +148,13 @@ export function createPhraseVoice(o: PhraseVoiceOptions): PhraseVoice {
       if (open && open.id === note.phrase && canContinue(open, now)) {
         p = open;
         cancelRelease(p);
+        if (note.midi === p.midi && e.repeatDip < 1) {
+          const dipAt = Math.max(span.start - REPEAT_DIP_LEAD, earliestStart(ctx, now));
+          p.env.gain.setTargetAtTime(velGain(note.vel) * e.sustain * e.repeatDip, dipAt, REPEAT_DIP_TAU);
+        }
         p.env.gain.setTargetAtTime(velGain(note.vel) * e.sustain, span.start, e.velTau);
         p.sound.legato(note, span);
+        p.midi = note.midi;
       } else {
         if (open) abandon(open, span.start, now);
         p = startPhrase(note, span);

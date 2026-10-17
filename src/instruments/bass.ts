@@ -27,6 +27,8 @@ const SUSTAIN = 0.7;
 const DECAY_DELAY: Sec = 0.015;
 const DECAY_TAU: Sec = 0.18;
 const VEL_TAU: Sec = 0.03;
+/** portato dip before a repeated pitch inside a phrase (phrase.ts), ≈ −3 dB */
+const REPEAT_DIP = 0.7;
 /** ≈ −20 dB 0.1 s after the phrase end; oscillators stop after 7 τ ≈ 0.3 s */
 const RELEASE_TAU: Sec = 0.045;
 /** fixed output trim: the normalised wave peaks at 1; this brings a note to about −20 dBFS RMS */
@@ -49,6 +51,7 @@ export function createBassVoice(ctx: Ctx): Voice {
       decayTau: DECAY_TAU,
       velTau: VEL_TAU,
       releaseTau: RELEASE_TAU,
+      repeatDip: REPEAT_DIP,
     },
     start: (note, span, env) => startBassSound(ctx, wave, note, span, env),
   });

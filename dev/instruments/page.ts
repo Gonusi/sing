@@ -210,6 +210,25 @@ async function checkLegato(kind: InstrumentKind, notes: [number, number][], name
   );
 }
 
+/** a repeated pitch inside a phrase gets a portato dip (audible rhythm) without a new attack or a gap */
+async function checkRepeat(kind: InstrumentKind, midi: number): Promise<void> {
+  const T0 = 0.2;
+  const notes: [number, number][] = [[midi, 0.5], [midi, 0.5], [midi + 3, 0.5]];
+  const feeds = legatoFeeds(T0, notes, `${kind}:repeat`);
+  const r = await renderVoice(kind, 2.6, feeds);
+  keep(`${kind}-repeat`, r.pcm);
+  const env = A.envelope(r.pcm, SR);
+  const tb = feeds[1].when;
+  const level = A.medianDb(env, T0 + 0.15, tb - 0.06);
+  const dip = level - A.minDb(env, tb - 0.06, tb + 0.06);
+  const atk = A.attacks(env);
+  record(
+    `${kind}: repeated pitch inside a phrase is articulated (portato dip, one attack)`,
+    atk.length === 1 && dip >= 2 && dip < LEGATO_MAX_DIP_DB && r.errors.length === 0,
+    `dip at the repeat ${fmt(dip)} dB · attacks ${atk.length}${errorsOf(r)}`,
+  );
+}
+
 async function checkLongNote(midi: number, seconds: Sec): Promise<void> {
   const T0 = 0.1;
   const r = await renderVoice('violin', T0 + seconds + 1, [{ ev: note(midi, seconds), when: T0 }]);
@@ -454,6 +473,8 @@ async function runAll(): Promise<CheckRun> {
     // C5 D5 (glide in the C5 sample) E5 G5 A4 C5 (each a crossfade to another sample)
     ['legato violin', () => checkLegato('violin', [[72, 0.5], [74, 0.5], [76, 0.5], [79, 0.5], [69, 0.5], [72, 0.6]], 'violin-legato')],
     ['legato bass', () => checkLegato('bass', [[36, 0.4], [40, 0.4], [43, 0.4], [48, 0.4], [45, 0.5]], 'bass-legato')],
+    ['repeat violin', () => checkRepeat('violin', 64)],
+    ['repeat bass', () => checkRepeat('bass', 40)],
     ['long violin', () => checkLongNote(69, 20)],
     ['violin samples', () => checkSamples()],
     ['staccato violin', () => checkStaccato('violin', [60, 64, 67, 72])],
