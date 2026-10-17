@@ -4,9 +4,10 @@
 //   1. smooth   — median of the voiced fractional-MIDI values in frames i-2..i+2 (unvoiced centre stays unvoiced)
 //   2. dips     — frame RMS falling DIP_DROP_DB below the note's peak and recovering DIP_RECOVER_DB above the dip
 //                 minimum = a repeated note: split at the dip minimum, and never merge across it
-//   3. pitch    — a value more than DEPART_SEMITONES from the running note median (same side, CONFIRM_FRAMES voiced
-//                 frames in a row) is a change candidate; confirmed only if it rounds to a different semitone than the
-//                 note; the new note starts where the pitch crosses halfway between the two (the glide centre,
+//   3. pitch    — a value more than DEPART_SEMITONES from the running note median (same side, voiced frames in a
+//                 row) is a change candidate. It is confirmed after CONFIRM_FRAMES frames when its median is at least
+//                 CLEAR_DEPART_SEMITONES away, after CONFIRM_FRAMES_MARGINAL frames when it is closer (vibrato peaks
+//                 fall back before that), and only if it rounds to a different semitone than the note; the new note starts where the pitch crosses halfway between the two (the glide centre,
 //                 interpolated between frames). Shorter runs are folded back
 //                 into the note (an octave error is moved by ±12 first): this is the octave fold.
 //   4. gaps     — UNVOICED_SPLIT_FRAMES unvoiced frames end a note (it becomes "held"); a single unvoiced frame is
@@ -30,7 +31,11 @@ export const SEG_HOP_SEC = 0.01;
 export const MEDIAN_FRAMES = 5;
 const MEDIAN_HALF = (MEDIAN_FRAMES - 1) >> 1;
 export const DEPART_SEMITONES = 0.5;
+/** a candidate whose median is at least CLEAR_DEPART_SEMITONES away is confirmed after CONFIRM_FRAMES frames ... */
 export const CONFIRM_FRAMES = 4;
+export const CLEAR_DEPART_SEMITONES = 1.0;
+/** ... a marginal one (DEPART..CLEAR) only after CONFIRM_FRAMES_MARGINAL: a wide vibrato peak lasts 30–55 ms */
+export const CONFIRM_FRAMES_MARGINAL = 7;
 export const OCTAVE_FOLD_TOLERANCE_SEMITONES = 1.0;
 export const UNVOICED_SPLIT_FRAMES = 2;
 export const MIN_NOTE_SEC = 0.08;
@@ -448,6 +453,7 @@ export function createSegmenter(): NoteSegmenter {
     candCount++;
     if (candCount < CONFIRM_FRAMES) return;
     const candMid = candidateMedian(cur);
+    if (candCount < CONFIRM_FRAMES_MARGINAL && Math.abs(candMid - ref) < CLEAR_DEPART_SEMITONES) return;
     if (Math.round(candMid) !== Math.round(ref)) {
       const [idx, onset] = glideCrossing(cur, Math.max(1, candStart - CONFIRM_FRAMES), 0.5 * (ref + candMid), sign);
       splitCur(idx, onset, 'pitch');

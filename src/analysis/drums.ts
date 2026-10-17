@@ -1,9 +1,14 @@
 // [dsp] Beatbox → RawHit: spectral-flux onsets (FFT 512, hop 256, Hann, fft.js) + kick/snare/hat classifier. Pure.
 //
 // Onsets: flux = Σ positive rises of log1p(FLUX_LOG_GAIN·|X|) between consecutive frames (|X| scaled so a
-//   full-scale sine bin ≈ 1). A frame is an onset when its flux > mean + FLUX_STD_FACTOR·std + FLUX_OFFSET of the
-//   previous FLUX_HISTORY_FRAMES frames, it is the maximum within ±PEAK_HALF_WIDTH_FRAMES, it comes at least
-//   MIN_ONSET_GAP_SEC after the previous onset, and the RMS of the HIT_GATE_SEC after it reaches HIT_GATE_RMS.
+//   full-scale sine bin ≈ 1). A frame is an onset when its flux > median + FLUX_SPREAD_FACTOR·σ̂ + FLUX_OFFSET of the
+//   previous FLUX_HISTORY_FRAMES frames (σ̂ = 1.4826·MAD: one loud hit in the history must not hide the next soft
+//   one, which mean + 2·std did at 16ths), it is the maximum within ±PEAK_HALF_WIDTH_FRAMES, it comes at least
+//   MIN_ONSET_GAP_SEC after the previous onset, the RMS of the HIT_GATE_SEC after it reaches HIT_GATE_RMS, and it is
+//   a sharp attack: in at least one band (low < KICK_LOW_HZ, mid, high > HAT_HIGH_HZ) the mean power of the FFT
+//   frames centred in [onset, onset + ATTACK_SEC] is ATTACK_MIN_RISE_DB above that of the frames centred in
+//   [onset − PRE_FROM_SEC, onset − PRE_TO_SEC]. Breaths and decaying tails rise slowly or not at all; per band, so a
+//   quiet hat over louder low room noise still counts.
 //   Onset time = centre of the peak frame + ONSET_TIME_OFFSET_SEC.
 // Classification: band powers summed over the FFT frames inside [onset + CLASSIFY_FROM_SEC, onset + CLASSIFY_TO_SEC],
 //   minus the room-noise floor (the quietest NOISE_AVG_FRAMES-frame stretch of the last NOISE_LOOKBACK_SEC); frames
@@ -20,12 +25,20 @@ export const ONSET_FFT_SIZE = 512;
 export const ONSET_HOP_SAMPLES = 256;
 export const FLUX_LOG_GAIN = 10;
 export const FLUX_HISTORY_FRAMES = 40;
-export const FLUX_STD_FACTOR = 2.0;
+/** no onsets until this many frames of history exist (≈ 43 ms; the engine feeds a 0.2 s pre-roll anyway) */
+export const FLUX_MIN_HISTORY_FRAMES = 8;
+export const FLUX_SPREAD_FACTOR = 2.0;
 export const FLUX_OFFSET = 0.55;
+/** MAD → standard deviation for normal data */
+const MAD_TO_SIGMA = 1.4826;
 export const PEAK_HALF_WIDTH_FRAMES = 3;
 export const MIN_ONSET_GAP_SEC = 0.06;
 export const HIT_GATE_RMS = 0.004;
 export const HIT_GATE_SEC = 0.03;
+export const ATTACK_SEC = 0.03;
+export const ATTACK_MIN_RISE_DB = 6;
+export const PRE_FROM_SEC = 0.04;
+export const PRE_TO_SEC = 0.01;
 export const ONSET_TIME_OFFSET_SEC = 0;
 export const CLASSIFY_FROM_SEC = 0.01;
 export const CLASSIFY_TO_SEC = 0.07;
@@ -73,6 +86,8 @@ export interface HitFeatures {
 export interface HitMeasure extends HitFeatures {
   /** RMS over HIT_GATE_SEC from the onset */
   gateRms: number;
+  /** largest per-band power ratio, attack frames / pre-onset frames */
+  attackRise: number;
   /** highest VEL_WINDOW_SEC RMS within the classification span */
   peakRms: number;
 }
@@ -150,14 +165,54 @@ export function createFrameAnalyser(): FrameAnalyser {
   };
 }
 
+/** samples needed before the onset to measure a hit (the earliest pre-onset frame starts half an FFT earlier) */
+export function hitPreSamples(sampleRate: number): number {
+  return Math.round(PRE_FROM_SEC * sampleRate) + ONSET_FFT_SIZE / 2;
+}
+
+const ATTACK_MIN_RISE_POWER = 10 ** (ATTACK_MIN_RISE_DB / 10);
+
+/** true when the hit passes the level gate and the sharp-attack test */
+export function isHit(m: HitMeasure): boolean {
+  return m.gateRms >= HIT_GATE_RMS && m.attackRise >= ATTACK_MIN_RISE_POWER;
+}
+
+/** mean band sums of the FFT frames centred every hop in [fromIndex, toIndex] (at least one frame) */
+function meanBands(fa: FrameAnalyser, samples: ArrayLike<number>, fromIndex: number, toIndex: number, sampleRate: number, into: BandSums): void {
+  into.total = into.low = into.high = into.weighted = 0;
+  let n = 0;
+  for (let centre = fromIndex; centre <= toIndex || n === 0; centre += ONSET_HOP_SAMPLES) {
+    fa.addFrameBands(samples, centre - ONSET_FFT_SIZE / 2, sampleRate, into);
+    n++;
+  }
+  into.total /= n;
+  into.low /= n;
+  into.high /= n;
+  into.weighted /= n;
+}
+
+/** largest per-band ratio (low, mid, high) of `after` over `before` */
+function bandRise(after: BandSums, before: BandSums): number {
+  const tiny = 1e-12 + 1e-9 * before.total;
+  const mid = (b: BandSums) => Math.max(0, b.total - b.low - b.high);
+  return Math.max((after.low + tiny) / (before.low + tiny), (mid(after) + tiny) / (mid(before) + tiny), (after.high + tiny) / (before.high + tiny));
+}
+
+const attackScratch = emptyBands();
+const preScratch = emptyBands();
+
 /** samples needed after the onset before a hit can be measured */
 export function hitSpanSamples(sampleRate: number): number {
-  return Math.max(Math.round(CLASSIFY_TO_SEC * sampleRate), Math.round(CLASSIFY_FROM_SEC * sampleRate) + ONSET_FFT_SIZE);
+  return Math.max(
+    Math.round(CLASSIFY_TO_SEC * sampleRate),
+    Math.round(CLASSIFY_FROM_SEC * sampleRate) + ONSET_FFT_SIZE,
+    Math.round(ATTACK_SEC * sampleRate) + ONSET_FFT_SIZE / 2,
+  );
 }
 
 const frameScratch = emptyBands();
 
-/** Gate, features and peak level of the hit at samples[onsetIndex] (needs hitSpanSamples after it). */
+/** Gate, features and peak level of the hit at samples[onsetIndex] (needs hitPreSamples before, hitSpanSamples after). */
 export function measureHit(
   fa: FrameAnalyser,
   samples: ArrayLike<number>,
@@ -185,9 +240,12 @@ export function measureHit(
   const velStep = Math.max(1, velLen >> 2);
   let peakRms = 0;
   for (let off = onsetIndex; off + velLen <= to; off += velStep) peakRms = Math.max(peakRms, rmsOf(samples, off, velLen));
+  meanBands(fa, samples, onsetIndex, onsetIndex + Math.round(ATTACK_SEC * sampleRate), sampleRate, attackScratch);
+  meanBands(fa, samples, onsetIndex - Math.round(PRE_FROM_SEC * sampleRate), onsetIndex - Math.round(PRE_TO_SEC * sampleRate), sampleRate, preScratch);
   return {
     ...featuresOf(scratch, frames, noisePerFrame),
     gateRms: rmsOf(samples, onsetIndex, Math.round(HIT_GATE_SEC * sampleRate)),
+    attackRise: bandRise(attackScratch, preScratch),
     peakRms,
   };
 }
@@ -265,6 +323,8 @@ export function createOnsetDetector(): OnsetDetector {
   const bandRing: BandSums[] = Array.from({ length: BAND_RING }, emptyBands);
   const hitBands = emptyBands();
   let span = new Float32Array(0);
+  let pre = 0;
+  const history = new Float64Array(FLUX_HISTORY_FRAMES);
 
   let sampleRate = 0;
   let started = false;
@@ -276,7 +336,10 @@ export function createOnsetDetector(): OnsetDetector {
   let pending: PendingHit[] = [];
 
   function restart(frameIndex: number, rate: number): void {
-    if (rate !== sampleRate || span.length === 0) span = new Float32Array(hitSpanSamples(rate));
+    if (rate !== sampleRate || span.length === 0) {
+      pre = hitPreSamples(rate);
+      span = new Float32Array(pre + hitSpanSamples(rate));
+    }
     sampleRate = rate;
     started = true;
     streamStartFrame = frameIndex;
@@ -310,26 +373,31 @@ export function createOnsetDetector(): OnsetDetector {
   /** peak test for the frame PEAK_HALF_WIDTH_FRAMES back from the newest one */
   function checkPeak(): void {
     const p = frameCount - 1 - PEAK_HALF_WIDTH_FRAMES;
-    if (p < 1) return;
+    if (p < FLUX_MIN_HISTORY_FRAMES) return;
     const fp = fluxRing[p & (FLUX_RING - 1)];
     for (let j = p - PEAK_HALF_WIDTH_FRAMES; j <= p + PEAK_HALF_WIDTH_FRAMES; j++) {
       if (j < 0 || j === p) continue;
       const fj = fluxRing[j & (FLUX_RING - 1)];
       if (j < p ? fj >= fp : fj > fp) return;
     }
-    const histFrom = Math.max(0, p - FLUX_HISTORY_FRAMES);
-    const histN = p - histFrom;
-    let mean = 0;
-    for (let j = histFrom; j < p; j++) mean += fluxRing[j & (FLUX_RING - 1)];
-    mean /= histN;
-    let variance = 0;
-    for (let j = histFrom; j < p; j++) variance += (fluxRing[j & (FLUX_RING - 1)] - mean) ** 2;
-    const std = Math.sqrt(variance / histN);
-    if (fp <= mean + FLUX_STD_FACTOR * std + FLUX_OFFSET) return;
+    if (fp <= fluxThreshold(p)) return;
     const onsetOffset = Math.round(fluxCentre[p & (FLUX_RING - 1)] + ONSET_TIME_OFFSET_SEC * sampleRate);
     if (onsetOffset - lastOnsetOffset < MIN_ONSET_GAP_SEC * sampleRate) return;
     lastOnsetOffset = onsetOffset;
     pending.push({ onsetOffset, frameIndex: p, t: (streamStartFrame + onsetOffset) / sampleRate });
+  }
+
+  /** median + FLUX_SPREAD_FACTOR · 1.4826 · MAD + FLUX_OFFSET of the FLUX_HISTORY_FRAMES frames before frame p */
+  function fluxThreshold(p: number): number {
+    const from = Math.max(0, p - FLUX_HISTORY_FRAMES);
+    const n = p - from;
+    const h = history.subarray(0, n);
+    for (let j = 0; j < n; j++) h[j] = fluxRing[(from + j) & (FLUX_RING - 1)];
+    h.sort();
+    const median = h[n >> 1];
+    for (let j = 0; j < n; j++) h[j] = Math.abs(h[j] - median);
+    h.sort();
+    return median + FLUX_SPREAD_FACTOR * MAD_TO_SIGMA * h[n >> 1] + FLUX_OFFSET;
   }
 
   /** room-noise floor from the stored frames that end before the onset frame */
@@ -343,14 +411,15 @@ export function createOnsetDetector(): OnsetDetector {
 
   /** gate + features + velocity for a pending hit whose span is in the ring; null = rejected by the gate */
   function finishHit(h: PendingHit): RawHit | null {
-    for (let i = 0; i < span.length; i++) span[i] = at(h.onsetOffset + i);
-    const m = measureHit(fa, span, 0, sampleRate, noiseBefore(h.frameIndex), hitBands);
-    if (m.gateRms < HIT_GATE_RMS) return null;
+    const first = h.onsetOffset - pre;
+    for (let i = 0; i < span.length; i++) span[i] = first + i >= 0 ? at(first + i) : 0;
+    const m = measureHit(fa, span, pre, sampleRate, noiseBefore(h.frameIndex), hitBands);
+    if (!isHit(m)) return null;
     return { t: h.t, kind: classifyHit(m), vel: drumVelocityFromRms(m.peakRms) };
   }
 
   function drainPending(out: RawHit[]): void {
-    while (pending.length > 0 && written >= pending[0].onsetOffset + span.length) {
+    while (pending.length > 0 && written >= pending[0].onsetOffset + span.length - pre) {
       const hit = finishHit(pending.shift() as PendingHit);
       if (hit) out.push(hit);
     }

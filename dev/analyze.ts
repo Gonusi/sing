@@ -9,7 +9,8 @@
 // Scoring:
 //   notes: correct = snapped MIDI equal AND onset within NOTE_ONSET_TOLERANCE_SEC (nearest unmatched detection)
 //   drums: correct = same kind AND onset within HIT_ONSET_TOLERANCE_SEC
-// Exit code 1 when a threshold below fails (only files with ground truth count).
+// Exit code 1 when a threshold below fails (only files with ground truth count; stress-* fixtures, truth.gated = false,
+// are reported with a * but never fail the run).
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { createOnsetDetector } from '../src/analysis/drums.ts';
@@ -226,6 +227,7 @@ function main(): number {
   let drumAudioSec = 0;
   let drumCpuSec = 0;
   const sung = { gt: 0, correct: 0, onsetErrors: [] as number[], finalDelays: [] as number[] };
+  const stress = { gt: 0, correct: 0, onsetErrors: [] as number[] };
   const allHitDelays: number[] = [];
 
   for (const path of paths) {
@@ -235,6 +237,8 @@ function main(): number {
     const audioSec = samples.length / sampleRate;
     const isDrumFixture = name.startsWith('beatbox') || (truth?.hits.length ?? 0) > 0;
     const isSilence = truth !== null && truth.notes.length === 0 && truth.hits.length === 0;
+    const gated = truth?.gated !== false;
+    const label = (gated ? name : `${name}*`).padEnd(18);
     const doNotes = forceNotes || !isDrumFixture || isSilence;
     const doDrums = forceDrums || isDrumFixture || isSilence;
     console.log(`\n${name}  (${sampleRate} Hz, ${audioSec.toFixed(2)} s)${truth ? '  — ' + truth.description : ''}`);
@@ -245,20 +249,24 @@ function main(): number {
       noteCpuSec += seconds;
       if (!truth) {
         for (const n of notes) console.log(`    note ${n.t.toFixed(3)} dur ${n.dur.toFixed(3)} midi ${n.midi.toFixed(2)} ${noteName(n.midi)} vel ${n.vel.toFixed(2)}`);
-        noteRows.push(`${name.padEnd(18)} ${'-'.padStart(4)} ${String(notes.length).padStart(4)}   (no ground truth)`);
+        noteRows.push(`${label} ${'-'.padStart(4)} ${String(notes.length).padStart(4)}   (no ground truth)`);
       } else {
         const s = scoreNotes(truth.notes, notes, verbose);
-        if (truth.notes.length > 0) {
+        if (truth.notes.length > 0 && !gated) {
+          stress.gt += s.gt;
+          stress.correct += s.correct;
+          stress.onsetErrors.push(...s.onsetErrors);
+        } else if (truth.notes.length > 0) {
           sung.gt += s.gt;
           sung.correct += s.correct;
           sung.onsetErrors.push(...s.onsetErrors);
           sung.finalDelays.push(...s.finalDelays);
-        } else if (notes.length > 0) {
+        } else if (notes.length > 0 && gated) {
           failures.push(`${name}: ${notes.length} notes on a fixture that must yield none`);
         }
         noteRows.push(
           [
-            name.padEnd(18),
+            label,
             String(s.gt).padStart(4),
             String(s.det).padStart(4),
             String(s.correct).padStart(5),
@@ -280,11 +288,13 @@ function main(): number {
       drumCpuSec += seconds;
       if (!truth) {
         for (const h of hits) console.log(`    hit ${h.t.toFixed(3)} ${h.kind} vel ${h.vel.toFixed(2)}`);
-        hitRows.push(`${name.padEnd(18)} ${'-'.padStart(4)} ${String(hits.length).padStart(4)}   (no ground truth)`);
+        hitRows.push(`${label} ${'-'.padStart(4)} ${String(hits.length).padStart(4)}   (no ground truth)`);
       } else {
         const s = scoreHits(truth.hits, hits, verbose);
         allHitDelays.push(...s.finalDelays);
-        if (truth.hits.length > 0) {
+        if (!gated) {
+          // stress fixture: reported only
+        } else if (truth.hits.length > 0) {
           if (s.correct / s.gt < MIN_DRUM_ACCURACY) failures.push(`${name}: drums ${pct(s.correct / s.gt)} correct < ${pct(MIN_DRUM_ACCURACY)}`);
           if (s.extra / s.gt > MAX_DRUM_EXTRA_FRACTION) failures.push(`${name}: ${s.extra} extra hits > ${pct(MAX_DRUM_EXTRA_FRACTION)}`);
         } else if (hits.length > 0) {
@@ -292,7 +302,7 @@ function main(): number {
         }
         hitRows.push(
           [
-            name.padEnd(18),
+            label,
             String(s.gt).padStart(4),
             String(s.det).padStart(4),
             String(s.correct).padStart(5),
@@ -326,6 +336,11 @@ function main(): number {
       );
       if (acc < MIN_NOTE_ACCURACY) failures.push(`notes: ${pct(acc)} correct < ${pct(MIN_NOTE_ACCURACY)}`);
       if (meanErr >= MAX_MEAN_ONSET_ERROR_SEC) failures.push(`notes: mean onset error ${ms(meanErr)} ms >= ${ms(MAX_MEAN_ONSET_ERROR_SEC)} ms`);
+    }
+    if (stress.gt > 0) {
+      console.log(
+        `stress total (not gated): ${stress.correct}/${stress.gt} = ${pct(stress.correct / stress.gt)} correct, onset error mean ${ms(mean(stress.onsetErrors))} ms max ${ms(maxOf(stress.onsetErrors))} ms`,
+      );
     }
   }
   if (hitRows.length) {

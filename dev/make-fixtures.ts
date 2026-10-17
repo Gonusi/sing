@@ -33,12 +33,53 @@ const BREATH_IN_GAP_DBFS = -40;
 const BREATH_MIN_GAP_SEC = 0.09;
 const HARMONIC_MAX_HZ = 9000;
 const CONTROL_BLOCK_SAMPLES = 32;
+interface Formant {
+  hz: number;
+  bwHz: number;
+}
 /** "ah" vowel: cascade of 2nd-order resonators (Hz, bandwidth Hz) */
-const FORMANTS_AH = [
+const FORMANTS_AH: Formant[] = [
   { hz: 700, bwHz: 130 },
   { hz: 1220, bwHz: 140 },
   { hz: 2600, bwHz: 220 },
 ];
+/** "oo": strong fundamental, weak upper harmonics */
+const FORMANTS_OO: Formant[] = [
+  { hz: 300, bwHz: 80 },
+  { hz: 870, bwHz: 100 },
+  { hz: 2240, bwHz: 200 },
+];
+/** "ee": low F1, high F2 (weak fundamental region for low voices) */
+const FORMANTS_EE: Formant[] = [
+  { hz: 270, bwHz: 70 },
+  { hz: 2290, bwHz: 150 },
+  { hz: 3010, bwHz: 250 },
+];
+
+/** how the synthetic singer sings; DEFAULT_VOICE is what the spec's sung fixtures use */
+interface VoiceStyle {
+  vibratoCents: number;
+  vibratoHz: number;
+  vibratoDelaySec: number;
+  /** gap-started notes begin this many cents flat and rise over scoopSec */
+  scoopCents: number;
+  scoopSec: number;
+  attackSec: number;
+  aspirationRelDb: number;
+  /** cycled per note */
+  vowels: Formant[][];
+}
+
+const DEFAULT_VOICE: VoiceStyle = {
+  vibratoCents: VIBRATO_DEPTH_CENTS,
+  vibratoHz: VIBRATO_RATE_HZ,
+  vibratoDelaySec: VIBRATO_DELAY_SEC,
+  scoopCents: 0,
+  scoopSec: 0.08,
+  attackSec: VOICE_ATTACK_SEC,
+  aspirationRelDb: ASPIRATION_REL_DB,
+  vowels: [FORMANTS_AH],
+};
 
 // drums
 const BPM_BEATBOX = 100;
@@ -62,6 +103,8 @@ export type DrumKindName = 'kick' | 'snare' | 'hat';
 export interface FixtureTruth {
   name: string;
   description: string;
+  /** false for stress-* fixtures: reported by dev/analyze.ts but not part of its pass/fail thresholds */
+  gated: boolean;
   sampleRate: number;
   durationSec: number;
   notes: { t: number; dur: number; midi: number }[];
@@ -166,10 +209,10 @@ function backgroundNoise(n: number, sampleRate: number, rng: () => number, dbfs 
 
 // ---------- voice ----------
 /** cascade formant magnitude (normalised to 1 at DC) times a -6 dB/octave source tilt */
-function harmonicAmplitude(k: number, f0: number): number {
+function harmonicAmplitude(k: number, f0: number, formants: Formant[]): number {
   const f = k * f0;
   let mag = 1;
-  for (const fm of FORMANTS_AH) {
+  for (const fm of formants) {
     const r = f / fm.hz;
     const d = (f * fm.bwHz) / (fm.hz * fm.hz);
     mag /= Math.sqrt((1 - r * r) ** 2 + d * d);
@@ -184,12 +227,14 @@ interface PlacedNote extends SungNote {
   levelRms: number;
   vibPhase: number;
   vibRateHz: number;
+  style: VoiceStyle;
+  formants: Formant[];
 }
 
-function placeNotes(notes: SungNote[], rng: () => number, baseDbfs: number): PlacedNote[] {
+function placeNotes(notes: SungNote[], rng: () => number, baseDbfs: number, style: VoiceStyle): PlacedNote[] {
   const placed: PlacedNote[] = [];
   let cursor = 0;
-  for (const n of notes) {
+  for (const [i, n] of notes.entries()) {
     const start = n.join.kind === 'gap' ? cursor + n.join.sec : cursor;
     placed.push({
       ...n,
@@ -198,7 +243,9 @@ function placeNotes(notes: SungNote[], rng: () => number, baseDbfs: number): Pla
       detuneSemis: uniform(rng, -DETUNE_MAX_CENTS, DETUNE_MAX_CENTS) / 100,
       levelRms: dbToGain(baseDbfs + uniform(rng, -3, 3)),
       vibPhase: uniform(rng, 0, 2 * Math.PI),
-      vibRateHz: VIBRATO_RATE_HZ * uniform(rng, 0.95, 1.05),
+      vibRateHz: style.vibratoHz * uniform(rng, 0.95, 1.05),
+      style,
+      formants: style.vowels[i % style.vowels.length],
     });
     cursor = start + n.dur;
   }
@@ -208,8 +255,10 @@ function placeNotes(notes: SungNote[], rng: () => number, baseDbfs: number): Pla
 /** pitch (fractional MIDI) of note `n` at absolute time t, including detune and delayed vibrato */
 function notePitch(n: PlacedNote, t: number): number {
   const age = t - n.start;
-  const vibDepth = (VIBRATO_DEPTH_CENTS / 100) * raisedCos((age - VIBRATO_DELAY_SEC) / VIBRATO_FADE_IN_SEC);
-  return n.midi + n.detuneSemis + vibDepth * Math.sin(n.vibPhase + 2 * Math.PI * n.vibRateHz * age);
+  const st = n.style;
+  const vibDepth = (st.vibratoCents / 100) * raisedCos((age - st.vibratoDelaySec) / VIBRATO_FADE_IN_SEC);
+  const scoop = n.join.kind === 'gap' && st.scoopCents > 0 ? (-st.scoopCents / 100) * (1 - smoothstep(age / st.scoopSec)) : 0;
+  return n.midi + n.detuneSemis + scoop + vibDepth * Math.sin(n.vibPhase + 2 * Math.PI * n.vibRateHz * age);
 }
 
 /** Render a sung line into `out` (added). Returns ground-truth notes. */
@@ -217,6 +266,7 @@ function renderVoice(out: Float64Array, sampleRate: number, notes: PlacedNote[],
   const n = out.length;
   const pitch = new Float64Array(n).fill(NaN);
   const amp = new Float64Array(n);
+  const noteOf = new Int32Array(n).fill(-1);
 
   for (let i = 0; i < notes.length; i++) {
     const note = notes[i];
@@ -242,13 +292,14 @@ function renderVoice(out: Float64Array, sampleRate: number, notes: PlacedNote[],
         level = (1 - w) * level + w * next.levelRms;
       }
       let env = 1;
-      if (!joinedBefore) env *= raisedCos((t - note.start) / VOICE_ATTACK_SEC);
+      if (!joinedBefore) env *= raisedCos((t - note.start) / note.style.attackSec);
       if (!joinedAfter) env *= raisedCos((note.end - t) / VOICE_RELEASE_SEC);
       // dip: amplitude notch centred on the boundary
       if (note.join.kind === 'dip' && t < note.start + note.join.sec / 2) env *= dipGain(t - note.start, note.join);
       if (next && next.join.kind === 'dip' && t >= note.end - next.join.sec / 2) env *= dipGain(t - note.end, next.join);
       pitch[s] = p;
       amp[s] = level * env;
+      noteOf[s] = i;
     }
   }
 
@@ -261,16 +312,19 @@ function renderVoice(out: Float64Array, sampleRate: number, notes: PlacedNote[],
   let phase = 0;
   const amps = new Float64Array(Math.ceil(HARMONIC_MAX_HZ / 60) + 2);
   let harmonicCount = 0;
+  let lastNote = -1;
   for (let s = 0; s < n; s++) {
     jitter = smooth * jitter + (1 - smooth) * (rng() * 2 - 1) * unitStdGain;
     shimmer = smooth * shimmer + (1 - smooth) * (rng() * 2 - 1) * unitStdGain;
     if (Number.isNaN(pitch[s])) continue;
     const f0 = midiToHz(pitch[s] + (jitter * PITCH_JITTER_CENTS) / 100);
-    if (s % CONTROL_BLOCK_SAMPLES === 0 || harmonicCount === 0) {
+    if (s % CONTROL_BLOCK_SAMPLES === 0 || harmonicCount === 0 || noteOf[s] !== lastNote) {
+      lastNote = noteOf[s];
+      const formants = notes[lastNote].formants;
       harmonicCount = Math.max(1, Math.floor(HARMONIC_MAX_HZ / f0));
       let power = 0;
       for (let k = 1; k <= harmonicCount; k++) {
-        amps[k] = harmonicAmplitude(k, f0);
+        amps[k] = harmonicAmplitude(k, f0, formants);
         power += (amps[k] * amps[k]) / 2;
       }
       const norm = 1 / Math.sqrt(power);
@@ -296,7 +350,7 @@ function renderVoice(out: Float64Array, sampleRate: number, notes: PlacedNote[],
   const asp = whiteNoise(n, rng);
   applyBiquad(asp, biquad('highpass', 1000, 0.707, sampleRate));
   applyBiquad(asp, biquad('lowpass', 6000, 0.707, sampleRate));
-  const aspNorm = dbToGain(ASPIRATION_REL_DB) / rmsOf(asp);
+  const aspNorm = dbToGain(notes.length ? notes[0].style.aspirationRelDb : ASPIRATION_REL_DB) / rmsOf(asp);
   for (let s = 0; s < n; s++) out[s] += asp[s] * aspNorm * amp[s];
 
   // breath noise in gaps
@@ -400,6 +454,8 @@ function addHat(out: Float64Array, s0: number, sampleRate: number, gain: number,
 interface FixtureDef {
   name: string;
   description: string;
+  /** stress fixtures probe robustness beyond the spec; default true */
+  gated?: boolean;
   sampleRate?: number;
   build(sampleRate: number, rng: () => number): { audio: Float64Array; notes: FixtureTruth['notes']; hits: FixtureTruth['hits'] };
 }
@@ -413,10 +469,10 @@ function melody(midis: number[], rng: () => number, durLo: number, durHi: number
   }));
 }
 
-function sungFixture(sampleRate: number, rng: () => number, line: SungNote[], baseDbfs: number) {
-  const placed = placeNotes(line, rng, baseDbfs);
+function sungFixture(sampleRate: number, rng: () => number, line: SungNote[], baseDbfs: number, style = DEFAULT_VOICE, roomDbfs = BACKGROUND_NOISE_DBFS) {
+  const placed = placeNotes(line, rng, baseDbfs, style);
   const durationSec = placed[placed.length - 1].end + TAIL_SEC;
-  const audio = backgroundNoise(Math.round(durationSec * sampleRate), sampleRate, rng);
+  const audio = backgroundNoise(Math.round(durationSec * sampleRate), sampleRate, rng, roomDbfs);
   const notes = renderVoice(audio, sampleRate, placed, rng);
   return { audio, notes, hits: [] };
 }
@@ -427,16 +483,18 @@ const HIGH_LINE = [69, 71, 73, 76, 78, 81, 76, 73];
 const LEGATO_LINE_A = [64, 65, 67, 69, 70, 69, 67, 65, 64];
 const LEGATO_LINE_B = [60, 62, 64, 67, 79, 77, 76, 74, 72];
 const BEATBOX_BAR: DrumKindName[] = ['kick', 'hat', 'snare', 'hat'];
+/** 16ths at 100 bpm (150 ms apart), the densest pattern we expect */
+const BEATBOX_FAST_BAR: DrumKindName[] = ['kick', 'hat', 'hat', 'kick', 'snare', 'hat', 'kick', 'hat'];
+const FAST_LINE = [64, 66, 67, 69, 71, 69, 67, 66, 64, 62, 64, 67];
 
-function beatboxHits(rng: () => number, bars: number, jitterSec: number, baseDb: number, levelVarDb: number): PlacedHit[] {
-  const eighthSec = 60 / BPM_BEATBOX / 2;
+function beatboxHits(rng: () => number, bars: number, jitterSec: number, baseDb: number, levelVarDb: number, pattern = BEATBOX_BAR, stepSec = 60 / BPM_BEATBOX / 2): PlacedHit[] {
   const hits: PlacedHit[] = [];
   for (let b = 0; b < bars; b++) {
-    for (let i = 0; i < BEATBOX_BAR.length; i++) {
-      const idx = b * BEATBOX_BAR.length + i;
+    for (let i = 0; i < pattern.length; i++) {
+      const idx = b * pattern.length + i;
       hits.push({
-        t: LEAD_IN_SEC + idx * eighthSec + uniform(rng, -jitterSec, jitterSec),
-        kind: BEATBOX_BAR[i],
+        t: LEAD_IN_SEC + idx * stepSec + uniform(rng, -jitterSec, jitterSec),
+        kind: pattern[i],
         gainDb: baseDb + uniform(rng, -levelVarDb, levelVarDb),
       });
     }
@@ -444,9 +502,9 @@ function beatboxHits(rng: () => number, bars: number, jitterSec: number, baseDb:
   return hits;
 }
 
-function beatboxFixture(sampleRate: number, rng: () => number, hits: PlacedHit[], phone: boolean) {
+function beatboxFixture(sampleRate: number, rng: () => number, hits: PlacedHit[], phone: boolean, roomDbfs = BACKGROUND_NOISE_DBFS) {
   const durationSec = hits[hits.length - 1].t + TAIL_SEC;
-  const audio = backgroundNoise(Math.round(durationSec * sampleRate), sampleRate, rng);
+  const audio = backgroundNoise(Math.round(durationSec * sampleRate), sampleRate, rng, roomDbfs);
   renderDrums(audio, sampleRate, hits, rng);
   if (phone) {
     applyBiquad(audio, biquad('highpass', PHONE_HIGHPASS_HZ, 0.707, sampleRate));
@@ -522,6 +580,64 @@ export const FIXTURES: FixtureDef[] = [
     description: 'beatbox-basic through a phone-like mic (high-pass 120 Hz, low-pass 8 kHz), ±6 dB level and ±12 ms timing variation',
     build: (sr, rng) => beatboxFixture(sr, rng, beatboxHits(rng, 4, PHONE_TIMING_JITTER_SEC, PHONE_BASE_GAIN_DB, PHONE_LEVEL_VARIATION_DB), true),
   },
+  // ----- stress fixtures (not gated): harder than the spec, to see where the settings break -----
+  {
+    name: 'stress-sing-quiet',
+    gated: false,
+    description: 'the C major line sung quietly: notes at -34 dBFS over -45 dBFS room noise (11 dB SNR)',
+    build: (sr, rng) => sungFixture(sr, rng, melody(C_MAJOR_LINE, rng, 0.25, 0.8, 0.5, 0.1, 0.2), -34),
+  },
+  {
+    name: 'stress-sing-vibrato',
+    gated: false,
+    description: 'wide vibrato (±60 cents, 6 Hz, from 120 ms) and 80-cent scoops into every note after a gap',
+    build: (sr, rng) =>
+      sungFixture(sr, rng, [...melody(C_MAJOR_LINE, rng, 0.3, 0.8, 0.5, 0.1, 0.2), ...melody(HIGH_LINE, rng, 0.3, 0.8, 0.5, 0.1, 0.2)], -16, {
+        ...DEFAULT_VOICE,
+        vibratoCents: 60,
+        vibratoHz: 6,
+        vibratoDelaySec: 0.12,
+        scoopCents: 80,
+        scoopSec: 0.08,
+      }),
+  },
+  {
+    name: 'stress-sing-vowels',
+    gated: false,
+    description: 'the low line with vowels cycling ah / oo / ee and a 15 ms attack',
+    build: (sr, rng) =>
+      sungFixture(sr, rng, melody(LOW_LINE, rng, 0.25, 0.8, 0.5, 0.1, 0.2), -16, {
+        ...DEFAULT_VOICE,
+        attackSec: 0.015,
+        vowels: [FORMANTS_AH, FORMANTS_OO, FORMANTS_EE],
+      }),
+  },
+  {
+    name: 'stress-sing-fast',
+    gated: false,
+    description: 'a fast run: 0.10–0.20 s notes, mostly slurred, some 60–100 ms gaps',
+    build: (sr, rng) => sungFixture(sr, rng, melody(FAST_LINE, rng, 0.1, 0.2, 0.3, 0.06, 0.1), -16),
+  },
+  {
+    name: 'stress-sing-noisy',
+    gated: false,
+    description: 'the C major line in a loud room: -32 dBFS room noise, breathier voice (aspiration -16 dB)',
+    build: (sr, rng) =>
+      sungFixture(sr, rng, melody(C_MAJOR_LINE, rng, 0.25, 0.8, 0.5, 0.1, 0.2), -18, { ...DEFAULT_VOICE, aspirationRelDb: -16 }, -32),
+  },
+  {
+    name: 'stress-beatbox-fast',
+    gated: false,
+    description: 'kick hat hat kick snare hat kick hat ×3 in 16ths at 100 bpm (150 ms apart), phone mic, ±6 dB',
+    build: (sr, rng) =>
+      beatboxFixture(sr, rng, beatboxHits(rng, 3, PHONE_TIMING_JITTER_SEC / 2, PHONE_BASE_GAIN_DB, PHONE_LEVEL_VARIATION_DB, BEATBOX_FAST_BAR, 60 / BPM_BEATBOX / 4), true),
+  },
+  {
+    name: 'stress-beatbox-noisy',
+    gated: false,
+    description: 'beatbox-phone in a loud room (-32 dBFS room noise)',
+    build: (sr, rng) => beatboxFixture(sr, rng, beatboxHits(rng, 4, PHONE_TIMING_JITTER_SEC, PHONE_BASE_GAIN_DB, PHONE_LEVEL_VARIATION_DB), true, -32),
+  },
 ];
 
 /** Render every fixture (or the named ones) into outDir. Returns the written WAV paths. */
@@ -538,6 +654,7 @@ export function makeFixtures(outDir = FIXTURE_OUT_DIR, names?: string[]): string
     const truth: FixtureTruth = {
       name: def.name,
       description: def.description,
+      gated: def.gated ?? true,
       sampleRate,
       durationSec: round4(audio.length / sampleRate),
       notes,
