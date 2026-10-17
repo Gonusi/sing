@@ -8,7 +8,7 @@
 - [x] Wave 1 — instruments: synth, bass, drums, violin phrase voice, blip, samples — merged, 29/29 checks (Chromium + WebKit); legato verified by re-analysis
 - [x] Wave 1 — shell: UI (start, input, lanes, status, sheets), icons, deploy workflow — merged, screenshots reviewed
 - [x] Wave 1 merged, `tsc` + build green
-- [ ] Wave 2 — voice: fetch-model, check-grammar, recognizer, hold-to-talk (running)
+- [x] Wave 2 — voice: fetch-model, check-grammar, recognizer, hold-to-talk — merged; 100% clean / 98.7% noisy / 0 false positives, release→command 155 ms; WebKit peak 834 MB first launch
 - [x] Wave 2 — tester: test hooks + e2e suite — merged; 33 pass on Chromium+WebKit, 5.2 min
 - [x] Engine follow-up: real analysis in takes, drum close(), window clipping, master limiter — merged, 69/69 checks
 - [ ] Wave 3 — fix rounds until the e2e suite passes on Chromium (+ WebKit non-voice)
@@ -66,7 +66,7 @@
 
 **Commands:**
 - `create drum|drums|violin|synth|bass track` · `record` · `stop` · `play` · `undo` · `<instrument> on` / `<instrument> off`.
-- Matching is exact in code. A command fires early on a partial only if it is complete and not a prefix of another command; on/off needs 2 identical partials in a row. Otherwise it fires at `retrieveFinalResult()` on release.
+- Matching is exact in code. Commands fire only on vosk's FINAL result (at release + a 100 ms tail, or mid-hold when vosk closes the utterance itself). Early firing on partials was dropped: it caused false commands (measured by the voice agent, see notes/voice.md).
 - Fresh recognizer per hold. `dev/check-grammar.ts` checks every word against the model's `words.txt`.
 - A command is read against the **state at `tDown`**.
 

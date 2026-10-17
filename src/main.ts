@@ -146,6 +146,8 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
     },
   });
 
+  // installed app: ask the browser not to evict the cached 41 MB speech model (no prompt in Safari/Chrome)
+  if (matchMedia('(display-mode: standalone)').matches) void navigator.storage?.persist?.().catch(() => {});
   if (VOICE) {
     recognizer.load((f) => (ui.voiceProgress = f)).catch((e: unknown) => console.warn('voice failed to load', e));
   }
