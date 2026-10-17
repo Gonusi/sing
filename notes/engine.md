@@ -122,6 +122,15 @@ f1 15 s × 4 tracks: 267/267 · f2 L = 50 ms · j1 on/off + catch-up · l1 suspe
 Headless numbers: Chromium outLat 43.3 ms (base 5.3 + output 32 + limiter 6), WebKit 24.5 ms (2.7 + 15.8 + 6), both 48 kHz; Tone ticks every 18 ms (max 20).
 WebKit quirks seen: `currentTime` is still 0 right after boot (first take at t0 = 0 has no pre-roll) and advances in coarse steps.
 
+## Fixed after the tester's MVP+ e2e (2026-10-17)
+- Vocal seam one-sample click: a source started at a fractional `when` renders its first sample one frame before the gain automation;
+  the per-cycle GainNode now starts at 0 (was the default 1 → that sample doubled against the previous tail).
+- Phantom hats in room noise: drum takes no longer zero excluded audio before the onset detector (zeroed noise resuming at the
+  record-beep exclusion end was an onset); hits inside exclusions are dropped by placeHit. The repro's other hat was the test noise
+  bed's own start (digital silence → noise, 50 ms after boot); the regression test now lets the bed run 0.5 s first.
+- FrameClock: the first sync could take a glitched currentFrame (counter 128 frames off for the whole session → vocal audio 2.7 ms
+  late, seen once). It now also re-syncs when currentFrame disagrees on 4 consecutive calls; a single-call glitch is still ignored.
+
 ## Known risks
 - **Vocal first replay** misses ≈ 0.13 s after an overdub window (commit latency); a provisional commit before the window end could
   close it, not built. **Beep exclusion** zeroes 80 ms of a vocal take right after the record tap (on speakers the mic hears the beep).
