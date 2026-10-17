@@ -76,6 +76,8 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
   mountStatus(stage, { view });
   mountSheets(stage, {
     create: (kind: InstrumentKind) => run({ type: 'create', kind }, ctx.currentTime),
+    getEcho: () => controller.session.fx?.echo ?? 0,
+    setEcho: (amount) => controller.setEcho(amount),
     getEc: () => controller.device.ec,
     setEc: async (ec) => {
       await controller.setDevice({ ec });
