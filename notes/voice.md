@@ -17,6 +17,7 @@ Owner files: `src/voice/{grammar,recognizer,load-progress}.ts`, `scripts/fetch-m
 - [x] memory: peak + steady (phys_footprint), cold/warm, both engines
 - [x] notes complete
 - [x] round 2: in-app on/off swaps explained; toggles are now `mute X` / `X back` (compare-grammars), gate + e2e green
+- [x] round 3: `vocals` kind (vocal|vocals): 25 phrases, 664 fixtures; gate + e2e green, no vocal↔violin confusion
 
 ## Commands
 
@@ -41,7 +42,7 @@ so the check wipes its profile each run (unless `PORT` is pinned): page 1 = cold
 
 | module | exports | notes |
 |---|---|---|
-| `voice/grammar.ts` | `COMMAND_PHRASES`, `UNK`, `GRAMMAR_JSON`, `normalizeText`, `displayText`, `parseCommand`, `canFireEarly`, `EarlyRule`, `EARLY_RULE`, `earlyCommand`, `describeCommand` | 19 phrases: `create drum|drums|violin|synth|bass track`, `record`, `stop`, `play`, `undo`, `mute <drum|drums|violin|synth|bass>` (→ `{toggle, on:false}`), `<drum|drums|violin|synth|bass> back` (→ `{toggle, on:true}`). `GRAMMAR_JSON` = phrases + `"[unk]"`. `parseCommand` is exact (one phrase, nothing else; any `[unk]` → null; `Object.hasOwn`, so "constructor" can't match). `displayText` drops `[unk]` for the screen. `EARLY_RULE` = ∞ (off), see below. |
+| `voice/grammar.ts` | `COMMAND_PHRASES`, `UNK`, `GRAMMAR_JSON`, `normalizeText`, `displayText`, `parseCommand`, `canFireEarly`, `EarlyRule`, `EARLY_RULE`, `earlyCommand`, `describeCommand` | 25 phrases: `create drum|drums|violin|synth|bass|vocal|vocals track`, `record`, `stop`, `play`, `undo`, `mute <drum|drums|violin|synth|bass|vocal|vocals>` (→ `{toggle, on:false}`), `<same words> back` (→ `{toggle, on:true}`). `vocal|vocals` → kind `vocals`. `GRAMMAR_JSON` = phrases + `"[unk]"`. `parseCommand` is exact (one phrase, nothing else; any `[unk]` → null; `Object.hasOwn`, so "constructor" can't match). `displayText` drops `[unk]` for the screen. `EARLY_RULE` = ∞ (off), see below. |
 | `voice/recognizer.ts` | `createRecognizer({ctx, mic, modelUrl, onTrace?}): Recognizer`, `TraceEvent`, `CHUNK_SEC`, `RELEASE_TAIL_SEC` | Contract unchanged. `onTrace` (optional, dev only) gets every reply `{kind: partial|endpoint|final, text}`. |
 | `voice/load-progress.ts` | `constructWithProgress(modelUrl, construct)`, `PROGRESS_EVENT`, `ProgressDetail` | Real byte progress of the one model download (see Progress). |
 
@@ -130,6 +131,13 @@ clean 228/228, noisy 226/228 (99.1 %), 0/64 FP; e2e-shaped fast run same; real g
 release→command 160/176 ms; `e2e/voice-real.spec.ts` 45/45 and `e2e/voice.spec.ts` pass. Remaining misses:
 "mute bass" → "mute synth" (Samantha 170 noisy), "mute bass" → nothing (Fred 220 noisy, e2e-shaped), "play" →
 nothing (Rishi 220 noisy).
+
+**6. `vocals` kind (round 3).** `vocal`/`vocals` added (both in the vocabulary). Fixtures regenerated (25 phrases ×
+6 voices × 2 rates × clean/noisy = 600 + 64 negatives). Fast: clean 300/300, noisy 299/300 (99.7 %), 0/64 FP;
+e2e-shaped (`--bed -45 --lead 0.4 --release 0.95`): 300/300, 300/300, 0 FP. Real gate: clean 300/300, noisy
+299/300, 0/64 FP, release→command 160/176 ms. Only miss: "mute synth" → nothing (Fred 220 noisy, heard "synth").
+No vocal↔violin (or mute vocal↔mute violin) confusion in any run. `e2e/voice.spec.ts` (kinds list extended) and
+`e2e/voice-real.spec.ts` (57 cases) pass. `compare-grammars.ts` keeps the round-2 kind list (historical tool).
 
 **4. One warm spare recogniser.** Creation has no ack, but the worker queue is FIFO, so correctness never depends on
 it; the spare only moves grammar compilation out of the hold.

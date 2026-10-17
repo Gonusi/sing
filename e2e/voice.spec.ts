@@ -41,8 +41,8 @@ test('every grammar phrase parses to its command and applies', async ({ page }) 
   const r = await page.evaluate(() => {
     const s = window.__sing!;
     const out: Record<string, boolean | null> = {};
-    for (const k of ['drum', 'drums', 'violin', 'synth', 'bass']) out[`create ${k} track`] = s.voice.inject(`create ${k} track`);
-    for (const k of ['drums', 'violin', 'synth', 'bass']) {
+    for (const k of ['drum', 'drums', 'violin', 'synth', 'bass', 'vocal', 'vocals']) out[`create ${k} track`] = s.voice.inject(`create ${k} track`);
+    for (const k of ['drums', 'violin', 'synth', 'bass', 'vocal', 'vocals']) {
       out[`mute ${k}`] = s.voice.inject(`mute ${k}`);
       out[`${k} back`] = s.voice.inject(`${k} back`);
     }
@@ -52,5 +52,5 @@ test('every grammar phrase parses to its command and applies', async ({ page }) 
   });
   for (const [k, v] of Object.entries(r.out)) expect(v, k).toBe(true);
   // drum + drums both make a drums lane; the extra spaced/upper-case synth one was undone
-  expect(r.kinds).toEqual(['drums', 'drums', 'violin', 'synth', 'bass']);
+  expect(r.kinds).toEqual(['drums', 'drums', 'violin', 'synth', 'bass', 'vocals', 'vocals']);
 });
