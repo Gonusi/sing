@@ -33,8 +33,9 @@ test('regression shell: a press right after closing a sheet starts a gesture', a
   expect(gestures).toEqual(['holdStart', 'holdEnd']);
 });
 
-test('BUG engine: one-sample clicks at vocal loop seams', async ({ page }) => {
-  test.fail(true, 'src/audio/vocal-voice.ts: at some cycle starts exactly one sample is doubled (old tail + new cycle both at full level); suspect: the new GainNode is 1 (default) until its setValueAtTime(…, when)');
+test('BUG engine: one-sample clicks at vocal loop seams', async ({ page, browserName }) => {
+  // Chromium only: WebKit renders the same seams clean
+  test.fail(browserName === 'chromium', 'src/audio/vocal-voice.ts: at some cycle starts exactly one sample is doubled (old tail + new cycle both at full level); suspect: the new GainNode is 1 (default) until its setValueAtTime(…, when)');
   test.slow();
   await boot(page);
   await page.evaluate(() => window.__sing!.command({ type: 'create', kind: 'vocals' }));
