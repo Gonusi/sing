@@ -50,6 +50,13 @@ const DRUM_ROW: Record<DrumKind, number> = { hat: 0.25, snare: 0.5, kick: 0.75 }
 const DRUM_R = 4;
 const KICK_R = 5;
 
+// ---------- vocal waveform ----------
+const WAVE_PAD_Y = 10; // lane height minus 2 x this = height of a peak of 1.0
+const WAVE_ALPHA = 0.85;
+const WAVE_MIN_BAR_H = 1;
+const WAVE_GAP = 1; // px between bars, only when bars are wider than WAVE_GAP_MIN_BAR_W
+const WAVE_GAP_MIN_BAR_W = 2.5;
+
 // ---------- time axis and playhead ----------
 const FIRST_TAKE_MIN_LENGTH: Sec = 4;
 const PLAYHEAD_W = 1.5;
@@ -57,7 +64,7 @@ const PLAYHEAD_ALPHA = 0.7;
 const DASH: [number, number] = [4, 6];
 
 const LETTERS: Record<InstrumentKind, string> = { drums: 'D', violin: 'V', synth: 'S', bass: 'B', vocals: 'M' };
-const KINDS: InstrumentKind[] = ['drums', 'violin', 'synth', 'bass'];
+const KINDS: InstrumentKind[] = ['drums', 'violin', 'synth', 'bass', 'vocals'];
 
 // ---------- palette (from CSS) ----------
 type Rgb = [number, number, number];
@@ -289,11 +296,32 @@ function drawDrums(env: DrawEnv, lane: Rect, body: Rect, axis: Axis, hits: UiVie
   }
 }
 
+/** peaks[i] covers loop positions [i*L/n, (i+1)*L/n) (L = axis.length); bars mirrored around the lane's vertical centre */
+function drawWaveform(env: DrawEnv, lane: Rect, body: Rect, peaks: number[], color: Rgb): void {
+  const n = peaks.length;
+  if (n === 0) return;
+  const { g } = env;
+  const step = body.w / n;
+  const barW = Math.max(1, step > WAVE_GAP_MIN_BAR_W ? step - WAVE_GAP : step);
+  const maxH = lane.h - 2 * WAVE_PAD_Y;
+  const cy = lane.y + lane.h / 2;
+  g.fillStyle = rgba(color, WAVE_ALPHA);
+  for (let i = 0; i < n; i++) {
+    const h = Math.max(WAVE_MIN_BAR_H, Math.min(1, Math.max(0, peaks[i]!)) * maxH);
+    g.fillRect(body.x + i * step, cy - h / 2, barW, h);
+  }
+}
+
 function drawLaneContent(env: DrawEnv, lane: Rect, track: Track, view: UiView, axis: Axis): void {
   const color = env.p.kind[track.kind];
   const body = bodyOf(lane);
   const recording = view.recordingTrackId === track.id;
   if (!track.take && !recording) drawEmptyLine(env, body);
+  if (track.kind === 'vocals') {
+    const peaks = recording ? view.livePeaks : track.take?.peaks;
+    if (peaks) drawWaveform(env, lane, body, peaks, color);
+    return;
+  }
   if (track.kind === 'drums') {
     drawDrums(env, lane, body, axis, [...(track.take?.hits ?? []), ...(recording ? view.liveHits : [])], color);
     return;

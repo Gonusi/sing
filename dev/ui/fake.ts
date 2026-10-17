@@ -1,5 +1,5 @@
 // [shell] Dev page: mounts the real UI modules on a scripted fake UiView. Pick the scene with ?s=<name>:
-//   empty | four | recording | overdub | command | toast | settings | plus | many (12 lanes, scrolls)
+//   empty | four | five (four + vocals) | recording | recording-vocals | overdub | command | toast | settings | plus | many (12 lanes, scrolls)
 // ?t=<seconds> freezes the loop position (used for stable screenshots). Actions only log.
 // Test hooks: window.__gestures (every Gesture emitted), window.__actions (every action called), window.__ready.
 import '../../src/ui/style.css';
@@ -36,7 +36,7 @@ let noteSeq = 0;
 function note(pos: number, dur: number, midi: number, vel = 0.8): Note {
   return { pos, dur, midi, vel, phrase: `fake:${noteSeq++}`, legatoNext: false };
 }
-const take = (id: string, notes: Note[] = [], hits: DrumHit[] = []): Take => ({ id, notes, hits });
+const take = (id: string, notes: Note[] = [], hits: DrumHit[] = [], peaks?: number[]): Take => ({ id, notes, hits, ...(peaks ? { peaks } : {}) });
 const track = (id: string, kind: InstrumentKind, t: Take | null, on = true): Track => ({ id, kind, take: t, on });
 
 function drumHits(): DrumHit[] {
@@ -53,12 +53,28 @@ const synthNotes = (): Note[] =>
   [60, 64, 67, 72, 67, 64, 60, 55].map((midi, i) => note(i * 0.5, 0.3, midi, 0.7));
 const bassNotes = (): Note[] => [note(0, 0.9, 40), note(1, 0.9, 43), note(2, 0.9, 45), note(3, 0.9, 38)];
 
+const PEAK_BINS = 256;
+/** syllable-like envelope: bursts of sound separated by short gaps; `fraction` = share of bins filled (rest 0) */
+function vocalPeaks(fraction = 1): number[] {
+  const filled = Math.round(PEAK_BINS * fraction);
+  return Array.from({ length: PEAK_BINS }, (_, i) => {
+    if (i >= filled) return 0;
+    const syllable = Math.abs(Math.sin((i / PEAK_BINS) * 11 * Math.PI)); // ~11 syllables per loop
+    const phrase = 0.55 + 0.45 * Math.sin((i / PEAK_BINS) * 2.3 * Math.PI + 0.8);
+    const jitter = 0.75 + 0.25 * Math.sin(i * 12.9898);
+    const gap = Math.sin((i / PEAK_BINS) * 3 * Math.PI) < -0.9 ? 0.05 : 1; // two breaths
+    return Math.min(1, Math.max(0.02, syllable ** 0.7 * phrase * jitter * gap));
+  });
+}
+
 const fourTracks = (): Track[] => [
   track('drums', 'drums', take('t1', [], drumHits())),
   track('violin', 'violin', take('t2', violinNotes())),
   track('synth', 'synth', take('t3', synthNotes())),
   track('bass', 'bass', take('t4', bassNotes()), false),
 ];
+
+const fiveTracks = (): Track[] => [...fourTracks(), track('vocals', 'vocals', take('t5', [], [], vocalPeaks()))];
 
 function loopPos(): number {
   return frozenT !== null ? Number(frozenT) : (performance.now() / 1000) % LOOP;
@@ -89,6 +105,21 @@ function fourView(): UiView {
     state: 'playing',
     session: { v: 1, loopLength: LOOP, tracks: fourTracks(), selectedId: 'violin' },
     loopPos: loopPos(),
+  };
+}
+
+function fiveView(): UiView {
+  return { ...fourView(), session: { v: 1, loopLength: LOOP, tracks: fiveTracks(), selectedId: 'vocals' } };
+}
+
+function recordingVocalsView(): UiView {
+  return {
+    ...baseView(),
+    state: 'recordingFirst',
+    session: { v: 1, loopLength: null, tracks: [track('m1', 'vocals', null)], selectedId: 'm1' },
+    recordingTrackId: 'm1',
+    livePeaks: vocalPeaks(0.6),
+    elapsed: 3.2,
   };
 }
 
@@ -140,7 +171,9 @@ function manyView(): UiView {
 const SCENES: Record<string, () => UiView> = {
   empty: baseView,
   four: fourView,
+  five: fiveView,
   recording: recordingView,
+  'recording-vocals': recordingVocalsView,
   overdub: overdubView,
   command: () => ({ ...fourView(), holding: true, partial: 'create violin' }),
   toast: toastView,
@@ -162,8 +195,14 @@ mountLanes(stage, {
 });
 mountStatus(stage, { view });
 let ec = false;
+let echo = 0.4;
 mountSheets(stage, {
   create: (kind) => log(`create:${kind}`),
+  getEcho: () => echo,
+  setEcho: (amount) => {
+    echo = amount;
+    log(`setEcho:${amount}`);
+  },
   getEc: () => ec,
   setEc: async (next) => {
     ec = next;

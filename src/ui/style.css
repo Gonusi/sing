@@ -16,6 +16,7 @@
   --violin: #ff6b9a;
   --synth: #3fd0e0;
   --bass: #9b7bff;
+  --vocals: #5ad17a;
 
   --font: system-ui, -apple-system, "Segoe UI", sans-serif;
 
@@ -31,6 +32,7 @@
 .kind-violin { --c: var(--violin); }
 .kind-synth { --c: var(--synth); }
 .kind-bass { --c: var(--bass); }
+.kind-vocals { --c: var(--vocals); }
 
 /* ---------- global ---------- */
 html, body {
@@ -124,6 +126,39 @@ button:focus-visible { outline: 2px solid var(--cmd); outline-offset: 2px; }
 }
 .topbar-title { font-size: 15px; font-weight: 600; color: var(--dim); }
 .topbar-buttons { display: flex; gap: 8px; }
+.topbar-right { display: flex; align-items: center; gap: 12px; }
+.echo { display: flex; align-items: center; gap: 8px; }
+.echo-label { font-size: 11px; letter-spacing: 0.06em; color: var(--dim); }
+@media (max-width: 339px) { .echo-label { display: none; } }
+.echo-slider {
+  --fill: 0%;
+  width: 96px;
+  height: 28px; /* touch height; the visible track is 2px */
+  margin: 0;
+  padding: 0;
+  background: none;
+  -webkit-appearance: none;
+  appearance: none;
+  touch-action: none;
+}
+.echo-slider:focus-visible { outline: 2px solid var(--cmd); outline-offset: 2px; }
+.echo-slider::-webkit-slider-runnable-track {
+  height: 2px;
+  border-radius: 1px;
+  background: linear-gradient(to right, color-mix(in srgb, var(--fg) 70%, transparent) var(--fill), var(--line) var(--fill));
+}
+.echo-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -6px; /* centre on the 2px track */
+  border: 0;
+  border-radius: 50%;
+  background: var(--fg);
+}
+.echo-slider::-moz-range-track { height: 2px; border-radius: 1px; background: var(--line); }
+.echo-slider::-moz-range-progress { height: 2px; border-radius: 1px; background: color-mix(in srgb, var(--fg) 70%, transparent); }
+.echo-slider::-moz-range-thumb { width: 14px; height: 14px; border: 0; border-radius: 50%; background: var(--fg); }
 .icon-btn {
   width: 40px;
   height: 40px;
@@ -289,6 +324,10 @@ button:focus-visible { outline: 2px solid var(--cmd); outline-offset: 2px; }
   font-size: 14px;
   font-weight: 700;
 }
+
+.kind-btn-wide { width: 100%; margin-top: 12px; }
+.kind-text { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.kind-sub { font-size: 12px; color: var(--dim); }
 
 /* ⋯ sheet */
 .row {

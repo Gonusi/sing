@@ -1,11 +1,14 @@
 // [shell] Top bar (title, ＋ instrument picker, ⋯ settings) and the two bottom sheets they open.
 // Everything here is data-no-gesture: taps never reach the record/stop gesture layer.
-// Settings rows: echo cancellation, calibrate latency, audio probe, export last take, clear session, info, credits.
+// The top bar also holds the echo slider (0..1, live). Settings rows: echo cancellation, calibrate latency, audio probe, export last take, clear session, info, credits.
 import { INSTRUMENTS } from '../types.ts';
 import type { InstrumentKind } from '../types.ts';
 
 export interface SheetActions {
   create(kind: InstrumentKind): void;
+  /** global echo amount 0..1 (Controller.setEcho / Session.fx.echo) */
+  getEcho(): number;
+  setEcho(amount: number): void;
   getEc(): boolean;
   setEc(ec: boolean): Promise<void>;
   /** runs the clap-along; onClick fires per click so the sheet can pulse; resolves with a short result text */
@@ -19,6 +22,10 @@ export interface SheetActions {
   info(): string[];
   credits: string;
 }
+
+const ECHO_PERCENT = 100;
+const GRID_KINDS = INSTRUMENTS.filter((k) => k !== 'vocals');
+const KIND_SUBLABEL: Partial<Record<InstrumentKind, string>> = { vocals: 'your voice' };
 
 const LETTERS: Record<InstrumentKind, string> = { drums: 'D', violin: 'V', synth: 'S', bass: 'B', vocals: 'M' };
 const EXPORT_EMPTY_MS = 1500;
@@ -101,17 +108,21 @@ function createSheet(root: HTMLElement, caption: string, hooks: SheetHooks = {})
 // ---------- ＋ sheet ----------
 function fillNewTrackSheet(body: HTMLElement, actions: SheetActions, close: () => void): void {
   const grid = el('div', 'kind-grid');
-  for (const kind of INSTRUMENTS) {
-    const button = el('button', `kind-btn kind-${kind}`);
+  const makeButton = (kind: InstrumentKind, className = ''): HTMLButtonElement => {
+    const button = el('button', `kind-btn kind-${kind} ${className}`.trim());
     button.dataset.kind = kind;
-    button.append(el('span', 'kind-circle', LETTERS[kind]), el('span', '', kind));
+    const sub = KIND_SUBLABEL[kind];
+    const text = sub ? el('span', 'kind-text') : el('span', '', kind);
+    if (sub) text.append(el('span', '', kind), el('span', 'kind-sub', sub));
+    button.append(el('span', 'kind-circle', LETTERS[kind]), text);
     button.addEventListener('click', () => {
       actions.create(kind);
       close();
     });
-    grid.append(button);
-  }
-  body.append(grid);
+    return button;
+  };
+  grid.append(...GRID_KINDS.map((kind) => makeButton(kind)));
+  body.append(grid, makeButton('vocals', 'kind-btn-wide'));
 }
 
 // ---------- ⋯ sheet rows ----------
@@ -294,8 +305,38 @@ function fillSettingsSheet(body: HTMLElement, rows: SettingsRow[], info: HTMLEle
 }
 
 // ---------- top bar ----------
-function createTopBar(onPlus: () => void, onSettings: () => void): HTMLElement {
+interface TopBar {
+  root: HTMLElement;
+  /** put the slider at the current echo amount */
+  syncEcho(): void;
+}
+
+function createEchoControl(actions: SheetActions): { root: HTMLElement; sync(): void } {
+  const root = el('label', 'echo');
+  const slider = noGesture(el('input', 'echo-slider'));
+  slider.type = 'range';
+  slider.min = '0';
+  slider.max = '1';
+  slider.step = '0.01';
+  slider.setAttribute('aria-label', 'echo');
+  const paint = (): void => slider.style.setProperty('--fill', `${Number(slider.value) * ECHO_PERCENT}%`);
+  slider.addEventListener('input', () => {
+    paint();
+    actions.setEcho(Number(slider.value));
+  });
+  root.append(el('span', 'echo-label', 'echo'), slider);
+  return {
+    root,
+    sync: () => {
+      slider.value = String(actions.getEcho());
+      paint();
+    },
+  };
+}
+
+function createTopBar(actions: SheetActions, onPlus: () => void, onSettings: () => void): TopBar {
   const bar = noGesture(el('div', 'topbar'));
+  const echo = createEchoControl(actions);
   const buttons = el('div', 'topbar-buttons');
   const plus = el('button', 'icon-btn', '＋');
   plus.dataset.action = 'new-track';
@@ -306,12 +347,15 @@ function createTopBar(onPlus: () => void, onSettings: () => void): HTMLElement {
   more.setAttribute('aria-label', 'Settings');
   more.addEventListener('click', onSettings);
   buttons.append(plus, more);
-  bar.append(el('div', 'topbar-title', 'Sing'), buttons);
-  return bar;
+  const right = el('div', 'topbar-right');
+  right.append(echo.root, buttons);
+  bar.append(el('div', 'topbar-title', 'Sing'), right);
+  return { root: bar, syncEcho: echo.sync };
 }
 
 export function mountSheets(root: HTMLElement, actions: SheetActions): () => void {
-  const newTrack = createSheet(root, 'NEW TRACK');
+  let syncEcho = (): void => {}; // set once the top bar exists; sheet hooks only run after mount
+  const newTrack = createSheet(root, 'NEW TRACK', { onClose: () => syncEcho() });
   fillNewTrackSheet(newTrack.body, actions, newTrack.close);
 
   const rows: SettingsRow[] = []; // filled below; the hooks only run after mount
@@ -322,7 +366,10 @@ export function mountSheets(root: HTMLElement, actions: SheetActions): () => voi
       rows.forEach((r) => r.reset());
       info.refresh();
     },
-    onClose: () => probe.stop?.(),
+    onClose: () => {
+      probe.stop?.();
+      syncEcho();
+    },
   });
   rows.push(
     createEcRow(actions),
@@ -333,12 +380,14 @@ export function mountSheets(root: HTMLElement, actions: SheetActions): () => voi
   );
   fillSettingsSheet(settings.body, rows, info.root, actions.credits);
 
-  const bar = createTopBar(newTrack.open, settings.open);
-  root.append(bar);
+  const bar = createTopBar(actions, newTrack.open, settings.open);
+  syncEcho = bar.syncEcho;
+  syncEcho();
+  root.append(bar.root);
 
   return () => {
     probe.stop?.();
-    bar.remove();
+    bar.root.remove();
     newTrack.layer.remove();
     settings.layer.remove();
   };

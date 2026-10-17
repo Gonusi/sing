@@ -9,7 +9,7 @@ import { startDev } from '../lib/serve.ts';
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const OUT_DIR = fileURLToPath(new URL('./out/', import.meta.url));
 const VIEWPORT = { width: 390, height: 844 };
-const SCENES = ['empty', 'four', 'recording', 'overdub', 'command', 'toast', 'settings', 'plus', 'many'];
+const SCENES = ['empty', 'four', 'five', 'recording', 'recording-vocals', 'overdub', 'command', 'toast', 'settings', 'plus', 'many'];
 const FROZEN_T = 1.6; // loop position for stable screenshots
 const SETTLE_MS = 700; // transitions (sheet 200 ms, overlay 120 ms) finished; toast still fully visible
 const HOLD_MS = 500;
@@ -119,15 +119,36 @@ async function checkGestures(page: Page, url: string, cdp: CDPSession): Promise<
   check('strip: no gesture emitted', (await gestureTypes(page)).length === 0);
 }
 
+async function checkEcho(page: Page): Promise<void> {
+  const initial = await page.locator('.echo-slider').inputValue();
+  check('echo: slider starts at getEcho()', initial === '0.4', `value=${initial}`);
+  await resetLogs(page);
+  const box = await page.locator('.echo-slider').boundingBox();
+  if (!box) throw new Error('no echo slider');
+  await page.touchscreen.tap(box.x + box.width * 0.75, box.y + box.height / 2);
+  const acts = (await actions(page)).filter((a) => a.startsWith('setEcho:'));
+  const value = await page.locator('.echo-slider').inputValue();
+  check('echo: tapping the slider calls setEcho, no gesture', acts.length > 0 && Math.abs(Number(value) - 0.75) < 0.1 && (await gestureTypes(page)).length === 0, `acts=${acts.join()} value=${value} gestures=${(await gestureTypes(page)).join()}`);
+  await page.evaluate(() => {
+    const s = document.querySelector<HTMLInputElement>('.echo-slider')!;
+    s.value = '0.2';
+    s.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  check('echo: input event calls setEcho with the value', (await actions(page)).includes('setEcho:0.2'));
+}
+
 async function checkSheets(page: Page, url: string): Promise<void> {
   await openScene(page, url, 'four');
   await resetLogs(page);
   await tap(page, '[data-action="new-track"]');
   await page.waitForTimeout(350);
   check('plus: opens the sheet, no gesture', (await page.locator('.sheet-layer.open').count()) === 1 && (await gestureTypes(page)).length === 0);
+  check('plus: five kind buttons incl. vocals', (await page.locator('.kind-btn').count()) === 5 && (await page.locator('.kind-btn[data-kind="vocals"]').textContent()) === 'Mvocalsyour voice');
   await tap(page, '.kind-btn[data-kind="violin"]');
   await page.waitForTimeout(350);
   check('plus: kind button creates and closes the sheet', (await actions(page)).join() === 'create:violin' && (await page.locator('.sheet-layer.open').count()) === 0, (await actions(page)).join());
+
+  await checkEcho(page);
 
   await tap(page, '[data-action="settings"]');
   await page.waitForTimeout(350);
