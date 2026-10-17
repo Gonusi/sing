@@ -9,6 +9,9 @@
 //   kick a frozen clock with suspend()+resume(), and emit 'interrupted' / 'resumed'.
 // - Output path: voices → master (MASTER_GAIN, ≈ 6 dB headroom: four tracks can exceed 0 dBFS) → limiter → destination.
 //   The limiter delays everything by its fixed look-ahead; outLat() includes that delay so `heard` stays exact.
+// - Echo bus: track strips (loop/clock.ts) also connect to `fxSend`; fxSend → feedback delay + reverb → fxWet → master.
+//   setEcho(a): send = a, feedback 0.2 + 0.3·a, wet on/off; a = 0 is fully dry (no tail). Clicks, blips and the probe
+//   connect to master directly, so they never reach the FX bus.
 import * as Tone from 'tone';
 import micWorkletUrl from './mic-worklet.ts?worker&url';
 import type { Sec } from '../types.ts';
@@ -26,6 +29,10 @@ export interface AudioEngine {
   readonly sink: GainNode;
   /** master → limiter → destination (tests capture it to see what reaches the speakers) */
   readonly limiter: DynamicsCompressorNode;
+  /** echo send: track strips connect here (besides master); its gain is the echo amount */
+  readonly fxSend: GainNode;
+  /** echo/space amount 0..1, ramped */
+  setEcho(amount: number): void;
   /** Tone's worker-based ticker (every 15 ms); each callback is isolated by try/catch */
   onTick(cb: () => void): () => void;
 }
@@ -48,6 +55,10 @@ export const LIMITER = { thresholdDb: -3, kneeDb: 0, ratio: 20, attackSec: 0.003
 export const LIMITER_MAKEUP = 10 ** ((-0.6 * LIMITER.thresholdDb * (1 - 1 / LIMITER.ratio)) / 20);
 /** DynamicsCompressorNode's fixed look-ahead (pre-delay) in Chromium and WebKit, measured by dev/engine/check.ts i2 */
 export const LIMITER_DELAY_SEC = 0.006;
+/** echo: delay time, feedback at amount 0 / 1, delay and reverb return levels, feedback-path lowpass */
+export const ECHO = { delaySec: 0.33, feedbackMin: 0.2, feedbackMax: 0.5, delayWet: 0.5, reverbWet: 0.35, lowpassHz: 3500, rampSec: 0.05 } as const;
+/** generated reverb impulse: decaying noise */
+export const REVERB = { lengthSec: 1.6, decayTauSec: 0.23, seed: 0x5eed } as const;
 
 type LifecycleEvent = 'interrupted' | 'resumed';
 
@@ -67,8 +78,68 @@ export function createAudioEngine(): Promise<AudioEngine> {
   const sink = ctx.createGain();
   sink.gain.value = 0;
   sink.connect(ctx.destination);
+  const fx = createFxBus(ctx, master);
   // ---- asynchronous part ----
-  return finishEngine(ctx, master, limiter, sink, resumed);
+  return finishEngine(ctx, master, limiter, sink, fx, resumed);
+}
+
+interface FxBus {
+  send: GainNode;
+  setEcho(amount: number): void;
+}
+
+/** send → [delay ⟲ lowpass·feedback] + [convolver reverb] → wet → master */
+function createFxBus(ctx: AudioContext, master: GainNode): FxBus {
+  const send = ctx.createGain();
+  send.gain.value = 0;
+  const wet = ctx.createGain();
+  wet.gain.value = 0;
+  wet.connect(master);
+  const delay = ctx.createDelay(1);
+  delay.delayTime.value = ECHO.delaySec;
+  const lowpass = ctx.createBiquadFilter();
+  lowpass.type = 'lowpass';
+  lowpass.frequency.value = ECHO.lowpassHz;
+  const feedback = ctx.createGain();
+  feedback.gain.value = ECHO.feedbackMin;
+  const delayOut = ctx.createGain();
+  delayOut.gain.value = ECHO.delayWet;
+  send.connect(delay);
+  delay.connect(lowpass).connect(feedback).connect(delay);
+  delay.connect(delayOut).connect(wet);
+  const reverb = ctx.createConvolver();
+  reverb.buffer = reverbImpulse(ctx);
+  const reverbOut = ctx.createGain();
+  reverbOut.gain.value = ECHO.reverbWet;
+  send.connect(reverb).connect(reverbOut).connect(wet);
+  const ramp = (p: AudioParam, v: number) => {
+    const t = ctx.currentTime;
+    p.cancelScheduledValues(t);
+    p.setValueAtTime(p.value, t);
+    p.linearRampToValueAtTime(v, t + ECHO.rampSec);
+  };
+  return {
+    send,
+    setEcho(amount) {
+      const a = Math.min(1, Math.max(0, Number.isFinite(amount) ? amount : 0));
+      ramp(send.gain, a);
+      ramp(feedback.gain, a > 0 ? ECHO.feedbackMin + (ECHO.feedbackMax - ECHO.feedbackMin) * a : 0);
+      ramp(wet.gain, a > 0 ? 1 : 0);
+    },
+  };
+}
+
+/** mono decaying noise (seeded, so every device sounds the same) */
+function reverbImpulse(ctx: BaseAudioContext): AudioBuffer {
+  const n = Math.round(REVERB.lengthSec * ctx.sampleRate);
+  const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+  const x = buf.getChannelData(0);
+  let seed = REVERB.seed;
+  for (let i = 0; i < n; i++) {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    x[i] = (seed / 2 ** 32 * 2 - 1) * Math.exp(-i / ctx.sampleRate / REVERB.decayTauSec);
+  }
+  return buf;
 }
 
 function createLimiter(ctx: AudioContext): DynamicsCompressorNode {
@@ -82,7 +153,7 @@ function createLimiter(ctx: AudioContext): DynamicsCompressorNode {
 }
 
 async function finishEngine(
-  ctx: AudioContext, master: GainNode, limiter: DynamicsCompressorNode, sink: GainNode, resumed: Promise<void>,
+  ctx: AudioContext, master: GainNode, limiter: DynamicsCompressorNode, sink: GainNode, fx: FxBus, resumed: Promise<void>,
 ): Promise<AudioEngine> {
   installToneContext(ctx);
   await ctx.audioWorklet.addModule(micWorkletUrl);
@@ -94,6 +165,8 @@ async function finishEngine(
     master,
     sink,
     limiter,
+    fxSend: fx.send,
+    setEcho: fx.setEcho,
     outLat: () => (ctx.baseLatency || 0) + (ctx.outputLatency || 0) + LIMITER_DELAY_SEC,
     onLifecycle: lifecycle.on,
     onTick(cb) {

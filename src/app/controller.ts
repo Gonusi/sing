@@ -36,7 +36,9 @@ import type { AudioEngine } from '../audio/context.ts';
 import type { Mic } from '../audio/mic.ts';
 import { wavBlob } from '../audio/wav-encode.ts';
 import { createScheduler, type LoopScheduler } from '../loop/clock.ts';
-import { createTakeRecorder, type Analysis, type TakeRecorder } from '../loop/take.ts';
+import { FIRST_TAKE_DISPLAY_MIN_SEC, createTakeRecorder, type Analysis, type TakeRecorder } from '../loop/take.ts';
+import { createAudioStore, referencedAudio } from '../audio/audio-store.ts';
+import { createVocalVoice } from '../audio/vocal-voice.ts';
 import { createSessionStore, emptySession, loadSession, saveDevice, type SessionStore } from './session.ts';
 import { createVoice as createInstrumentVoice } from '../instruments/index.ts';
 import { playBlip } from '../instruments/blip.ts';
@@ -66,6 +68,8 @@ export interface EngineController extends Controller {
   /** write the pending session save now */
   flush(): Promise<void>;
   readonly scheduler: LoopScheduler;
+  /** decoded loop audio of a vocal track (null when none / not loaded) */
+  vocalAudio(trackId: string): AudioBuffer | null;
   dispose(): void;
 }
 
@@ -73,6 +77,10 @@ export const MIN_FIRST_TAKE_SEC = 1;
 export const MAX_FIRST_TAKE_SEC = 60;
 /** overdub commit waits for the last audio (inLat) plus analysis finalisation */
 export const COMMIT_MARGIN_SEC = 0.15;
+/** vocal overdubs need only the 20 ms seam tail + one block: commit sooner, so less of the first replay is missed */
+export const VOCAL_COMMIT_MARGIN_SEC = 0.05;
+/** echo amount for a session that has none saved (?test: 0, so existing expectations hold) */
+export const DEFAULT_ECHO = 0.2;
 /** stopped → play: pos 0 is scheduled this long after now, so nothing starts late */
 export const START_LEAD_SEC = 0.03;
 const BEEP_HZ = 1320;
@@ -154,6 +162,13 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
   // ---- session, state ----
   const restored = deps.restore === false ? null : await loadSession();
   const store: SessionStore = createSessionStore(restored ?? emptySession(), { persist: deps.persist ?? true });
+  // vocal audio: load what the session references before voices sync; drop stored audio nothing references
+  const audio = createAudioStore(ctx, { persist: deps.persist ?? true });
+  await audio.loadAll(referencedAudio(store.sessions()));
+  const gcAudio = () => void audio.gc(referencedAudio(store.sessions()));
+  gcAudio();
+  const echoOf = (sess: Session) => sess.fx?.echo ?? (deps.test ? 0 : DEFAULT_ECHO);
+  engine.setEcho(echoOf(store.current));
   let state: AppState = store.current.loopLength !== null ? 'stopped' : 'idle';
   const history: { t: Sec; state: AppState }[] = [{ t: -Infinity, state }];
   let take: ActiveTake | null = null;
@@ -190,13 +205,17 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     const output = ctx.createGain();
     return { kind, output, play: () => {}, stopAll: () => {}, dispose: () => output.disconnect() };
   };
+  const vocalBufferOf = (trackId: string) => () => {
+    const key = store.current.tracks.find((t) => t.id === trackId)?.take?.audio?.key;
+    return key ? audio.buffer(key) : null;
+  };
   const syncVoices = () => {
     const ids = new Set(store.current.tracks.map((t) => t.id));
     for (const t of store.current.tracks) {
       if (voices.has(t.id)) continue;
       let v: Voice;
       try {
-        v = makeVoice(t.kind, ctx);
+        v = t.kind === 'vocals' ? createVocalVoice(ctx, vocalBufferOf(t.id)) : makeVoice(t.kind, ctx);
       } catch (e) {
         log('error', { where: 'createVoice', kind: t.kind, message: String(e) });
         v = silentVoice(t.kind);
@@ -229,6 +248,12 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     store.set(next, undoPoint);
     syncVoices();
     changed();
+    if (undoPoint) gcAudio(); // the undo stack may have dropped its oldest snapshot
+  };
+  /** a vocal take's audio goes into the cache (synchronously) and IndexedDB before the session references it */
+  const keepVocalAudio = (rec: TakeRecorder, result: Take) => {
+    const pcm = rec.loopAudio();
+    if (result.audio && pcm) void audio.put(result.audio.key, pcm, result.audio.sampleRate);
   };
 
   // ---- small audio helpers ----
@@ -295,7 +320,7 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     const beepAt = ctx.currentTime;
     playBeep(beepAt);
     const beepHeard = beepAt + engine.outLat();
-    if (lane.kind === 'drums' && beepHeard >= tDown) take.rec.addExclusion({ from: beepHeard, to: beepHeard + BEEP_EXCLUDE_SEC });
+    if ((lane.kind === 'drums' || lane.kind === 'vocals') && beepHeard >= tDown) take.rec.addExclusion({ from: beepHeard, to: beepHeard + BEEP_EXCLUDE_SEC });
     setState('recordingFirst', tDown);
     return true;
   };
@@ -311,6 +336,7 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     }
     const result = t.rec.finish(end);
     endTake(t);
+    keepVocalAudio(t.rec, result);
     const cur = store.current;
     const undoPoint = t.createdLane ? removeTrack(cur, t.trackId, t.prevSelected) : cur;
     commitSession({ ...cur, loopLength: L, tracks: withTake(cur.tracks, t.trackId, result) }, undoPoint);
@@ -350,7 +376,8 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     if (!t || t.mode !== 'overdub') return false;
     const result = t.rec.finish(end);
     endTake(t);
-    if (result.notes.length + result.hits.length === 0) {
+    keepVocalAudio(t.rec, result);
+    if (result.notes.length + result.hits.length === 0 && !result.audio) {
       log('take', { phase: 'discard', reason: 'empty', trackId: t.trackId });
       if (t.createdLane) commitSession(removeTrack(store.current, t.trackId, t.prevSelected));
       else pushTracks();
@@ -396,11 +423,16 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
 
   // ---- undo ----
   const popUndo = (at: Sec): boolean => {
-    const prev = store.undo();
-    if (!prev) {
+    const fx = store.current.fx;
+    const popped = store.undo();
+    if (!popped) {
       log('undo', { empty: true });
       return false;
     }
+    // echo is not an undo step: keep the current setting on the restored snapshot
+    const prev = fx ? { ...popped, fx } : popped;
+    if (prev !== popped) store.set(prev);
+    gcAudio();
     syncVoices();
     changed();
     log('undo', { tracks: prev.tracks.length, loopLength: prev.loopLength });
@@ -513,7 +545,8 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     if (t.mode === 'overdub') {
       const L = store.current.loopLength ?? 0;
       const end = t.start + L;
-      if (now >= end + t.rec.inLat + COMMIT_MARGIN_SEC) {
+      const margin = store.current.tracks.find((x) => x.id === t.trackId)?.kind === 'vocals' ? VOCAL_COMMIT_MARGIN_SEC : COMMIT_MARGIN_SEC;
+      if (now >= end + t.rec.inLat + margin) {
         commitOverdub(end);
         if (state === 'overdubbing') setState('playing', end);
       }
@@ -539,8 +572,17 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       return device;
     },
     scheduler,
-    setEcho() {
-      // MVP+ placeholder (engine)
+    setEcho(amount) {
+      const a = Math.min(1, Math.max(0, Number.isFinite(amount) ? amount : 0));
+      engine.setEcho(a);
+      const cur = store.current;
+      if (cur.fx?.echo === a) return;
+      store.set({ ...cur, fx: { echo: a } }); // no undo point
+      log('echo', { amount: a });
+      changed();
+    },
+    vocalAudio(trackId) {
+      return vocalBufferOf(trackId)();
     },
     view(): View {
       const now = ctx.currentTime;
@@ -551,7 +593,7 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
         session: store.current,
         recordingTrackId: t?.trackId ?? null,
         liveNotes: t ? t.rec.liveNotes() : [],
-        livePeaks: null, // MVP+ placeholder (engine)
+        livePeaks: t ? t.rec.livePeaks(Math.max(now - t.start, FIRST_TAKE_DISPLAY_MIN_SEC)) : null,
         liveHits: t ? t.rec.liveHits() : [],
         openNote: t ? t.rec.openNote() : null,
         loopPos: scheduler.pos(now),
@@ -609,8 +651,11 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     async clearSession() {
       if (take) discardTake();
       stopPlayback();
+      const fx = store.current.fx;
       await store.clear();
+      if (fx) store.set({ ...store.current, fx }); // the echo setting survives a clear
       lastCommit = null;
+      gcAudio();
       syncVoices();
       setState('idle', ctx.currentTime);
       changed();

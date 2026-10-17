@@ -1,6 +1,6 @@
 // [engine] dev page driver: boots the REAL engine modules (test mic, fake analysis, real instrument stubs/voices)
 // and exposes window.__eng for dev/engine/check.ts. Times are context seconds; "stamp" = mic stamp time.
-import { del, set } from 'idb-keyval';
+import { del, keys, set } from 'idb-keyval';
 import type { Command, Gesture, LogEvent, Sec, Session, Voice } from '../../src/types.ts';
 import { LIMITER_DELAY_SEC, MASTER_GAIN, createAudioEngine, type AudioEngine } from '../../src/audio/context.ts';
 import { createMic, type Mic } from '../../src/audio/mic.ts';
@@ -49,6 +49,16 @@ export interface Eng {
   loadFixture(name: string): Promise<FixtureTruth>;
   /** inject fixture seconds [from, to) so that fixture time `from` has mic stamp `at` (5 ms fade at the cut) */
   injectFixture(name: string, from: Sec, to: Sec, at: Sec): void;
+  /** deterministic white noise (seeded LCG), amplitude amp */
+  noise(seed: number, n: number, amp?: number): Float32Array;
+  /** inject raw samples (e.g. noise()) so samples[0] has mic stamp `at` */
+  injectSamples(x: Float32Array, at: Sec): void;
+  /** capture a node for `sec` seconds from now: frame of pcm[0] + pcm */
+  captureNode(node: AudioNode, sec: Sec): Promise<{ frame: number; pcm: Float32Array }>;
+  /** click through a strip-like node (master + fxSend) with echo `amount`; limiter output around it */
+  echoProbe(amount: number): Promise<{ clickFrame: number; frame: number; pcm: number[]; sampleRate: number }>;
+  /** stored vocal audio keys in IndexedDB */
+  audioKeys(): Promise<string[]>;
   /** onChange calls since boot */
   changes: number;
   /** ?real: the mic is getUserMedia (Chromium fake-capture WAV), not the test mic */
@@ -171,6 +181,51 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
       const src = fixtures.get(name);
       if (!src) throw new Error(`fixture ${name} not loaded`);
       mic.inject(sliceBuffer(ctx, src, from, to), at);
+    },
+    audioKeys: async () => (await keys()).filter((k): k is string => typeof k === 'string' && k.startsWith('sing.audio.')),
+    noise(seed: number, n: number, amp = 0.3) {
+      const x = new Float32Array(n);
+      let st = seed >>> 0;
+      for (let i = 0; i < n; i++) {
+        st = (st * 1664525 + 1013904223) >>> 0;
+        x[i] = amp * (st / 2 ** 32 * 2 - 1);
+      }
+      return x;
+    },
+    injectSamples(x: Float32Array, at: Sec) {
+      const b = ctx.createBuffer(1, x.length, ctx.sampleRate);
+      b.getChannelData(0).set(x);
+      mic.inject(b, at);
+    },
+    async captureNode(node: AudioNode, sec: Sec) {
+      const cap = createCapture(engine);
+      cap.start(node);
+      await eng.sleep(sec);
+      const r = await cap.stop();
+      return { frame: r.frame, pcm: r.pcm };
+    },
+    async echoProbe(amount: number) {
+      c.setEcho(amount);
+      await eng.sleep(1.2); // ramps settle, earlier tails die
+      const strip = ctx.createGain();
+      strip.connect(engine.master);
+      strip.connect(engine.fxSend);
+      const cap = createCapture(engine);
+      cap.start(engine.limiter);
+      const at = ctx.currentTime + 0.1;
+      playClick(ctx, strip, at);
+      await eng.sleep(1.1);
+      const r = await cap.stop();
+      strip.disconnect();
+      // 2.5 ms RMS envelope, to keep the payload small
+      const hop = Math.round(0.0025 * ctx.sampleRate);
+      const env: number[] = [];
+      for (let i = 0; i + hop <= r.pcm.length; i += hop) {
+        let sum = 0;
+        for (let j = i; j < i + hop; j++) sum += r.pcm[j] * r.pcm[j];
+        env.push(Math.sqrt(sum / hop));
+      }
+      return { clickFrame: Math.round(at * ctx.sampleRate), frame: r.frame, pcm: env, sampleRate: ctx.sampleRate / hop };
     },
     async limiterDelay() {
       const a = createCapture(engine);

@@ -12,6 +12,10 @@
 // dropped and a note open at its start is cut there (post-filter, because a hold is known only 300 ms late).
 // Autotune: midi = snapMidi(raw) (+ registerShift of the take, computed at commit; the pending overdub track
 // uses the running shift of the notes so far). Phrases: assignPhrases at commit (running for pending).
+// Vocal takes ('vocals'): no analysis; the raw mic audio is the take (buildVocalLoop): corrected by inLat, exactly
+// L long + a VOCAL_TAIL_SEC tail, exclusions zeroed (5 ms ramps), rotated so sample 0 = loop pos 0. The window seam
+// (first take: pos 0; overdub: pos of ts) is crossfaded over the tail length with the audio recorded just after the
+// window end; the tail is a copy of the loop's first samples, so the voice's cycle crossfade is click-free.
 import type {
   DrumHit, InstrumentKind, MicBlock, MicFeed, Note, NoteSegmenter, OnsetDetector, PitchTracker, RawHit, RawNote, Sec, Take,
 } from '../types.ts';
@@ -20,6 +24,7 @@ import { createSegmenter } from '../analysis/segment.ts';
 import { createOnsetDetector } from '../analysis/drums.ts';
 import { registerShift, snapMidi } from '../analysis/autotune.ts';
 import { assignPhrases, type PlainNote } from '../analysis/phrases.ts';
+import { audioKey } from '../audio/audio-store.ts';
 
 /** first take: analysis starts this long before t0 */
 export const PREROLL_FIRST_SEC = 0.2;
@@ -36,8 +41,20 @@ export const DRUM_TAIL_SEC = 0.1;
 export const PITCH_TAIL_SEC = 0.035;
 /** shorter notes (after clipping) are dropped — the same 80 ms minimum as the dsp segmenter */
 export const MIN_NOTE_SEC = 0.08;
-/** raw audio kept for the WAV export */
+/** raw audio kept for the WAV export (and vocal takes: first take max 60 s + pre-roll + tail) */
 export const MAX_RAW_SEC = 70;
+/** vocal take: seam tail after the loop (the voice crossfades cycles over it) */
+export const VOCAL_TAIL_SEC = 0.02;
+/** vocal take: fade at exclusion edges (no click where a hold's audio is cut) */
+const VOCAL_EXCLUSION_RAMP_SEC = 0.005;
+/** peak bins across the loop (Take.peaks, View.livePeaks) */
+export const PEAK_BINS = 256;
+/** peaks are shown on a dB scale: this level maps to 0, 0 dBFS to 1 */
+export const PEAK_FLOOR_DB = -50;
+/** first take: live peaks span max(elapsed, this) — the shell's FIRST_TAKE_MIN_LENGTH (src/ui/lanes.ts) */
+export const FIRST_TAKE_DISPLAY_MIN_SEC = 4;
+/** live peak resolution (samples per chunk) */
+const LIVE_PEAK_CHUNK = 128;
 const FEED_BLOCK = 512;
 
 export interface Analysis {
@@ -96,6 +113,10 @@ export interface TakeRecorder {
   discard(): void;
   /** raw (unzeroed) mic samples fed to this take; t = stamp of samples[0] */
   rawAudio(): { t: Sec; sampleRate: number; samples: Float32Array };
+  /** vocals: peaks 0..1 of what was recorded so far, PEAK_BINS across the loop (first take: across displayLen) */
+  livePeaks(displayLen: Sec): number[] | null;
+  /** vocals, after finish(): the loop audio (Ls samples + tail), as stored */
+  loopAudio(): Float32Array | null;
 }
 
 export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
@@ -103,9 +124,13 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
   const { mic, kind, takeId, inLat, window: win } = opts;
   const sr = mic.sampleRate;
   const drums = kind === 'drums';
-  const tracker = drums ? null : A.createPitchTracker();
-  const segmenter = drums ? null : A.createSegmenter();
+  const vocals = kind === 'vocals';
+  const melodic = !drums && !vocals;
+  const tracker = melodic ? A.createPitchTracker() : null;
+  const segmenter = melodic ? A.createSegmenter() : null;
   const onsets = drums ? A.createOnsetDetector() : null;
+  const chunkPeaks: number[] = []; // vocals: peak per LIVE_PEAK_CHUNK raw samples from firstFrame
+  let loopPcm: Float32Array | null = null;
 
   const rawNotes: RawNote[] = [];
   const rawHits: RawHit[] = [];
@@ -176,8 +201,29 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
 
   const keepRaw = (samples: Float32Array) => {
     if (rawLength >= MAX_RAW_SEC * sr) return;
+    if (vocals) trackPeaks(samples);
     rawChunks.push(samples.slice());
     rawLength += samples.length;
+  };
+
+  let peakFill = 0;
+  const trackPeaks = (samples: Float32Array) => {
+    for (let i = 0; i < samples.length; i++) {
+      const a = Math.abs(samples[i]);
+      if (peakFill === 0) chunkPeaks.push(a);
+      else if (a > chunkPeaks[chunkPeaks.length - 1]) chunkPeaks[chunkPeaks.length - 1] = a;
+      peakFill = (peakFill + 1) % LIVE_PEAK_CHUNK;
+    }
+  };
+
+  const joinRaw = () => {
+    const samples = new Float32Array(rawLength);
+    let o = 0;
+    for (const c of rawChunks) {
+      samples.set(c, o);
+      o += c.length;
+    }
+    return samples;
   };
 
   const zeroExcluded = (frame: number, samples: Float32Array): Float32Array => {
@@ -271,6 +317,14 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
       finished = true;
       unsubscribe();
       const L = win.type === 'first' ? end - win.t0 : win.loopLength;
+      if (vocals) {
+        loopPcm = buildVocalLoop({ raw: joinRaw(), rawStartFrame: firstFrame, sampleRate: sr, inLat, win, end, exclusions });
+        return {
+          id: takeId, notes: [], hits: [],
+          audio: { key: audioKey(takeId), sampleRate: sr, length: loopPcm.length },
+          peaks: loopPeaks(loopPcm, loopPcm.length - Math.round(VOCAL_TAIL_SEC * sr)),
+        };
+      }
       return {
         id: takeId,
         notes: drums ? [] : buildNotes(placedNotes(end), L),
@@ -282,15 +336,99 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
       unsubscribe();
     },
     rawAudio() {
-      const samples = new Float32Array(rawLength);
-      let o = 0;
-      for (const c of rawChunks) {
-        samples.set(c, o);
-        o += c.length;
-      }
-      return { t: firstFrame / sr, sampleRate: sr, samples };
+      return { t: firstFrame / sr, sampleRate: sr, samples: joinRaw() };
     },
+    livePeaks(displayLen) {
+      if (!vocals) return null;
+      const bins = new Array<number>(PEAK_BINS).fill(0);
+      const span = win.type === 'first' ? Math.max(displayLen, 1e-3) : win.loopLength;
+      const ws = win.type === 'first' ? win.t0 : win.ts;
+      const we = win.type === 'first' ? Infinity : win.ts + win.loopLength;
+      for (let c = 0; c < chunkPeaks.length; c++) {
+        const tc = (firstFrame + c * LIVE_PEAK_CHUNK) / sr - inLat;
+        if (tc < ws || tc >= we || exclusions.some((x) => tc >= x.from && tc < x.to)) continue;
+        const pos = win.type === 'first' ? tc - ws : (((tc - win.origin) % span) + span) % span;
+        const b = Math.floor((pos / span) * PEAK_BINS);
+        if (b >= 0 && b < PEAK_BINS && chunkPeaks[c] > bins[b]) bins[b] = chunkPeaks[c];
+      }
+      return bins.map(displayLevel);
+    },
+    loopAudio: () => loopPcm,
   };
+}
+
+// ---------- vocal takes (pure) ----------
+
+export interface VocalLoopInput {
+  /** raw mic samples; raw[0] is context frame rawStartFrame */
+  raw: Float32Array;
+  rawStartFrame: number;
+  sampleRate: number;
+  inLat: Sec;
+  win: TakeWindow;
+  /** corrected window end asked for (first take: t0 + L; overdub: ≤ ts + L, earlier on a tap/stop commit) */
+  end: Sec;
+  exclusions: Span[];
+}
+
+/** the loop audio: Ls = round(L·sr) samples (sample 0 = loop pos 0) + a tail copying the first samples */
+export function buildVocalLoop(v: VocalLoopInput): Float32Array {
+  const { raw, sampleRate: sr, inLat, win } = v;
+  const L = win.type === 'first' ? v.end - win.t0 : win.loopLength;
+  const ws = win.type === 'first' ? win.t0 : win.ts;
+  const full = win.type === 'first' || v.end >= win.ts + win.loopLength;
+  const Ls = Math.max(1, Math.round(L * sr));
+  const X = Math.min(Ls, Math.round(VOCAL_TAIL_SEC * sr));
+  // recorded timeline: rec[d] = audio sung at corrected time ws + d/sr (d < Ls + X)
+  const rec = new Float32Array(Ls + X);
+  const base = Math.round((ws + inLat) * sr) - v.rawStartFrame;
+  const recordedTo = full ? Ls + X : Math.max(0, Math.round((v.end - ws) * sr));
+  for (let d = 0; d < recordedTo; d++) {
+    const i = base + d;
+    rec[d] = i >= 0 && i < raw.length ? raw[i] : 0;
+  }
+  zeroExclusions(rec, v.exclusions, ws, sr);
+  // rotate: loop pos q ↔ d = (q − ps) mod Ls
+  const ps = win.type === 'first' ? 0 : Math.round(((((win.ts - win.origin) % L) + L) % L) * sr) % Ls;
+  const loop = new Float32Array(Ls + X);
+  for (let q = 0; q < Ls; q++) loop[q] = rec[(q - ps + Ls) % Ls];
+  // window seam at ps: crossfade the window start in while the audio just after the window end fades out
+  for (let k = 0; k < X; k++) {
+    const w = k / X;
+    loop[(ps + k) % Ls] = w * rec[k] + (1 - w) * rec[Ls + k];
+  }
+  loop.set(loop.subarray(0, X), Ls);
+  return loop;
+}
+
+function zeroExclusions(rec: Float32Array, exclusions: Span[], ws: Sec, sr: number): void {
+  const R = Math.round(VOCAL_EXCLUSION_RAMP_SEC * sr);
+  for (const ex of exclusions) {
+    const a = Math.round((ex.from - ws) * sr);
+    const b = ex.to === Infinity ? rec.length : Math.round((ex.to - ws) * sr);
+    if (b <= 0 || a >= rec.length) continue;
+    for (let d = Math.max(0, a - R); d < Math.min(rec.length, b + R); d++) {
+      const g = d < a ? (a - d) / R : d >= b ? (d - b + 1) / R : 0;
+      rec[d] *= Math.min(1, g);
+    }
+  }
+}
+
+/** PEAK_BINS display peaks over the first `loopSamples` samples */
+export function loopPeaks(loop: Float32Array, loopSamples: number): number[] {
+  const out = new Array<number>(PEAK_BINS).fill(0);
+  for (let q = 0; q < loopSamples; q++) {
+    const b = Math.floor((q / loopSamples) * PEAK_BINS);
+    const a = Math.abs(loop[q]);
+    if (a > out[b]) out[b] = a;
+  }
+  return out.map(displayLevel);
+}
+
+/** linear peak → 0..1 on a dB scale (PEAK_FLOOR_DB → 0, 0 dBFS → 1) */
+export function displayLevel(peak: number): number {
+  if (!(peak > 0)) return 0;
+  return Math.min(1, Math.max(0, (20 * Math.log10(peak) - PEAK_FLOOR_DB) / -PEAK_FLOOR_DB));
 }
 
 // ---------- placement: raw detections → loop positions (pure) ----------

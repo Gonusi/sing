@@ -18,7 +18,11 @@
 //   - an event that appears after its window passed (overdub notes become final late): its occurrences in
 //     [from, track.scheduledUntil) are scheduled once, when the event is first seen.
 //
-// Mixing: each track gets its own GainNode (voice.output → strip gain → master), owned here.
+// Vocal tracks (raw audio): one event per cycle, a Note {pos 0, dur L} (vocalEvent). A late vocal occurrence always
+// plays with an exact offset (audio must not shift), and an occurrence that straddles activeFrom starts at activeFrom
+// with offset activeFrom − heard (a vocal overdub plays from the moment its window ends, not from the next cycle).
+//
+// Mixing: each track gets its own GainNode (voice.output → strip gain → master + engine.fxSend), owned here.
 //   gain target = running && track.on ? 1 : 0; on/off ramps over RAMP_ONOFF_SEC, stop ramps over RAMP_STOP_SEC.
 import type { DrumHit, InstrumentKind, Note, ScheduledTrack, Scheduler, Sec, Voice } from '../types.ts';
 import type { AudioEngine } from '../audio/context.ts';
@@ -108,17 +112,23 @@ export function createScheduler(engine: AudioEngine, opts: SchedulerOptions = {}
   // ---- per-track scheduling ----
 
   const scheduleRange = (s: Strip, lo: Sec, hi: Sec, now: Sec, ol: Sec, only?: Set<LoopEvent>) => {
-    for (const ev of trackEvents(s.st)) {
+    const vocal = isVocalTrack(s.st);
+    const activeFrom = s.st.activeFrom ?? -Infinity;
+    for (const ev of trackEvents(s.st, L)) {
       if (only && !only.has(ev)) continue;
       const drum = isDrumTrack(s.st);
       const dur = drum ? 0 : (ev as Note).dur;
       // occurrences that the late rules would drop anyway are not even enumerated (never tighter than lateDecision)
       const minHeard = now + ol - (drum ? DRUM_LATE_MAX_SEC : Math.max(dur, NOTE_LATE_FULL_SEC)) - 1e-6;
-      const evLo = Math.max(lo, from - EDGE_EPS_SEC, (s.st.activeFrom ?? -Infinity) - EDGE_EPS_SEC, minHeard);
+      // a vocal occurrence counts when it still overlaps activeFrom (it is started part-way, below)
+      const activeLo = vocal ? activeFrom - dur : activeFrom;
+      const evLo = Math.max(lo, from - EDGE_EPS_SEC, activeLo - EDGE_EPS_SEC, minHeard);
       const evHi = Math.min(hi, (s.st.activeUntil ?? Infinity) - EDGE_EPS_SEC);
       forEachOccurrence(origin, L, ev.pos, evLo, evHi, (k, heard) => {
+        if (vocal && heard + dur <= activeFrom + EDGE_EPS_SEC) return;
+        const skip = vocal && heard < activeFrom - EDGE_EPS_SEC ? activeFrom - heard : 0;
         const when = heard - ol;
-        const d = lateDecision(drum, when, dur, now);
+        const d = vocal ? vocalDecision(when, dur, now, skip) : lateDecision(drum, when, dur, now);
         const e: SchedEvent = {
           trackId: s.st.track.id, kind: s.st.track.kind, pos: ev.pos, cycle: k, heard, when,
           at: d.at, offset: d.offset, outLat: ol,
@@ -153,7 +163,7 @@ export function createScheduler(engine: AudioEngine, opts: SchedulerOptions = {}
   /** events not seen before: schedule their occurrences in the range this track already passed */
   const catchUpNewEvents = (s: Strip) => {
     const fresh = new Set<LoopEvent>();
-    for (const ev of trackEvents(s.st)) {
+    for (const ev of trackEvents(s.st, L)) {
       const key = eventKey(ev);
       if (s.known.has(key)) continue;
       s.known.add(key);
@@ -174,6 +184,7 @@ export function createScheduler(engine: AudioEngine, opts: SchedulerOptions = {}
     gain.gain.setValueAtTime(targetGain(s), ctx.currentTime);
     st.voice.output.connect(gain);
     gain.connect(engine.master);
+    gain.connect(engine.fxSend);
     strips.set(st.track.id, s);
     return s;
   };
@@ -211,7 +222,7 @@ export function createScheduler(engine: AudioEngine, opts: SchedulerOptions = {}
       lastHi = f - EDGE_EPS_SEC;
       for (const s of strips.values()) {
         s.scheduledUntil = f - EDGE_EPS_SEC;
-        s.known = new Set(trackEvents(s.st).map(eventKey));
+        s.known = new Set(trackEvents(s.st, loopLength).map(eventKey));
         applyGain(s, RAMP_ONOFF_SEC);
       }
       opts.onTransport?.({ action: 'start', at: ctx.currentTime, origin: o, loopLength, from: f });
@@ -283,9 +294,24 @@ export function eligible(st: ScheduledTrack): boolean {
   return st.track.on && st.track.take !== null;
 }
 
-export function trackEvents(st: ScheduledTrack): LoopEvent[] {
+export function isVocalTrack(st: ScheduledTrack): boolean {
+  return st.track.kind === 'vocals';
+}
+
+/** vocal takes: one stable event object per (take, L) so identity-based catch-up works */
+const vocalEvents = new WeakMap<object, Note>();
+export function vocalEvent(take: object & { id: string }, L: Sec): Note {
+  const cached = vocalEvents.get(take);
+  if (cached && cached.dur === L) return cached;
+  const ev: Note = { pos: 0, dur: L, midi: 0, vel: 1, phrase: take.id, legatoNext: false };
+  vocalEvents.set(take, ev);
+  return ev;
+}
+
+export function trackEvents(st: ScheduledTrack, L: Sec): LoopEvent[] {
   const take = st.track.take;
   if (!take) return [];
+  if (isVocalTrack(st)) return take.audio && L > 0 ? [vocalEvent(take, L)] : [];
   return isDrumTrack(st) ? take.hits : take.notes;
 }
 
@@ -319,6 +345,15 @@ export function lateDecision(drum: boolean, when: Sec, dur: Sec, now: Sec): Late
   if (late <= NOTE_LATE_FULL_SEC) return { play: true, at: now, offset: 0 };
   if (when + dur - now > MIN_CATCHUP_REMAIN_SEC) return { play: true, at: now, offset: late };
   return { play: false, at: now, offset: 0, reason: 'note-over' };
+}
+
+/** vocals: start at when + skip (activeFrom) and never shift — a late start always skips exactly what it missed */
+export function vocalDecision(when: Sec, dur: Sec, now: Sec, skip: Sec): LateDecision {
+  const start = when + skip;
+  const late = Math.max(0, now - start);
+  const remaining = dur - skip - late;
+  if (late > 0 && remaining <= MIN_CATCHUP_REMAIN_SEC) return { play: false, at: now, offset: 0, reason: 'vocal-over' };
+  return { play: true, at: start + late, offset: skip + late };
 }
 
 export function mod(x: number, m: number): number {

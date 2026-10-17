@@ -94,6 +94,8 @@ function isTrack(t: unknown): t is Track {
 export interface SessionStore {
   readonly current: Session;
   readonly canUndo: boolean;
+  /** the current session plus every undo snapshot (what vocal audio GC must keep) */
+  sessions(): Session[];
   /** replace the session; `undoPoint` (usually the previous session) is pushed onto the undo stack */
   set(next: Session, undoPoint?: Session): void;
   /** pop the last snapshot (null when there is none) */
@@ -138,6 +140,7 @@ export function createSessionStore(initial: Session, opts: { persist?: boolean }
     get canUndo() {
       return stack.length > 0;
     },
+    sessions: () => [current, ...stack],
     set(next, undoPoint) {
       if (undoPoint) {
         stack.push(undoPoint);
