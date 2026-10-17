@@ -1,6 +1,6 @@
 // [instruments] Violin assets, prepared once per sample rate and cached at module level (AudioBuffers can be used
 // by any context): 8 VSCO 2 violin sustain samples (public/samples/violin, credits in CREDITS.txt) and the room
-// impulse response. Preparation per sample: mono, leading silence trimmed, cut to KEEP_SECONDS, level-normalised,
+// impulse response. Preparation per sample: mono, leading silence trimmed, cut at its loop end, level-normalised,
 // and a crossfade baked into the end so the region [loopStart, loopEnd) loops without a click (a note can sustain
 // for any length without refreshing its source).
 import type { Sec } from '../types.ts';
@@ -24,25 +24,25 @@ export interface ViolinAssets {
 }
 
 /**
- * The samples and their tuning in cents: the median pitch over 0.5–7.6 s, measured with YIN in Chromium
- * (2026-10-17). The recordings carry natural vibrato of ±15–20 cents at ~5 Hz, so no synthetic vibrato is added.
+ * The samples, their tuning and their loop regions (measured 2026-10-17, see notes/instruments.md):
+ * - cents: the median pitch over 0.5–7.6 s (YIN). The recordings carry natural vibrato of ±15–20 cents at ~5 Hz,
+ *   so no synthetic vibrato is added.
+ * - loop: [start, end) in seconds after the onset. The 12–17 s recordings contain bow changes (periodicity breaks
+ *   of 0.4–1.1 at G3 3.69 s, E4 3.19/6.28 s, G4 3.21/6.36 s, G5 6.10 s); a note plays from 0 to the loop end and then
+ *   loops, so the end sits before the first one. Only [0, end) is kept: 45 s × 48 kHz × 4 B ≈ 8.7 MB in all.
  */
 const SAMPLE_TABLE = [
-  { name: 'G3', midi: 55, cents: -2 },
-  { name: 'C4', midi: 60, cents: 0 },
-  { name: 'E4', midi: 64, cents: 0 },
-  { name: 'G4', midi: 67, cents: 2 },
-  { name: 'C5', midi: 72, cents: 6 },
-  { name: 'E5', midi: 76, cents: 11 },
-  { name: 'G5', midi: 79, cents: 5 },
-  { name: 'C6', midi: 84, cents: -9 },
-] as const;
+  { name: 'G3', midi: 55, cents: -2, loop: [1.0, 3.5] },
+  { name: 'C4', midi: 60, cents: 0, loop: [1.5, 7.5] },
+  { name: 'E4', midi: 64, cents: 0, loop: [1.0, 3.0] },
+  { name: 'G4', midi: 67, cents: 2, loop: [1.0, 3.0] },
+  { name: 'C5', midi: 72, cents: 6, loop: [1.5, 7.5] },
+  { name: 'E5', midi: 76, cents: 11, loop: [1.5, 7.5] },
+  { name: 'G5', midi: 79, cents: 5, loop: [1.5, 5.9] },
+  { name: 'C6', midi: 84, cents: -9, loop: [1.5, 7.5] },
+] as const satisfies readonly { name: string; midi: number; cents: number; loop: readonly [Sec, Sec] }[];
 
-/** The recordings are 12–17 s long; keep this much after the onset (memory: 8 × 7.5 s × 48 kHz × 4 B ≈ 11.5 MB). */
-const KEEP_SECONDS: Sec = 7.5;
-/** Start of the loop region; the bow attack is over well before it. */
-const LOOP_START: Sec = 1.5;
-/** Equal-power crossfade baked into the end of the loop region. */
+/** Equal-power crossfade baked into the end of the loop region (needs loop start ≥ this + 0.4 s of sustain). */
 const LOOP_XFADE: Sec = 0.3;
 /** Onset = first sample above this fraction of the peak (−40 dB); the mp3s start with ~27 ms of encoder delay. */
 const ONSET_FRACTION = 0.01;
@@ -107,7 +107,7 @@ async function prepare(ctx: Ctx, onProgress?: (fraction: number) => void): Promi
       const res = await fetch(url);
       if (!res.ok) throw new Error(`[instruments] ${url}: HTTP ${res.status}`);
       const decoded = await ctx.decodeAudioData(await res.arrayBuffer());
-      const sample = prepareSample(ctx, decoded, entry.name, entry.midi + entry.cents / 100);
+      const sample = prepareSample(ctx, decoded, entry.name, entry.midi + entry.cents / 100, entry.loop);
       step();
       return sample;
     }),
@@ -117,15 +117,21 @@ async function prepare(ctx: Ctx, onProgress?: (fraction: number) => void): Promi
   return { samples: samples.sort((a, b) => a.root - b.root), room };
 }
 
-function prepareSample(ctx: Ctx, decoded: AudioBuffer, name: string, root: number): ViolinSample {
+function prepareSample(
+  ctx: Ctx,
+  decoded: AudioBuffer,
+  name: string,
+  root: number,
+  loop: readonly [Sec, Sec],
+): ViolinSample {
   const sr = decoded.sampleRate;
   const mono = toMono(decoded);
   const onset = Math.max(0, findOnset(mono) - Math.round(ONSET_PREROLL * sr));
-  const length = Math.min(Math.round(KEEP_SECONDS * sr), mono.length - onset);
+  const length = Math.min(Math.round(loop[1] * sr), mono.length - onset);
   const buffer = ctx.createBuffer(1, length, sr);
   const x = buffer.getChannelData(0);
   x.set(mono.subarray(onset, onset + length));
-  const loopStartFrame = Math.round(LOOP_START * sr);
+  const loopStartFrame = Math.round(loop[0] * sr);
   scale(x, TARGET_RMS / rms(x, Math.round(NORM_FROM * sr), length));
   flattenLevel(x, sr);
   bakeLoopCrossfade(x, loopStartFrame, length, Math.round(LOOP_XFADE * sr));

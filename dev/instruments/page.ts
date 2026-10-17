@@ -2,6 +2,7 @@
 // window.runInstrumentChecks() → { results, wavs } is called by dev/instruments/check.ts in Chromium and WebKit;
 // the "Run checks" button does the same by hand and adds play buttons for listening.
 import { playBlip } from '../../src/instruments/blip.ts';
+import { loadViolinAssets } from '../../src/instruments/violin-assets.ts';
 import type { DrumHit, DrumKind, InstrumentKind, Note, Sec, Voice } from '../../src/types.ts';
 import * as A from './analysis.ts';
 import { renderBlip, renderVoice, SR, type Act, type Feed } from './render.ts';
@@ -37,6 +38,12 @@ const LEGATO_MAX_DIP_DB = 6;
 const LEGATO_MAX_RISE_DB = 3;
 /** largest sample jump / 99.9th percentile jump: above this there is a click */
 const MAX_JUMP_RATIO = 3;
+/** legato: 80–200 ms after a pitch change the previous pitch is at least this far below the new one (dB) */
+const LEGATO_MAX_GHOST_DB = -12;
+/** periodicity-break detector (analysis.ts): a steady bowed tone stays ≤ 0.2; a bow change or a click gives 0.4–1.1 */
+const MAX_PERIODICITY_BREAK = 0.3;
+/** the same inside a pitch transition (5 ms windows; calibrated against a hard sample switch, notes/instruments.md) */
+const MAX_GLIDE_BREAK = 0.3;
 /** stopAll: 30 ms after it the level is this far below the level before it */
 const STOP_SILENCE_DB = 40;
 
@@ -101,6 +108,85 @@ async function checkPitch(kind: InstrumentKind, midis: number[]): Promise<void> 
 
 // ---------- (b) violin legato, long note ----------
 
+/** what makes a phrase legato, measured between its first onset (t0) and its last note's end */
+interface LegatoStats {
+  attacks: Sec[];
+  dip: number;
+  /** level rise at each inner note boundary */
+  rises: number[];
+  /** energy of the previous pitch relative to the new one, from 80 ms after each pitch change (dB) */
+  ghosts: number[];
+  /** periodicity-break detector over the sustained stretches (clicks) */
+  breaks: { max: number; median: number; at: Sec };
+  /** the same over the pitch transitions, with 5 ms windows (a glide changes the period within a 10 ms window) */
+  glideBreaks: { max: number; median: number; at: Sec };
+}
+
+function hzOf(midi: number): number {
+  return 440 * 2 ** ((midi - 69) / 12);
+}
+
+/** a pitch change counts as a transition from 10 ms before its note starts to TRANSITION after */
+const TRANSITION: Sec = 0.08;
+
+function legatoStats(pcm: Float32Array, feeds: Feed[], t0: Sec, end: Sec): LegatoStats {
+  const env = A.envelope(pcm, SR);
+  const midis = feeds.map((f) => (f.ev as Note).midi);
+  const changes = feeds.slice(1).map((f, i) => ({ tb: f.when, from: midis[i], to: midis[i + 1] }));
+  const inTransition = (t: Sec) => changes.find((c) => c.from !== c.to && t >= c.tb - 0.01 && t <= c.tb + TRANSITION);
+  const noteAt = (t: Sec): [number, number] => {
+    let k = 0;
+    while (k + 1 < feeds.length && feeds[k + 1].when <= t) k++;
+    return [hzOf(midis[k]), hzOf(midis[k])];
+  };
+  // sustained stretches: 10 ms windows at the note's pitch; transitions: 5 ms windows over the whole glide range
+  const sustain = A.periodicityBreak(pcm, SR, t0 + 0.1, end - 0.02, (t) => (inTransition(t) ? [0, 0] : noteAt(t)));
+  let glide = { max: 0, median: 0, at: 0 };
+  for (const c of changes.filter((c) => c.from !== c.to)) {
+    const range: [number, number] = [hzOf(Math.min(c.from, c.to)), hzOf(Math.max(c.from, c.to))];
+    const b = A.periodicityBreak(pcm, SR, c.tb - 0.01, c.tb + TRANSITION, () => range, 0.005);
+    if (b.max > glide.max) glide = b;
+  }
+  return {
+    attacks: A.attacks(env),
+    dip: A.maxDip(env, t0 + 0.1, end),
+    rises: changes.map((c) => A.boundaryRise(env, c.tb)),
+    ghosts: changes.filter((c) => c.from !== c.to).map((c) => ghost(pcm, c.tb, c.from, c.to)),
+    breaks: sustain,
+    glideBreaks: glide,
+  };
+}
+
+/**
+ * Energy of the old pitch relative to the new one from 80 ms after a pitch change (the glide is over). The window
+ * is long enough that the two pitches' FFT main lobes do not overlap (Hann: ±2/T Hz), at least 120 ms.
+ */
+function ghost(pcm: Float32Array, tb: Sec, from: number, to: number): number {
+  const window = Math.max(0.12, 5 / Math.abs(hzOf(to) - hzOf(from)));
+  const t0 = tb + TRANSITION;
+  return A.bandDb(pcm, SR, t0, t0 + window, hzOf(from)) - A.bandDb(pcm, SR, t0, t0 + window, hzOf(to));
+}
+
+function legatoOk(s: LegatoStats): boolean {
+  return (
+    s.attacks.length === 1 &&
+    s.dip <= LEGATO_MAX_DIP_DB &&
+    s.rises.every((v) => v < LEGATO_MAX_RISE_DB) &&
+    s.ghosts.every((g) => g < LEGATO_MAX_GHOST_DB) &&
+    s.breaks.max < MAX_PERIODICITY_BREAK &&
+    s.glideBreaks.max < MAX_GLIDE_BREAK
+  );
+}
+
+function legatoText(s: LegatoStats): string {
+  return (
+    `attacks ${s.attacks.length} (at ${s.attacks.map((t) => fmt(t, 2)).join(', ')}) · max dip ${fmt(s.dip)} dB · ` +
+    `boundary rises ${s.rises.map((v) => fmt(v)).join(' ')} dB · old pitch after change ${s.ghosts.map((g) => fmt(g, 0)).join(' ')} dB · ` +
+    `periodicity break: sustain max ${fmt(s.breaks.max, 3)} (median ${fmt(s.breaks.median, 3)}, at ${fmt(s.breaks.at, 3)} s), ` +
+    `transitions max ${fmt(s.glideBreaks.max, 3)} (at ${fmt(s.glideBreaks.at, 3)} s)`
+  );
+}
+
 async function checkLegato(kind: InstrumentKind, notes: [number, number][], name: string): Promise<void> {
   const T0 = 0.2;
   const feeds = legatoFeeds(T0, notes, `${name}:phrase`);
@@ -108,26 +194,16 @@ async function checkLegato(kind: InstrumentKind, notes: [number, number][], name
   const end = feeds[feeds.length - 1].when + notes[notes.length - 1][1];
   const r = await renderVoice(kind, end + 1.2, feeds);
   keep(name, r.pcm);
-  const env = A.envelope(r.pcm, SR);
-  const atk = A.attacks(env);
-  const dip = A.maxDip(env, T0 + 0.1, end);
-  const rises = feeds.slice(1).map((f) => A.boundaryRise(env, f.when));
+  const stats = legatoStats(r.pcm, feeds, T0, end);
   const errs = feeds.map((f, i) => {
     const m = (f.ev as Note).midi;
-    const hz = A.fundamental(r.pcm, SR, f.when + 0.1, f.when + notes[i][1] - 0.03, 440 * 2 ** ((m - 69) / 12));
+    const hz = A.fundamental(r.pcm, SR, f.when + 0.1, f.when + notes[i][1] - 0.03, hzOf(m));
     return hz ? A.cents(hz, m) : NaN;
   });
-  const pass =
-    atk.length === 1 &&
-    dip <= LEGATO_MAX_DIP_DB &&
-    rises.every((v) => v < LEGATO_MAX_RISE_DB) &&
-    errs.every((c) => Math.abs(c) <= PITCH_TOL) &&
-    r.errors.length === 0;
   record(
     `${kind}: legato phrase ${notes.map((n) => n[0]).join(' ')}`,
-    pass,
-    `attacks ${atk.length} (at ${atk.map((t) => fmt(t, 2)).join(', ')}) · max dip ${fmt(dip)} dB · boundary rises ` +
-      `${rises.map((v) => fmt(v)).join(' ')} dB · cents ${errs.map((c) => fmt(c, 0)).join(' ')}${errorsOf(r)}`,
+    legatoOk(stats) && errs.every((c) => Math.abs(c) <= PITCH_TOL) && r.errors.length === 0,
+    `${legatoText(stats)} · cents ${errs.map((c) => fmt(c, 0)).join(' ')}${errorsOf(r)}`,
   );
 }
 
@@ -138,13 +214,45 @@ async function checkLongNote(midi: number, seconds: Sec): Promise<void> {
   const env = A.envelope(r.pcm, SR);
   const dip = A.maxDip(env, T0 + 0.3, T0 + seconds - 0.05);
   const jump = A.jumpRatio(r.pcm, SR, T0 + 0.2, T0 + seconds);
+  const breaks = A.periodicityBreak(r.pcm, SR, T0 + 0.2, T0 + seconds - 0.02, () => [hzOf(midi), hzOf(midi)]);
   const atk = A.attacks(env);
-  const pass = dip <= LEGATO_MAX_DIP_DB && jump.ratio < MAX_JUMP_RATIO && atk.length === 1 && r.errors.length === 0;
+  const pass =
+    dip <= LEGATO_MAX_DIP_DB &&
+    jump.ratio < MAX_JUMP_RATIO &&
+    breaks.max < MAX_PERIODICITY_BREAK &&
+    atk.length === 1 &&
+    r.errors.length === 0;
   record(
     `violin: ${seconds} s note ${midi} (loops its sustain)`,
     pass,
-    `max dip ${fmt(dip)} dB · max jump ${fmt(jump.ratio, 2)}× p99.9 (at ${fmt(jump.at, 3)} s) · attacks ${atk.length}${errorsOf(r)}`,
+    `max dip ${fmt(dip)} dB · max jump ${fmt(jump.ratio, 2)}× p99.9 · periodicity break max ${fmt(breaks.max, 3)} ` +
+      `(median ${fmt(breaks.median, 3)}, at ${fmt(breaks.at, 3)} s) · attacks ${atk.length}${errorsOf(r)}`,
   );
+}
+
+/**
+ * White box: every prepared sample is free of bow changes from its onset to its loop end, and its loop wraps
+ * seamlessly (the last 100 ms before loopEnd spliced onto the first 100 ms after loopStart, as playback does).
+ */
+async function checkSamples(): Promise<void> {
+  const assets = await loadViolinAssets(new OfflineAudioContext(1, SR, SR));
+  const parts: string[] = [];
+  let pass = true;
+  for (const s of assets.samples) {
+    const x = s.buffer.getChannelData(0);
+    const sr = s.buffer.sampleRate;
+    const hz = hzOf(s.root);
+    const inside = A.periodicityBreak(x, sr, 0.1, s.loopEnd - 0.02, () => [hz, hz]);
+    const n = Math.round(0.1 * sr);
+    const a = Math.round(s.loopStart * sr);
+    const spliced = new Float32Array(2 * n);
+    spliced.set(x.subarray(x.length - n));
+    spliced.set(x.subarray(a, a + n), n);
+    const seam = A.periodicityBreak(spliced, sr, 0.05, 0.15, () => [hz, hz]);
+    pass &&= inside.max < MAX_PERIODICITY_BREAK && seam.max < MAX_PERIODICITY_BREAK;
+    parts.push(`${s.name} [${fmt(s.loopStart, 1)}–${fmt(s.loopEnd, 1)} s] inside ${fmt(inside.max, 2)} seam ${fmt(seam.max, 2)}`);
+  }
+  record('violin samples: no bow change before the loop end, seamless loop wrap', pass, parts.join(' · '));
 }
 
 // ---------- (c) staccato ----------
@@ -248,17 +356,12 @@ async function checkWrap(kind: InstrumentKind, a: number, b: number): Promise<vo
   const end = T0 + 2 * L;
   const r = await renderVoice(kind, end + 3, feeds);
   keep(`${kind}-wrap`, r.pcm);
-  const env = A.envelope(r.pcm, SR);
-  const atk = A.attacks(env);
-  const dip = A.maxDip(env, T0 + 0.15, end);
-  const rises = feeds.slice(1).map((f) => A.boundaryRise(env, f.when));
+  const stats = legatoStats(r.pcm, feeds, T0, end);
   const tail = A.rmsDb(r.pcm, SR, end + 2, end + 2.9);
-  const pass = atk.length === 1 && dip <= LEGATO_MAX_DIP_DB && rises.every((v) => v < LEGATO_MAX_RISE_DB) && tail < -80;
   record(
     `${kind}: phrase wrapping across the loop end stays legato; the open phrase ends by itself`,
-    pass,
-    `attacks ${atk.length} · max dip ${fmt(dip)} dB · rises at boundaries ${rises.map((v) => fmt(v)).join(' ')} dB · ` +
-      `level 2 s after the last note ${fmt(tail)} dBFS${errorsOf(r)}`,
+    legatoOk(stats) && tail < -80 && r.errors.length === 0,
+    `${legatoText(stats)} · level 2 s after the last note ${fmt(tail)} dBFS${errorsOf(r)}`,
   );
 }
 
@@ -331,6 +434,7 @@ async function runAll(): Promise<CheckRun> {
     ['legato violin', () => checkLegato('violin', [[72, 0.5], [74, 0.5], [76, 0.5], [79, 0.5], [69, 0.5], [72, 0.6]], 'violin-legato')],
     ['legato bass', () => checkLegato('bass', [[36, 0.4], [40, 0.4], [43, 0.4], [48, 0.4], [45, 0.5]], 'bass-legato')],
     ['long violin', () => checkLongNote(69, 20)],
+    ['violin samples', () => checkSamples()],
     ['staccato violin', () => checkStaccato('violin', [60, 64, 67, 72])],
     ['drums', () => checkDrums()],
     ['catch-up violin', () => checkCatchUp('violin', 64)],

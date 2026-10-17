@@ -199,6 +199,72 @@ export function cents(hz: number, midi: number): number {
   return 1200 * Math.log2(hz / (440 * 2 ** ((midi - 69) / 12)));
 }
 
+/**
+ * Energy (dB) within ±halfCents of `hz` in [t0, t1] (Hann window, zero-padded 8192-point FFT). Used to tell legato
+ * from a re-attack: after a legato move the previous pitch is gone; after a re-attack the old note is still
+ * releasing underneath the new one.
+ */
+export function bandDb(x: Float32Array, sr: number, t0: Sec, t1: Sec, hz: number, halfCents = 50): number {
+  const N = 8192;
+  const a = Math.floor(t0 * sr);
+  const len = Math.min(N, Math.floor((t1 - t0) * sr));
+  const re = new Float64Array(N);
+  const im = new Float64Array(N);
+  for (let i = 0; i < len; i++) re[i] = (x[a + i] ?? 0) * (0.5 - 0.5 * Math.cos((2 * Math.PI * i) / len));
+  fft(re, im);
+  const lo = Math.floor((hz * 2 ** (-halfCents / 1200) * N) / sr);
+  const hi = Math.ceil((hz * 2 ** (halfCents / 1200) * N) / sr);
+  let e = 0;
+  for (let k = lo; k <= hi; k++) e += re[k] * re[k] + im[k] * im[k];
+  return 10 * Math.log10(e + 1e-30);
+}
+
+/**
+ * Click detector for sustained periodic tones (a bowed string's sawtooth edges hide clicks from a first-difference
+ * test). For each 5 ms hop: e = min over lags T in [sr/hzHigh·0.97, sr/hzLow·1.03] of
+ * Σ(x[n] − x[n−T])² / Σ(x[n]² + x[n−T]²) over 10 ms. A periodic signal gives a small e; a discontinuity (unfaded
+ * loop seam, hard sample switch) gives a spike for the frames spanning it. Returns the max and median of e.
+ */
+export function periodicityBreak(
+  x: Float32Array,
+  sr: number,
+  t0: Sec,
+  t1: Sec,
+  hzRange: (t: Sec) => [low: number, high: number],
+  window: Sec = 0.01,
+): { max: number; median: number; at: Sec } {
+  const W = Math.round(window * sr);
+  const hop = Math.round(0.005 * sr);
+  const es: number[] = [];
+  let max = 0;
+  let at = t0;
+  for (let n0 = Math.floor(t0 * sr); n0 + W < Math.min(x.length, t1 * sr); n0 += hop) {
+    const [lo, hi] = hzRange(n0 / sr);
+    if (!(lo > 0 && hi > 0)) continue; // the caller excludes this frame
+    const tMin = Math.max(2, Math.floor((sr / hi) * 0.97));
+    const tMax = Math.ceil((sr / lo) * 1.03);
+    if (n0 - tMax < 0) continue;
+    let best = Infinity;
+    for (let T = tMin; T <= tMax; T++) {
+      let num = 0;
+      let den = 0;
+      for (let n = n0; n < n0 + W; n++) {
+        const d = x[n] - x[n - T];
+        num += d * d;
+        den += x[n] * x[n] + x[n - T] * x[n - T];
+      }
+      if (den > 0) best = Math.min(best, num / den);
+    }
+    if (!Number.isFinite(best)) continue;
+    es.push(best);
+    if (best > max) {
+      max = best;
+      at = n0 / sr;
+    }
+  }
+  return { max, median: median(es), at };
+}
+
 /** magnitude-weighted mean frequency over [t0, t1] (Hann-windowed 2048-point FFT frames) */
 export function spectralCentroid(x: Float32Array, sr: number, t0: Sec, t1: Sec): number {
   const N = 2048;
