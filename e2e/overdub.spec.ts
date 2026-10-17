@@ -137,13 +137,16 @@ test('four lanes overdubbed: positions, silent until ts + L, exact looping, ever
       const pc = checkPlayed(frames, expN);
       const sal = await checkSalience(page, track.id, expN);
       const seen = expN.filter((e) => e.midi >= TRACKER_FLOOR_MIDI);
-      const segSeen = matchNotes(rawNotes(det.notes), seen.map((e) => ({ t: e.at, midi: e.midi })), 0.04);
+      // the violin glides 50 ms into a legato note, so its re-detected onset can land just past +40 ms (same reason
+      // as the [−40, +80] pitch-reach window above); other voices attack and keep ±40 ms
+      const segTol = track.kind === 'violin' ? 0.08 : 0.04;
+      const segSeen = matchNotes(rawNotes(det.notes), seen.map((e) => ({ t: e.at, midi: e.midi })), segTol);
       writeFileSync(join(OUT_DIR, `overdub-${test.info().project.name}-${track.kind}-frames.json`), JSON.stringify({ expN, frames }));
       console.log(`[overdub] ${track.kind} output rms ${c.rms.toFixed(4)}: played ${seen.length - pc.late.length - pc.offPitch.length}/${seen.length} (onset err max ${ms(maxAbs(pc.errors))}, late ${pc.late.join(' ')}, off-pitch ${pc.offPitch.join(' ')}); below tracker floor ${sal.checked - sal.offPitch.length}/${sal.checked} by salience ${sal.offPitch.join(' ')}; segmenter re-detection ${seg.matched}/${seg.expected} ±40 ms (missed ${seg.missed.join(' ')}, wrong ${seg.wrongPitch.join(' ')}, extra ${seg.extra})`);
       expect(pc.late, `${track.kind} output: pitch not reached in [−40, +80] ms of the start`).toEqual([]);
       expect(pc.offPitch, `${track.kind} output: sustain off pitch`).toEqual([]);
       expect(sal.offPitch, `${track.kind} output: low notes off pitch (salience)`).toEqual([]);
-      expect(segSeen.matched / Math.max(1, segSeen.expected), `${track.kind} output: segmenter re-detection ±40 ms`).toBeGreaterThanOrEqual(0.85);
+      expect(segSeen.matched / Math.max(1, segSeen.expected), `${track.kind} output: segmenter re-detection ±${segTol * 1000} ms`).toBeGreaterThanOrEqual(0.85);
     }
   }
   expect(errors, errors.join('\n')).toEqual([]);

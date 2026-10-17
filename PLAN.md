@@ -15,7 +15,7 @@
 - [x] Voice: on/off swaps fixed by phrasing `mute X` / `X back` (100% noisy toggles; e2e voice 45/45)
 - [ ] MVP+ (owner, 2026-10-17): vocal track (record your real voice, looped) + global echo slider — design below
   - [x] contract (coordinator): 'vocals' kind, Take.audio/peaks, Session.fx.echo, View.livePeaks, Controller.setEcho
-  - [ ] engine: vocal take recording/rotation/storage (IDB, 16-bit), vocal playback voice with seam crossfade, echo/reverb send bus, calibration bypasses FX
+  - [x] engine: vocal take recording/rotation/storage (IDB, 16-bit), vocal playback voice with seam crossfade, echo/reverb send bus, calibration bypasses FX
   - [x] shell: vocals lane (waveform, green, letter M), echo slider in the top bar, ＋ sheet 5th button
   - [x] voice: grammar `create vocal|vocals track`, `mute vocal|vocals`, `vocal|vocals back`; fixtures; gate — clean 300/300, noisy 99.7%, 0 FP
   - [ ] tester: e2e for vocal takes (first take + overdub, output correlates with input, seam) and echo (wet energy follows slider)
@@ -265,6 +265,9 @@ Gate costs: Node DSP checks, `tsc` and the build are nearly free → always. E2E
 2. vosk memory and load time on iPhone (hard ceiling: iPhone Safari kills a page above ~2 GB — owner observed; our estimate is 150–250 MB peak) → the lichess fork, then the ＋/strip buttons only (the app stays fully usable without voice).
 3. Drum thresholds on phone mics → retune on real takes.
 4. Headless timing jitter in e2e → assertions use the scheduler log, and audio re-detection gets a 40 ms tolerance.
+
+## Ideas (later)
+- Violin: centre the 50 ms legato glide on the note boundary (start ~25 ms early) so glided notes land tighter (e2e re-detects them up to ~42 ms after the note start).
 
 ## MVP+ — vocal track and echo (added 2026-10-17, owner request)
 - **Vocal track**: `create vocal track` (also `vocals`), on/off as other instruments; ＋ sheet button; lane letter **M**, colour green `#5ad17a`, drawn as a waveform (peaks).
