@@ -305,8 +305,7 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     if (!t || t.mode !== 'first') return false;
     const L = end - t.start;
     if (L < MIN_FIRST_TAKE_SEC) {
-      log('take', { phase: 'discard', reason: 'too-short', L });
-      discardTake();
+      discardTake('too-short', { L });
       setState('idle', end);
       return true;
     }
@@ -339,7 +338,9 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     activeFrom.set(lane.id, ts + L);
     take = newTake(lane, { type: 'overdub', origin, loopLength: L, ts }, created, before.selectedId, tDown);
     commitSession({ ...s, selectedId: lane.id });
-    setState('overdubbing', ts);
+    // stamped at the command's tDown, not at ts: from stopped, ts = origin is in the future, and a command between
+    // tDown and origin must still be read as overdubbing (else undo would pop the first take)
+    setState('overdubbing', tDown);
     return true;
   };
 
@@ -364,12 +365,12 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     return true;
   };
 
-  const discardTake = () => {
+  const discardTake = (reason = 'discarded', extra: Record<string, unknown> = {}) => {
     const t = take;
     if (!t) return;
     t.rec.discard();
     endTake(t);
-    log('take', { phase: 'discard', reason: 'discarded', trackId: t.trackId, mode: t.mode });
+    log('take', { phase: 'discard', reason, trackId: t.trackId, mode: t.mode, ...extra });
     if (t.createdLane) commitSession(removeTrack(store.current, t.trackId, t.prevSelected));
     else {
       activeFrom.delete(t.trackId);

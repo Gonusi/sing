@@ -3,8 +3,7 @@
 import { expect, test } from '@playwright/test';
 import { boot, firstTake } from './helpers.ts';
 
-test('BUG engine: undo right after record-from-stopped pops the first take instead of discarding the overdub', async ({ page }) => {
-  test.fail(true, 'src/app/controller.ts: startOverdub stamps overdubbing at ts = origin (future); stateAt(tDown < origin) = playing → popUndo');
+test('regression engine: undo right after record-from-stopped discards the overdub, keeps the first take', async ({ page }) => {
   await boot(page);
   await firstTake(page, { fixture: 'sing-cmaj', L: 2.6, dur: 2.4 });
   const r = await page.evaluate(() => {
