@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sing · instruments check</title>
+    <style>
+      body { font: 14px/1.4 system-ui, sans-serif; background: #0b0b0f; color: #ddd; margin: 16px; }
+      button { font: inherit; margin: 2px; }
+      pre { white-space: pre-wrap; }
+      .fail { color: #f77; }
+    </style>
+  </head>
+  <body>
+    <h1>Instruments check</h1>
+    <p>Renders every instrument offline and measures it. <code>node dev/instruments/check.ts</code> drives this page.</p>
+    <button id="run">Run checks</button>
+    <div id="renders"></div>
+    <pre id="out"></pre>
+    <script type="module" src="./page.ts"></script>
+  </body>
+</html>

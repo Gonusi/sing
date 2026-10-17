@@ -1,0 +1,381 @@
+// [instruments] Dev check page: every instrument rendered offline (render.ts) and measured (analysis.ts).
+// window.runInstrumentChecks() → { results, wavs } is called by dev/instruments/check.ts in Chromium and WebKit;
+// the "Run checks" button does the same by hand and adds play buttons for listening.
+import { playBlip } from '../../src/instruments/blip.ts';
+import type { DrumHit, DrumKind, InstrumentKind, Note, Sec, Voice } from '../../src/types.ts';
+import * as A from './analysis.ts';
+import { renderBlip, renderVoice, SR, type Act, type Feed } from './render.ts';
+
+export interface CheckResult {
+  name: string;
+  pass: boolean;
+  detail: string;
+}
+
+export interface CheckRun {
+  results: CheckResult[];
+  /** rendered audio, name → base64 16-bit mono WAV */
+  wavs: Record<string, string>;
+  ms: number;
+}
+
+declare global {
+  interface Window {
+    runInstrumentChecks(): Promise<CheckRun>;
+  }
+}
+
+const results: CheckResult[] = [];
+const wavs: Record<string, string> = {};
+const pcms: Record<string, Float32Array> = {};
+
+/** cents tolerance of a detected fundamental */
+const PITCH_TOL = 30;
+/** legato: the envelope never falls further than this below its median between onset and release */
+const LEGATO_MAX_DIP_DB = 6;
+/** legato: the level may not rise this much at an inner note boundary (that would be a new attack) */
+const LEGATO_MAX_RISE_DB = 3;
+/** largest sample jump / 99.9th percentile jump: above this there is a click */
+const MAX_JUMP_RATIO = 3;
+/** stopAll: 30 ms after it the level is this far below the level before it */
+const STOP_SILENCE_DB = 40;
+
+function record(name: string, pass: boolean, detail: string): void {
+  results.push({ name, pass, detail });
+}
+
+function keep(name: string, pcm: Float32Array): void {
+  pcms[name] = pcm;
+  wavs[name] = A.wavBase64(pcm, SR);
+}
+
+let phraseCounter = 0;
+function note(midi: number, dur: Sec, o: { vel?: number; phrase?: string; legatoNext?: boolean } = {}): Note {
+  return { pos: 0, dur, midi, vel: o.vel ?? 0.8, phrase: o.phrase ?? `check:${phraseCounter++}`, legatoNext: o.legatoNext ?? false };
+}
+
+function hit(kind: DrumKind, vel = 0.8): DrumHit {
+  return { pos: 0, kind, vel };
+}
+
+/** consecutive notes of one phrase: each starts where the previous ends; legatoNext on all but the last */
+function legatoFeeds(t0: Sec, notes: [midi: number, dur: Sec][], phrase: string, lastLegato = false): Feed[] {
+  let t = t0;
+  return notes.map(([midi, dur], i) => {
+    const f = { ev: note(midi, dur, { phrase, legatoNext: lastLegato || i < notes.length - 1 }), when: t };
+    t += dur;
+    return f;
+  });
+}
+
+const fmt = (v: number, digits = 1) => (Number.isFinite(v) ? v.toFixed(digits) : String(v));
+const errorsOf = (r: { errors: string[] }) => (r.errors.length ? ` · ERRORS ${r.errors.join('; ')}` : '');
+
+// ---------- (a) pitch per note ----------
+
+async function checkPitch(kind: InstrumentKind, midis: number[]): Promise<void> {
+  const DUR = 0.6;
+  const GAP = 0.25;
+  const T0 = 0.2;
+  const feeds = midis.map((m, i) => ({ ev: note(m, DUR), when: T0 + i * (DUR + GAP) }));
+  const r = await renderVoice(kind, T0 + midis.length * (DUR + GAP) + 0.8, feeds);
+  keep(`${kind}-notes`, r.pcm);
+  const env = A.envelope(r.pcm, SR);
+  const errs: number[] = [];
+  const levels: number[] = [];
+  for (const f of feeds) {
+    const m = (f.ev as Note).midi;
+    const hz = A.fundamental(r.pcm, SR, f.when + 0.15, f.when + DUR - 0.05, 440 * 2 ** ((m - 69) / 12));
+    errs.push(hz ? A.cents(hz, m) : NaN);
+    levels.push(A.rmsDb(r.pcm, SR, f.when + 0.15, f.when + DUR - 0.05));
+  }
+  const onset = A.onsetTime(env, T0 - 0.05, T0 + 0.3);
+  const pass = errs.every((c) => Math.abs(c) <= PITCH_TOL) && r.errors.length === 0;
+  record(
+    `${kind}: pitch of ${midis.join(' ')}`,
+    pass,
+    `cents ${errs.map((c) => fmt(c, 0)).join(' ')} · note level ${levels.map((l) => fmt(l, 0)).join(' ')} dBFS · ` +
+      `onset −20 dB at +${fmt(((onset ?? NaN) - T0) * 1000, 0)} ms · peak ${fmt(A.db(A.peak(r.pcm)))} dBFS${errorsOf(r)}`,
+  );
+}
+
+// ---------- (b) violin legato, long note ----------
+
+async function checkLegato(kind: InstrumentKind, notes: [number, number][], name: string): Promise<void> {
+  const T0 = 0.2;
+  const feeds = legatoFeeds(T0, notes, `${name}:phrase`);
+  feeds[3].arrive = feeds[3].when + 0.004; // handed over 4 ms late: `when` is already in the past
+  const end = feeds[feeds.length - 1].when + notes[notes.length - 1][1];
+  const r = await renderVoice(kind, end + 1.2, feeds);
+  keep(name, r.pcm);
+  const env = A.envelope(r.pcm, SR);
+  const atk = A.attacks(env);
+  const dip = A.maxDip(env, T0 + 0.1, end);
+  const rises = feeds.slice(1).map((f) => A.boundaryRise(env, f.when));
+  const errs = feeds.map((f, i) => {
+    const m = (f.ev as Note).midi;
+    const hz = A.fundamental(r.pcm, SR, f.when + 0.1, f.when + notes[i][1] - 0.03, 440 * 2 ** ((m - 69) / 12));
+    return hz ? A.cents(hz, m) : NaN;
+  });
+  const pass =
+    atk.length === 1 &&
+    dip <= LEGATO_MAX_DIP_DB &&
+    rises.every((v) => v < LEGATO_MAX_RISE_DB) &&
+    errs.every((c) => Math.abs(c) <= PITCH_TOL) &&
+    r.errors.length === 0;
+  record(
+    `${kind}: legato phrase ${notes.map((n) => n[0]).join(' ')}`,
+    pass,
+    `attacks ${atk.length} (at ${atk.map((t) => fmt(t, 2)).join(', ')}) · max dip ${fmt(dip)} dB · boundary rises ` +
+      `${rises.map((v) => fmt(v)).join(' ')} dB · cents ${errs.map((c) => fmt(c, 0)).join(' ')}${errorsOf(r)}`,
+  );
+}
+
+async function checkLongNote(midi: number, seconds: Sec): Promise<void> {
+  const T0 = 0.1;
+  const r = await renderVoice('violin', T0 + seconds + 1, [{ ev: note(midi, seconds), when: T0 }]);
+  keep(`violin-long-${midi}`, r.pcm);
+  const env = A.envelope(r.pcm, SR);
+  const dip = A.maxDip(env, T0 + 0.3, T0 + seconds - 0.05);
+  const jump = A.jumpRatio(r.pcm, SR, T0 + 0.2, T0 + seconds);
+  const atk = A.attacks(env);
+  const pass = dip <= LEGATO_MAX_DIP_DB && jump.ratio < MAX_JUMP_RATIO && atk.length === 1 && r.errors.length === 0;
+  record(
+    `violin: ${seconds} s note ${midi} (loops its sustain)`,
+    pass,
+    `max dip ${fmt(dip)} dB · max jump ${fmt(jump.ratio, 2)}× p99.9 (at ${fmt(jump.at, 3)} s) · attacks ${atk.length}${errorsOf(r)}`,
+  );
+}
+
+// ---------- (c) staccato ----------
+
+async function checkStaccato(kind: InstrumentKind, midis: number[]): Promise<void> {
+  const DUR = 0.4;
+  const GAP = 0.2;
+  const T0 = 0.2;
+  const feeds = midis.map((m, i) => ({ ev: note(m, DUR), when: T0 + i * (DUR + GAP) }));
+  const r = await renderVoice(kind, T0 + midis.length * (DUR + GAP) + 1, feeds);
+  keep(`${kind}-staccato`, r.pcm);
+  const env = A.envelope(r.pcm, SR);
+  const atk = A.attacks(env);
+  const drops = feeds.slice(0, -1).map((f) => {
+    const level = A.medianDb(env, f.when + 0.1, f.when + DUR);
+    return level - A.minDb(env, f.when + DUR, f.when + DUR + GAP);
+  });
+  const pass = atk.length === midis.length && drops.every((d) => d >= 10) && r.errors.length === 0;
+  record(
+    `${kind}: staccato ${midis.join(' ')} (gaps ${GAP} s)`,
+    pass,
+    `attacks ${atk.length} · level drop in gaps ${drops.map((d) => fmt(d)).join(' ')} dB${errorsOf(r)}`,
+  );
+}
+
+// ---------- (d) drums ----------
+
+async function checkDrums(): Promise<void> {
+  const centroids: Record<string, number> = {};
+  const peaks: Record<string, number> = {};
+  for (const kind of ['kick', 'snare', 'hat'] as const) {
+    const r = await renderVoice('drums', 0.8, [{ ev: hit(kind), when: 0.1 }]);
+    keep(`drums-${kind}`, r.pcm);
+    centroids[kind] = A.spectralCentroid(r.pcm, SR, 0.1, 0.25);
+    peaks[kind] = A.db(A.peak(r.pcm));
+  }
+  const ordered = centroids.kick < centroids.snare && centroids.snare < centroids.hat;
+  const audible = Object.values(peaks).every((p) => p > -26);
+  record(
+    'drums: kick < snare < hat (spectral centroid)',
+    ordered && audible,
+    `centroid kick ${fmt(centroids.kick, 0)} Hz · snare ${fmt(centroids.snare, 0)} Hz · hat ${fmt(centroids.hat, 0)} Hz · ` +
+      `peak kick ${fmt(peaks.kick)} snare ${fmt(peaks.snare)} hat ${fmt(peaks.hat)} dBFS`,
+  );
+
+  const flams: Feed[] = [];
+  for (const [i, kind] of (['kick', 'snare', 'hat'] as const).entries()) {
+    const t = 0.1 + i * 0.25;
+    flams.push({ ev: hit(kind), when: t }, { ev: hit(kind), when: t + 0.001 });
+  }
+  for (const kind of ['kick', 'snare', 'hat'] as const) flams.push({ ev: hit(kind), when: 0.9 }, { ev: hit(kind), when: 0.9 });
+  const r = await renderVoice('drums', 1.6, flams);
+  keep('drums-flams', r.pcm);
+  record(
+    'drums: hits 1 ms apart and same-time hits do not throw',
+    r.errors.length === 0 && A.allFinite(r.pcm) && A.peak(r.pcm) > 0.05,
+    `errors ${r.errors.length} · warnings ${r.warnings.length} · peak ${fmt(A.db(A.peak(r.pcm)))} dBFS${errorsOf(r)}`,
+  );
+
+  // a groove to listen to: 2 bars at 100 BPM
+  const beat = 60 / 100;
+  const groove: Feed[] = [];
+  for (let b = 0; b < 8; b++) {
+    const t = 0.1 + b * beat;
+    groove.push({ ev: hit(b % 2 === 0 ? 'kick' : 'snare', b % 4 === 3 ? 0.95 : 0.75), when: t });
+    groove.push({ ev: hit('hat', 0.6), when: t }, { ev: hit('hat', 0.4), when: t + beat / 2 });
+  }
+  const g = await renderVoice('drums', 0.1 + 8 * beat + 0.6, groove);
+  keep('drums-groove', g.pcm);
+}
+
+// ---------- (e) catch-up ----------
+
+async function checkCatchUp(kind: InstrumentKind, midi: number): Promise<void> {
+  const WHEN = 0.3;
+  const ref = await renderVoice(kind, 2, [{ ev: note(midi, 0.7), when: WHEN }]);
+  const late = await renderVoice(kind, 2, [{ ev: note(midi, 1.0), when: WHEN, offset: 0.3, arrive: WHEN }]);
+  keep(`${kind}-catchup`, late.pcm);
+  const lenRef = A.soundLength(A.envelope(ref.pcm, SR));
+  const lenLate = A.soundLength(A.envelope(late.pcm, SR));
+  const pass = Math.abs(lenRef - lenLate) <= 0.05 && late.errors.length === 0;
+  record(
+    `${kind}: catch-up (dur 1.0, offset 0.3) sounds like a 0.7 s note`,
+    pass,
+    `length above −20 dB: 0.7 s note ${fmt(lenRef, 3)} s · caught-up note ${fmt(lenLate, 3)} s${errorsOf(late)}`,
+  );
+}
+
+// ---------- (f) a phrase wrapping across the loop end; an orphaned open phrase still ends ----------
+
+async function checkWrap(kind: InstrumentKind, a: number, b: number): Promise<void> {
+  const L = 2;
+  const T0 = 0.2;
+  const phrase = `${kind}:wrap`;
+  const n1 = note(a, 1, { phrase, legatoNext: true });
+  const n2 = note(b, 1, { phrase, legatoNext: true }); // the last note of the take continues into the first
+  const feeds: Feed[] = [0, 1].flatMap((k) => [
+    { ev: n1, when: T0 + k * L },
+    { ev: n2, when: T0 + k * L + 1 },
+  ]);
+  const end = T0 + 2 * L;
+  const r = await renderVoice(kind, end + 3, feeds);
+  keep(`${kind}-wrap`, r.pcm);
+  const env = A.envelope(r.pcm, SR);
+  const atk = A.attacks(env);
+  const dip = A.maxDip(env, T0 + 0.15, end);
+  const rises = feeds.slice(1).map((f) => A.boundaryRise(env, f.when));
+  const tail = A.rmsDb(r.pcm, SR, end + 2, end + 2.9);
+  const pass = atk.length === 1 && dip <= LEGATO_MAX_DIP_DB && rises.every((v) => v < LEGATO_MAX_RISE_DB) && tail < -80;
+  record(
+    `${kind}: phrase wrapping across the loop end stays legato; the open phrase ends by itself`,
+    pass,
+    `attacks ${atk.length} · max dip ${fmt(dip)} dB · rises at boundaries ${rises.map((v) => fmt(v)).join(' ')} dB · ` +
+      `level 2 s after the last note ${fmt(tail)} dBFS${errorsOf(r)}`,
+  );
+}
+
+// ---------- stopAll ----------
+
+async function checkStopAll(kind: InstrumentKind): Promise<void> {
+  const STOP = 1;
+  const stop: Act = { at: STOP, run: (v: Voice) => v.stopAll(STOP) };
+  let feeds: Feed[];
+  if (kind === 'drums') {
+    feeds = [
+      { ev: hit('kick'), when: 0.5 },
+      { ev: hit('kick'), when: 0.9 },
+      { ev: hit('hat'), when: 0.95 },
+      { ev: hit('snare'), when: 1.05, arrive: 0.93 }, // handed over before the stop, due after it
+      { ev: hit('snare'), when: 1.5 },
+    ];
+  } else {
+    const p = `${kind}:stop`;
+    feeds = [
+      { ev: note(60, 1.9, { phrase: p, legatoNext: true }), when: 0.1 },
+      { ev: note(67, 0.3), when: 1.05, arrive: 0.93 }, // handed over before the stop, due after it
+      { ev: note(64, 0.5, { phrase: p }), when: 1.5 }, // a continuation after stopAll starts a fresh phrase
+    ];
+  }
+  const r = await renderVoice(kind, 2.6, feeds, [stop]);
+  keep(`${kind}-stopall`, r.pcm);
+  const env = A.envelope(r.pcm, SR);
+  const before = kind === 'drums' ? A.db(A.peak(r.pcm.subarray(0, STOP * SR))) : A.rmsDb(r.pcm, SR, 0.6, 0.95);
+  const after = A.rmsDb(r.pcm, SR, STOP + 0.03, 1.45);
+  const again = A.maxDb(env, 1.5, 1.9);
+  const silent = after <= before - STOP_SILENCE_DB || after < -70;
+  const pass = silent && again > before - 20 && r.errors.length === 0;
+  record(
+    `${kind}: stopAll silent within 30 ms (incl. a note handed over before it); plays again after`,
+    pass,
+    `before ${fmt(before)} dBFS · 30–450 ms after stop ${fmt(after)} dBFS · next note ${fmt(again)} dBFS${errorsOf(r)}`,
+  );
+}
+
+// ---------- blips ----------
+
+async function checkBlips(): Promise<void> {
+  const AT = 0.1;
+  const parts: string[] = [];
+  let pass = true;
+  for (const kind of ['ok', 'err', 'click'] as const) {
+    const pcm = await renderBlip((ctx, at) => playBlip(ctx, kind, at), 0.6, AT);
+    keep(`blip-${kind}`, pcm);
+    const p = A.peak(pcm);
+    let first = 0;
+    while (first < pcm.length && Math.abs(pcm[first]) < 0.01) first++;
+    const onsetMs = ((first - AT * SR) / SR) * 1000;
+    pass &&= p > 0.05 && A.allFinite(pcm) && (kind !== 'click' || Math.abs(onsetMs) < 0.05);
+    parts.push(`${kind} peak ${fmt(A.db(p))} dBFS onset ${fmt(onsetMs, 2)} ms`);
+  }
+  record('blips: ok, err, click render (click onset exact)', pass, parts.join(' · '));
+}
+
+// ---------- run ----------
+
+async function runAll(): Promise<CheckRun> {
+  const t0 = performance.now();
+  results.length = 0;
+  const steps: [string, () => Promise<void>][] = [
+    ['pitch synth', () => checkPitch('synth', [60, 64, 67, 72])],
+    ['pitch violin', () => checkPitch('violin', [55, 60, 62, 64, 67, 69, 72, 74, 76, 79, 84])],
+    ['pitch bass', () => checkPitch('bass', [36, 40, 43, 45, 48])],
+    // C5 D5 (glide in the C5 sample) E5 G5 A4 C5 (each a crossfade to another sample)
+    ['legato violin', () => checkLegato('violin', [[72, 0.5], [74, 0.5], [76, 0.5], [79, 0.5], [69, 0.5], [72, 0.6]], 'violin-legato')],
+    ['legato bass', () => checkLegato('bass', [[36, 0.4], [40, 0.4], [43, 0.4], [48, 0.4], [45, 0.5]], 'bass-legato')],
+    ['long violin', () => checkLongNote(69, 20)],
+    ['staccato violin', () => checkStaccato('violin', [60, 64, 67, 72])],
+    ['drums', () => checkDrums()],
+    ['catch-up violin', () => checkCatchUp('violin', 64)],
+    ['catch-up synth', () => checkCatchUp('synth', 64)],
+    ['catch-up bass', () => checkCatchUp('bass', 40)],
+    ['wrap violin', () => checkWrap('violin', 72, 76)],
+    ['wrap bass', () => checkWrap('bass', 43, 48)],
+    ...(['violin', 'synth', 'bass', 'drums'] as const).map((k): [string, () => Promise<void>] => [`stopAll ${k}`, () => checkStopAll(k)]),
+    ['blips', () => checkBlips()],
+  ];
+  for (const [name, fn] of steps) {
+    try {
+      await fn();
+    } catch (e) {
+      record(name, false, `threw: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+    }
+  }
+  return { results: [...results], wavs, ms: Math.round(performance.now() - t0) };
+}
+
+window.runInstrumentChecks = runAll;
+
+// ---------- manual use: run, read, listen ----------
+
+let live: AudioContext | null = null;
+document.getElementById('run')!.addEventListener('click', async () => {
+  const out = document.getElementById('out')!;
+  out.textContent = 'running…';
+  const run = await runAll();
+  out.textContent = run.results.map((r) => `${r.pass ? 'PASS' : 'FAIL'}  ${r.name}\n      ${r.detail}`).join('\n');
+  const box = document.getElementById('renders')!;
+  box.replaceChildren(
+    ...Object.keys(pcms).map((name) => {
+      const b = document.createElement('button');
+      b.textContent = `▶ ${name}`;
+      b.onclick = () => {
+        live ??= new AudioContext();
+        const buf = live.createBuffer(1, pcms[name].length, SR);
+        buf.getChannelData(0).set(pcms[name]);
+        const src = live.createBufferSource();
+        src.buffer = buf;
+        src.connect(live.destination);
+        src.start();
+      };
+      return b;
+    }),
+  );
+});
