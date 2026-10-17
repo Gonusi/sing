@@ -22,14 +22,28 @@ interface WorkletProcessor {
 const BLOCK_SIZE = 512;
 /** samples per capture-tap message */
 const CAPTURE_CHUNK = 8192;
-/** currentFrame further than this from our count is a real discontinuity → re-sync to it */
+/** currentFrame further than this from our count is a real discontinuity → re-sync at once */
 const RESYNC_FRAMES = 256;
+/** a smaller disagreement that persists for this many calls means our count is off (e.g. the first sync read a
+ *  glitched currentFrame) → re-sync; a single-call glitch never lasts that long */
+const RESYNC_AFTER_CALLS = 4;
 
-/** frame of each render quantum: counts process() calls, re-syncs to currentFrame only on a real jump */
+/** frame of each render quantum: counts process() calls; follows currentFrame only on a real jump or a lasting offset */
 class FrameClock {
   private next = -1;
+  private disagree = 0;
   at(current: number, n: number): number {
-    if (this.next < 0 || Math.abs(current - this.next) >= RESYNC_FRAMES) this.next = current;
+    if (this.next < 0 || Math.abs(current - this.next) >= RESYNC_FRAMES) {
+      this.next = current;
+      this.disagree = 0;
+    } else if (current !== this.next) {
+      if (++this.disagree >= RESYNC_AFTER_CALLS) {
+        this.next = current;
+        this.disagree = 0;
+      }
+    } else {
+      this.disagree = 0;
+    }
     const f = this.next;
     this.next += n;
     return f;

@@ -113,7 +113,8 @@ async function checkFirstTake(page: Page): Promise<void> {
   // raw audio = pre-roll (from t0 + inLat − 0.2, or the context's first frame) up to the last block before the stop ran
   const wavSec = (d.wavBytes - 44) / 2 / d.sampleRate;
   const wantSec = d.startAt - Math.max(0, d.t0 + 0.01 - 0.2);
-  check('a7 lastTakeWav: 16-bit WAV of pre-roll + take', Math.abs(wavSec - wantSec) < 0.03, `${d.wavBytes} bytes = ${wavSec.toFixed(3)} s, expected ≈ ${wantSec.toFixed(3)} s`);
+  // the last block lags currentTime by ≤ 1 block + message delay + a 512-frame clock step
+  check('a7 lastTakeWav: 16-bit WAV of pre-roll + take', Math.abs(wavSec - wantSec) < 0.045, `${d.wavBytes} bytes = ${wavSec.toFixed(3)} s, expected ≈ ${wantSec.toFixed(3)} s`);
   const L = d.session.loopLength ?? 0;
   check('a1 first take L = tap difference', Math.abs(L - (d.stopT - d.t0)) < 0.001, `L=${L.toFixed(6)} expected ${(d.stopT - d.t0).toFixed(6)}`);
   const track = d.session.tracks[0];

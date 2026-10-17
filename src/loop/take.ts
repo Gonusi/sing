@@ -173,7 +173,9 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
     keepRaw(samples);
     const limited = frame >= feedLimitFrame ? null : samples.subarray(0, Math.max(0, feedLimitFrame - frame));
     if (!limited || limited.length === 0) return;
-    const x = zeroExcluded(frame, limited);
+    // drums: no zeroing — zeroed noise resuming at an exclusion edge is a sharp onset (phantom hats); hits inside an
+    // exclusion are dropped by the post-filter (placeHit) instead
+    const x = drums ? limited : zeroExcluded(frame, limited);
     let changed = false;
     if (tracker && segmenter && !segmenterClosed) {
       for (const f of tracker.push({ frame, samples: x }, sr)) {

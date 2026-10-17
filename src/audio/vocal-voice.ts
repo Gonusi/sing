@@ -27,6 +27,9 @@ export function createVocalVoice(ctx: BaseAudioContext, buffer: () => AudioBuffe
     src.buffer = buf;
     const g = ctx.createGain();
     const p = g.gain;
+    // a source started at a fractional `when` renders its first sample in the frame before the automation begins:
+    // the gain must already be 0 there (default 1 doubled that one sample against the previous cycle's tail)
+    p.value = 0;
     if (offset < tail) {
       p.setValueAtTime(offset / tail, when);
       p.linearRampToValueAtTime(1, when + (tail - offset));

@@ -33,8 +33,7 @@ test('regression shell: a press right after closing a sheet starts a gesture', a
   expect(gestures).toEqual(['holdStart', 'holdEnd']);
 });
 
-test('BUG engine: one-sample clicks at vocal loop seams (intermittent: up to 3 takes)', async ({ page }) => {
-  test.fail(true, 'src/audio/vocal-voice.ts: at cycle starts 2 and 3 (in ~3 of 4 takes, both engines) exactly one sample is doubled (old tail + new cycle both at full level); suspect: the new GainNode is 1 (default) until its setValueAtTime(…, when)');
+test('regression engine: no one-sample clicks at vocal loop seams (up to 3 takes)', async ({ page }) => {
   test.setTimeout(180_000);
   await boot(page);
   // seam inside a sustained sung A4 (sing-cmaj 3.84–4.59 s), as in vocals.spec.ts
@@ -68,11 +67,12 @@ test('BUG engine: one-sample clicks at vocal loop seams (intermittent: up to 3 t
   expect(clicks, lines.join('\n')).toBe(0);
 });
 
-test('BUG engine/dsp: a drum first take of room noise only (−45 dBFS) records phantom hats', async ({ page }) => {
-  test.fail(true, 'src/loop/take.ts + src/analysis/drums.ts: with the fixtures\' own −45 dBFS room noise, an empty drum first take gets 2 hats (pos ≈ 0.03 and ≈ 0.23 s; the 2nd right after the 80 ms record-beep exclusion, which zeroes the noise without ramps: noise resuming from 0 is a sharp onset). −60 dBFS or silence: none.');
+test('regression engine: a drum first take of room noise only (−45 dBFS) records no phantom hats', async ({ page }) => {
   await boot(page, { noise: -45 });
   const hits = await page.evaluate(async () => {
     const s = window.__sing!;
+    // let the noise bed run first: its own start (digital silence → noise) is a real onset, 50 ms after boot
+    await s.waitUntil(s.now() + 0.5);
     s.command({ type: 'create', kind: 'drums' });
     const t0 = s.now();
     await s.waitUntil(t0 + 0.1);
