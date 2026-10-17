@@ -175,6 +175,10 @@ function fakeOnsets(): OnsetDetector {
       }
       return out;
     },
+    close(): RawHit[] {
+      pending = null;
+      return [];
+    },
     reset() {
       quietFrames = Infinity;
       pending = null;

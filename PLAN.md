@@ -3,7 +3,7 @@
 ## Progress
 - [x] Research (mic/pitch, playback/drums/legato, PWA/deploy/vosk) and reviewed plan — 2026-10-17
 - [x] Scaffold: deps, configs, `src/types.ts` contract, stubs, wired `main.ts`, dev helpers (`dev/lib/`) — boots in Chromium + WebKit
-- [ ] Wave 1 — dsp: analysis + fixtures + `dev/analyze.ts` passing
+- [x] Wave 1 — dsp: analysis + fixtures + `dev/analyze.ts` passing — merged; 86/86 notes, drums 16/16 ×2; note final ≤ 140 ms after end, hit ≤ 82 ms
 - [x] Wave 1 — engine: context, mic, worklet, ring, latency, capture, probe, scheduler, take, controller, session — merged, 55/55 checks (Chromium + WebKit)
 - [ ] Wave 1 — instruments: synth, bass, drums, violin phrase voice, blip, samples
 - [x] Wave 1 — shell: UI (start, input, lanes, status, sheets), icons, deploy workflow — merged, screenshots reviewed

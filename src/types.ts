@@ -95,6 +95,7 @@ export interface PitchFrame {
   /** null when unvoiced / below the clarity or volume gate */
   hz: number | null;
   clarity: number;
+  /** RMS of the central 20 ms of the window */
   rms: number;
 }
 
@@ -111,14 +112,16 @@ export interface NoteSegmenter {
   push(frame: PitchFrame): RawNote[];
   /** the note currently being sung, if any (for live drawing) */
   open(): RawNote | null;
-  /** force-finish at context time `at`; returns the notes finalised by it */
+  /** force-finish at context time `at`; returns the notes finalised by it (notes returned earlier are NOT clipped — callers clip to their window; a truncated note < 80 ms is dropped) */
   close(at: Sec): RawNote[];
   reset(): void;
 }
 
 export interface OnsetDetector {
-  /** feed a block; returns hits that became final (classified ~70 ms after their onset) */
+  /** feed a block; returns hits that became final (classified ≤ ~82 ms after their onset) */
   push(block: MicBlock, sampleRate: number): RawHit[];
+  /** force-classify onsets still waiting for their window, using audio up to `at`; resets pending state */
+  close(at: Sec): RawHit[];
   reset(): void;
 }
 
