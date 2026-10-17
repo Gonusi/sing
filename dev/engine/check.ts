@@ -778,12 +778,12 @@ async function checkVocals(page: Page, url: string): Promise<void> {
     await e.c.flush();
     return {
       sr, L, Ls, X, inLat, live1, live2, a1, a2, tailSame, peaks1, ts, first2, seams: seams.length, seamJump, steadyJump,
-      sums: [lane1, lane2, lane3].map((id) => [id, sum(id)]), keys: await e.audioKeys(),
+      sums: [lane1, lane2, lane3].map((id) => [id, sum(id)]), keys: await e.audioKeys(), micStats: e.mic.stats(),
     };
   });
   check('v1 vocal first take: audio = injected samples at the right offset (≤ 1 ms after inLat), tail = loop start, peaks',
     Math.abs(d.a1.lag) <= d.sr * 0.001 && d.a1.err < 1e-3 && d.tailSame && d.peaks1.length === 256 && d.peaks1.filter((p) => p > 0.3 && p <= 1).length >= 256 - 12,
-    `lag ${d.a1.lag} samples, mean err ${d.a1.err.toExponential(1)}, tail copy ${d.tailSame}, peaks ${d.peaks1.length} (${d.peaks1.filter((p) => p <= 0.3).length} quiet bins: the beep exclusion)`);
+    `mic gaps ${d.micStats.gaps} (${JSON.stringify(d.micStats.recent)}); lag ${d.a1.lag} samples, mean err ${d.a1.err.toExponential(1)}, tail copy ${d.tailSame}, peaks ${d.peaks1.length} (${d.peaks1.filter((p) => p <= 0.3).length} quiet bins: the beep exclusion)`);
   check('v2 vocal overdub: rotated audio = injected samples (≤ 1 ms), plays from the window end', Math.abs(d.a2.lag) <= d.sr * 0.001 && d.a2.err < 1e-3 &&
     !!d.first2 && d.first2.at + d.first2.outLat >= d.ts + d.L - 0.001 && d.first2.at + d.first2.outLat <= d.ts + d.L + 0.16,
     `lag ${d.a2.lag} samples, mean err ${d.a2.err.toExponential(1)}; first replay heard from ts+L+${d.first2 ? ms(d.first2.at + d.first2.outLat - d.ts - d.L) : '?'}`);
@@ -812,6 +812,14 @@ async function checkVocals(page: Page, url: string): Promise<void> {
   const same = JSON.stringify(after.sums) === JSON.stringify(d.sums);
   check('v5 reload: vocal audio restored bit-exact, echo restored, stored keys = referenced', same && after.echo === 0.37 && after.keys.length === 3 && d.sums.every(([, s]) => s !== null),
     `audio ${same ? 'same' : `differs ${JSON.stringify(after.sums)} vs ${JSON.stringify(d.sums)}`}, echo ${after.echo}, keys ${after.keys.length}`);
+}
+
+/** a late vocal start must play exactly the promised audio even when currentTime advances within the task */
+async function checkLateVocalStart(page: Page): Promise<void> {
+  const errs = await page.evaluate(() => (window as unknown as W).__eng.lateVocalStarts(20, 3));
+  const off = errs.filter((e) => e !== 0);
+  check('v8 late vocal start (3 ms of work after reading now): content at the promised frame in 20/20 starts', off.length === 0,
+    `${errs.length - off.length}/${errs.length} exact${off.length ? `; off by ${off.join(',')} frames` : ''}`);
 }
 
 async function checkEcho(page: Page): Promise<void> {
@@ -887,6 +895,7 @@ async function runEngine(engine: Engine, url: string): Promise<void> {
       ['f2', () => checkTinyLoop(page)],
       ['v', () => checkVocals(page, url)],
       ['echo', () => checkEcho(page)],
+      ['v8', () => checkLateVocalStart(page)],
     ];
     for (const [name, fn] of steps) {
       if (ONLY && !ONLY.includes(name)) continue;

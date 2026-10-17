@@ -5,8 +5,8 @@
 //   'capture-tap' — records its input (mono mix) with the frame of the first sample; flushes on {type:'stop'}.
 // Both use port.postMessage with transferable buffers (no SharedArrayBuffer: GitHub Pages sends no COOP/COEP).
 // Frame stamps come from our own counter (FrameClock), not straight from `currentFrame`: under load Chromium's
-// currentFrame occasionally reads one quantum (128 frames) behind for a single process() call while the samples
-// are contiguous (measured: content = stamp + 128). A wrong stamp makes the block overlap its predecessor, and
+// currentFrame occasionally reads one quantum (128 frames) behind, also on a node's very first process() call,
+// while the samples are contiguous (measured: content = stamp + 128). A wrong stamp makes the block overlap its predecessor, and
 // the analysis restarts on any discontinuity (lost notes/hits).
 
 declare const currentFrame: number;
@@ -24,25 +24,26 @@ const BLOCK_SIZE = 512;
 const CAPTURE_CHUNK = 8192;
 /** currentFrame further than this from our count is a real discontinuity → re-sync at once */
 const RESYNC_FRAMES = 256;
-/** a smaller disagreement that persists for this many calls means our count is off (e.g. the first sync read a
- *  glitched currentFrame) → re-sync; a single-call glitch never lasts that long */
-const RESYNC_AFTER_CALLS = 4;
 
-/** frame of each render quantum: counts process() calls; follows currentFrame only on a real jump or a lasting offset */
+/**
+ * Frame of each render quantum. Counts process() calls; the observed glitch only ever reads currentFrame BEHIND
+ * the true frame (content = stamp + 128, never the reverse), so the count only moves forward:
+ *   currentFrame behind the count (< 2 quanta)  → a glitched read: ignore it;
+ *   currentFrame ahead of it (< 2 quanta)       → our count was behind (the first sync read a glitch): 'correct';
+ *   ≥ RESYNC_FRAMES either way                  → a real discontinuity: 'jump'.
+ */
 class FrameClock {
   private next = -1;
-  private disagree = 0;
+  /** what the last at() did to the count */
+  change: 'none' | 'correct' | 'jump' = 'none';
   at(current: number, n: number): number {
+    this.change = 'none';
     if (this.next < 0 || Math.abs(current - this.next) >= RESYNC_FRAMES) {
+      if (this.next >= 0) this.change = 'jump';
       this.next = current;
-      this.disagree = 0;
-    } else if (current !== this.next) {
-      if (++this.disagree >= RESYNC_AFTER_CALLS) {
-        this.next = current;
-        this.disagree = 0;
-      }
-    } else {
-      this.disagree = 0;
+    } else if (current > this.next) {
+      this.change = 'correct';
+      this.next = current;
     }
     const f = this.next;
     this.next += n;
@@ -61,7 +62,13 @@ class BlockAccumulator {
     this.buf = new Float32Array(size);
   }
   /** append `n` samples (zeros when src is null) whose first sample is context frame `frame`; returns full blocks */
-  push(src: Float32Array | null, n: number, frame: number, out: (frame: number, samples: Float32Array) => void): void {
+  push(src: Float32Array | null, n: number, frame: number, out: (frame: number, samples: Float32Array) => void, correction = false): void {
+    // a block holds contiguous frames only. A clock correction (our count was behind) re-stamps the held samples:
+    // they are contiguous with this quantum and were stamped too early by the same amount. A jump starts a new block.
+    if (this.fill > 0 && frame !== this.frame + this.fill) {
+      if (correction) this.frame = frame - this.fill;
+      else this.flush(out);
+    }
     let i = 0;
     while (i < n) {
       if (this.fill === 0) this.frame = frame + i;
@@ -93,7 +100,8 @@ class MicTap extends AudioWorkletProcessor implements WorkletProcessor {
   process(inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     const ch0 = inputs[0]?.[0] ?? null;
     const n = ch0?.length ?? outputs[0]?.[0]?.length ?? 128;
-    this.acc.push(ch0, n, this.clock.at(currentFrame, n), this.post);
+    const frame = this.clock.at(currentFrame, n);
+    this.acc.push(ch0, n, frame, this.post, this.clock.change === 'correct');
     return true;
   }
 }
@@ -124,7 +132,8 @@ class CaptureTap extends AudioWorkletProcessor implements WorkletProcessor {
     if (this.mono.length !== n) this.mono = new Float32Array(n);
     this.mono.fill(0);
     for (const ch of chans) for (let i = 0; i < n; i++) this.mono[i] += ch[i] / chans.length;
-    this.acc.push(chans.length ? this.mono : null, n, this.clock.at(currentFrame, n), this.post);
+    const frame = this.clock.at(currentFrame, n);
+    this.acc.push(chans.length ? this.mono : null, n, frame, this.post, this.clock.change === 'correct');
     return true;
   }
 }

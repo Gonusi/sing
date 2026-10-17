@@ -10,6 +10,12 @@ import type { InstrumentKind, Note, Sec, Voice } from '../types.ts';
 import { VOCAL_TAIL_SEC } from '../loop/take.ts';
 
 const CATCHUP_FADE_SEC = 0.01;
+/**
+ * a start must lie this far in the future: currentTime can advance a quantum (2.7 ms) within one task, and a source
+ * started in the past begins at the next quantum with the offset it was given — the audio would play that much late.
+ * A late start moves forward and skips the same amount (like the instruments' LATE_MARGIN).
+ */
+const START_MARGIN_SEC = 0.01;
 const STOP_FADE_SEC = 0.015;
 
 export function createVocalVoice(ctx: BaseAudioContext, buffer: () => AudioBuffer | null): Voice {
@@ -17,9 +23,12 @@ export function createVocalVoice(ctx: BaseAudioContext, buffer: () => AudioBuffe
   const playing = new Set<{ src: AudioBufferSourceNode; g: GainNode }>();
   const kind: InstrumentKind = 'vocals';
 
-  const play = (_ev: Note | unknown, when: Sec, offset = 0) => {
+  const play = (_ev: Note | unknown, whenAsked: Sec, offsetAsked = 0) => {
     const buf = buffer();
     if (!buf) return;
+    const shift = Math.max(0, ctx.currentTime + START_MARGIN_SEC - whenAsked);
+    const when = whenAsked + shift;
+    const offset = offsetAsked + shift;
     const tail = Math.round(VOCAL_TAIL_SEC * buf.sampleRate) / buf.sampleRate;
     const loopDur = buf.duration - tail;
     if (offset >= buf.duration - 0.001) return;

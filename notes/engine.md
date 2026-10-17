@@ -131,6 +131,21 @@ WebKit quirks seen: `currentTime` is still 0 right after boot (first take at t0 
 - FrameClock: the first sync could take a glitched currentFrame (counter 128 frames off for the whole session → vocal audio 2.7 ms
   late, seen once). It now also re-syncs when currentFrame disagrees on 4 consecutive calls; a single-call glitch is still ignored.
 
+## WebKit "one quantum off" (2026-10-17, investigated)
+Root fact, measured: `currentTime` advances by 128/256 frames WITHIN one JS task (3 ms of work: 192/200 tasks on WebKit,
+45/200 on Chromium). Two consequences:
+- **Real (vocal output 2.67 ms late, WebKit ~1 in 5 runs):** a catch-up vocal start passed `at = now` read at the tick's start; by
+  `src.start(at, offset)` a quantum had passed, so the audio began a quantum late with the old offset. Diagnosed with a per-cycle
+  xcorr: only cycle 1 (the catch-up start) was off, 2/10 runs before, 0/15 after. Fix: vocal-voice starts no earlier than
+  currentTime + 10 ms and adds the shift to the offset (as the instruments' LATE_MARGIN).
+- **Artefact (states.spec `origin − log t`):** two separate currentTime reads. The controller now logs `play {now, outLat, origin}`
+  from one read; the spec asserts `origin − now − outLat = 0.03` exactly.
+Also found while measuring: a worklet node's FIRST `currentFrame` read can itself be one quantum behind. The old 4-call re-sync could follow
+a multi-call glitch (misplaced audio once, v1), and a block re-stamped mid-way kept its old stamp. Now FrameClock only moves forward
+(reads behind = glitch, ignored; ahead < 2 quanta = correction, the held block is re-stamped; ≥ 2 quanta = jump, new block). v8 checks
+late vocal starts on fresh capture taps (20/20 exact on both engines).
+Risk: a glitch that read AHEAD (never observed) would make all later stamps 2.7 ms late.
+
 ## Known risks
 - **Vocal first replay** misses ≈ 0.13 s after an overdub window (commit latency); a provisional commit before the window end could
   close it, not built. **Beep exclusion** zeroes 80 ms of a vocal take right after the record tap (on speakers the mic hears the beep).

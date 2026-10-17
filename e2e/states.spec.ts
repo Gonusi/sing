@@ -103,9 +103,10 @@ test('state table walk', async ({ page }) => {
   await test.step('stopped → tap → playing, origin = now + outLat + 0.03, pos 0 never late', async () => {
     const t = await tap(page);
     expect(await getState(page)).toBe('playing');
-    const ev = (await since(page, t)).find((e) => e.type === 'transport' && e.data?.action === 'start')!;
-    const outLat = await page.evaluate(() => window.__sing!.outLat());
-    expect(Number(ev.data!.origin) - ev.t).toBeCloseTo(outLat + 0.03, 3);
+    // the engine's own 'play' event: origin and the `now`/outLat it was computed from (a log entry's t is a separate
+    // currentTime read, which can be a quantum later within the same task — measured: 192/200 tasks on WebKit)
+    const ev = (await since(page, t)).find((e) => e.type === 'play')!;
+    expect(Number(ev.data!.origin) - Number(ev.data!.now) - Number(ev.data!.outLat)).toBeCloseTo(0.03, 9);
     await page.evaluate((t) => window.__sing!.waitUntil(t + 1), t);
     const late = (await since(page, t)).filter((e) => e.type === 'drop' || (e.type === 'sched' && Number(e.data?.offset) > 0));
     expect(late).toEqual([]);
