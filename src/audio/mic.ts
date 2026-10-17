@@ -28,6 +28,8 @@ export interface MicOptions {
 
 /** ring buffer length */
 const RING_SEC = 2;
+/** don't hammer getUserMedia when a track keeps ending */
+const REOPEN_MIN_INTERVAL_MS = 2000;
 /** DelayNode maxDelayTime headroom for loopback() */
 const LOOPBACK_MAX_DELAY_SEC = 2;
 
@@ -52,9 +54,19 @@ export async function createMic(engine: AudioEngine, opts: MicOptions): Promise<
 
   const device = createDevice(ctx, tap, opts.ec);
   if (!opts.test) await device.open();
+  // re-acquire a mic track that ended (iOS background, device lost) once audio is back / the page is visible
+  let lastReopen = 0;
+  const reopenIfEnded = () => {
+    if (opts.test || !device.ended() || document.visibilityState !== 'visible') return;
+    if (performance.now() - lastReopen < REOPEN_MIN_INTERVAL_MS) return;
+    lastReopen = performance.now();
+    void device.open().catch((e) => console.error('mic reopen failed', e));
+  };
+  device.onEnded = reopenIfEnded;
   const offLifecycle = engine.onLifecycle((ev) => {
-    if (ev === 'resumed' && !opts.test && device.ended()) void device.open().catch((e) => console.error('mic reopen failed', e));
+    if (ev === 'resumed') reopenIfEnded();
   });
+  document.addEventListener('visibilitychange', reopenIfEnded);
 
   return {
     sampleRate,
@@ -79,6 +91,7 @@ export async function createMic(engine: AudioEngine, opts: MicOptions): Promise<
     reportedLatency: () => device.latency(),
     dispose() {
       offLifecycle();
+      document.removeEventListener('visibilitychange', reopenIfEnded);
       device.close();
       subs.clear();
       tap.port.onmessage = null;
@@ -102,6 +115,8 @@ export async function createMic(engine: AudioEngine, opts: MicOptions): Promise<
 
 interface Device {
   ec: boolean;
+  /** called when the live track ends on its own */
+  onEnded: () => void;
   open(): Promise<void>;
   close(): void;
   ended(): boolean;
@@ -113,12 +128,15 @@ function createDevice(ctx: AudioContext, tap: AudioNode, ec: boolean): Device {
   let source: MediaStreamAudioSourceNode | null = null;
   const dev: Device = {
     ec,
+    onEnded: () => {},
     async open() {
       dev.close();
-      stream = await navigator.mediaDevices.getUserMedia({
+      const s = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: dev.ec, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
       });
-      source = ctx.createMediaStreamSource(stream);
+      stream = s;
+      s.getAudioTracks().forEach((t) => t.addEventListener('ended', () => stream === s && dev.onEnded()));
+      source = ctx.createMediaStreamSource(s);
       source.connect(tap);
     },
     close() {

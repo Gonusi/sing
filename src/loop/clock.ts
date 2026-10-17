@@ -33,6 +33,8 @@ export const DRUM_LATE_MAX_SEC = 0.03;
 export const MIN_CATCHUP_REMAIN_SEC = 0.03;
 export const RAMP_ONOFF_SEC = 0.01;
 export const RAMP_STOP_SEC = 0.02;
+/** shorter loops are not scheduled at all (guards the cycle loop) */
+export const MIN_LOOP_SEC = 0.01;
 /** boundary slack for `from` / activeFrom / activeUntil: heard = origin + pos + k·L can land 1 ulp below `from` */
 export const EDGE_EPS_SEC = 1e-6;
 
@@ -136,7 +138,7 @@ export function createScheduler(engine: AudioEngine, opts: SchedulerOptions = {}
   };
 
   const tick = () => {
-    if (!running || L <= 0) return;
+    if (!running || !(L >= MIN_LOOP_SEC)) return;
     const now = ctx.currentTime;
     const ol = engine.outLat();
     const hi = now + LOOKAHEAD_SEC + ol;
@@ -157,7 +159,7 @@ export function createScheduler(engine: AudioEngine, opts: SchedulerOptions = {}
       s.known.add(key);
       fresh.add(ev);
     }
-    if (!running || fresh.size === 0 || !eligible(s.st)) return;
+    if (!running || !(L >= MIN_LOOP_SEC) || fresh.size === 0 || !eligible(s.st)) return;
     scheduleRange(s, from - EDGE_EPS_SEC, s.scheduledUntil, ctx.currentTime, engine.outLat(), fresh);
   };
 
@@ -294,7 +296,7 @@ export function eventKey(ev: LoopEvent): string {
 
 /** calls fn(k, heard) for every heard = origin + pos + k·L inside [lo, hi) */
 export function forEachOccurrence(origin: Sec, L: Sec, pos: Sec, lo: Sec, hi: Sec, fn: (k: number, heard: Sec) => void): void {
-  if (!(L > 0) || !(hi > lo)) return;
+  if (!(L >= MIN_LOOP_SEC) || !(hi > lo) || !Number.isFinite(lo) || !Number.isFinite(hi)) return;
   const at = (k: number) => origin + pos + k * L;
   let k = Math.ceil((lo - origin - pos) / L);
   while (at(k - 1) >= lo) k--;

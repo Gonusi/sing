@@ -41,6 +41,14 @@ export interface Eng {
   probeLevel(): Promise<{ level: number; expected: number }>;
   /** capture master while a click plays at a known time: onset frame vs. expected */
   captureClick(): Promise<{ onsetFrame: number; expectedFrame: number; frames: number }>;
+  /** onChange calls since boot */
+  changes: number;
+  /** ?real: the mic is getUserMedia (Chromium fake-capture WAV), not the test mic */
+  realMic: boolean;
+  /** RMS of the last `sec` seconds in the mic ring */
+  ringRms(sec: Sec): number;
+  /** suspend the context (like an iOS interruption); the engine resumes it itself */
+  suspendBriefly(): Promise<void>;
 }
 
 declare global {
@@ -49,7 +57,8 @@ declare global {
   }
 }
 
-const eng = { booted: false, error: null, events: [] } as unknown as Eng;
+const REAL_MIC = new URLSearchParams(location.search).has('real');
+const eng = { booted: false, error: null, events: [], changes: 0, realMic: REAL_MIC } as unknown as Eng;
 window.__eng = eng;
 const out = document.getElementById('out')!;
 const btn = document.getElementById('start') as HTMLButtonElement;
@@ -66,12 +75,13 @@ btn.addEventListener('click', () => {
 async function boot(engineP: Promise<AudioEngine>): Promise<void> {
   const engine = await engineP;
   const { ctx } = engine;
-  const mic = await createMic(engine, { test: true, ec: false });
+  const mic = await createMic(engine, { test: !REAL_MIC, ec: false });
   const device = await loadDevice();
   await preloadInstruments(ctx);
   const c = await createController({ engine, mic, device, test: true, analysis: fakeAnalysis() });
   eng.events.push(...c.logs());
   c.onLog((e) => eng.events.push(e));
+  c.onChange(() => void eng.changes++);
   Object.assign(eng, {
     engine, mic, c,
     sampleRate: ctx.sampleRate,
@@ -117,6 +127,19 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
       undo();
       return { level, expected: 10 ** (-24 / 20) / Math.SQRT2 };
     },
+    ringRms(sec: Sec) {
+      const r = mic.read(mic.latest() - sec, mic.latest());
+      let sum = 0;
+      for (const v of r.samples) sum += v * v;
+      return r.samples.length ? Math.sqrt(sum / r.samples.length) : 0;
+    },
+    async suspendBriefly() {
+      await ctx.suspend();
+      await new Promise<void>((resolve) => {
+        const poll = () => (ctx.state === 'running' ? resolve() : setTimeout(poll, 5));
+        poll();
+      });
+    },
     async captureClick() {
       const cap = createCapture(engine);
       cap.start(engine.master);
@@ -124,8 +147,10 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
       playClick(ctx, engine.master, at);
       await eng.sleep(0.4);
       const r = await cap.stop();
+      // search from 50 ms before the click: whatever else was on the master bus before is not the click
+      const from = Math.max(0, Math.round((at - 0.05) * ctx.sampleRate) - r.frame);
       let onset = -1;
-      for (let i = 0; i < r.pcm.length; i++) if (Math.abs(r.pcm[i]) > 0.01) { onset = i; break; }
+      for (let i = from; i < r.pcm.length; i++) if (Math.abs(r.pcm[i]) > 0.01) { onset = i; break; }
       return { onsetFrame: r.frame + onset, expectedFrame: Math.round(at * ctx.sampleRate), frames: r.pcm.length };
     },
   });

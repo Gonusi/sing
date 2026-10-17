@@ -78,7 +78,10 @@ export const START_LEAD_SEC = 0.03;
 const BEEP_HZ = 1320;
 const BEEP_SEC = 0.04;
 const BEEP_LEVEL = 0.25;
-/** corrected-time span after the beep is heard that is dropped from the take (the mic may hear it) */
+/**
+ * drum takes only: corrected-time span after the beep is heard that is dropped (on speakers the mic hears it and
+ * the onset detector would make a hit of it). Melodic takes keep it: the beep is shorter than any note.
+ */
 const BEEP_EXCLUDE_SEC = 0.08;
 export const LOG_MAX = 2000;
 const STATE_HISTORY_MAX = 64;
@@ -110,6 +113,9 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
   const { ctx } = engine;
   const makeVoice = deps.createVoice ?? createInstrumentVoice;
   let device: DeviceSettings = { ...deps.device };
+  // until calibrated, the browser's own input-latency report (when it gives one) beats the 10 ms guess
+  const reported = mic.reportedLatency();
+  if (!device.calibrated && reported !== null) device = { ...device, inLat: reported };
 
   // ---- log ----
   const logBuf: LogEvent[] = [];
@@ -289,7 +295,7 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     const beepAt = ctx.currentTime;
     playBeep(beepAt);
     const beepHeard = beepAt + engine.outLat();
-    if (beepHeard >= tDown) take.rec.addExclusion({ from: beepHeard, to: beepHeard + BEEP_EXCLUDE_SEC });
+    if (lane.kind === 'drums' && beepHeard >= tDown) take.rec.addExclusion({ from: beepHeard, to: beepHeard + BEEP_EXCLUDE_SEC });
     setState('recordingFirst', tDown);
     return true;
   };
