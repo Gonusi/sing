@@ -255,6 +255,6 @@ Gate costs: Node DSP checks, `tsc` and the build are nearly free → always. E2E
 
 ## Risks
 1. iOS EC/earpiece bug (326286).
-2. vosk memory and load time on iPhone → the lichess fork, then the ＋/strip buttons only (the app stays fully usable without voice).
+2. vosk memory and load time on iPhone (hard ceiling: iPhone Safari kills a page above ~2 GB — owner observed; our estimate is 150–250 MB peak) → the lichess fork, then the ＋/strip buttons only (the app stays fully usable without voice).
 3. Drum thresholds on phone mics → retune on real takes.
 4. Headless timing jitter in e2e → assertions use the scheduler log, and audio re-detection gets a 40 ms tolerance.
