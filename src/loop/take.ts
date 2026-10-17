@@ -27,10 +27,15 @@ export const PREROLL_FIRST_SEC = 0.2;
 export const OVERDUB_EARLY_CLIP_SEC = 0.5;
 /** overdub: analysis starts this long before (ts − OVERDUB_EARLY_CLIP_SEC) */
 export const PREROLL_OVERDUB_SEC = 0.2;
-/** drums: keep feeding this long past the window end so the last hit gets classified (~70 ms) */
+/** drums: keep feeding this long past the window end so the last hit is classified on full audio (dsp: ≤ 82 ms) */
 export const DRUM_TAIL_SEC = 0.1;
-/** shorter notes (after clipping) are dropped */
-export const MIN_NOTE_SEC = 0.05;
+/**
+ * notes: keep feeding this long past the window end before segmenter.close(windowEnd): a pitch frame centred at t
+ * needs audio up to t + half the 2048-sample window (21–23 ms) plus one 10 ms hop
+ */
+export const PITCH_TAIL_SEC = 0.035;
+/** shorter notes (after clipping) are dropped — the same 80 ms minimum as the dsp segmenter */
+export const MIN_NOTE_SEC = 0.08;
 /** raw audio kept for the WAV export */
 export const MAX_RAW_SEC = 70;
 const FEED_BLOCK = 512;
@@ -86,7 +91,7 @@ export interface TakeRecorder {
   beginExclusion(from: Sec): void;
   endExclusion(to: Sec): void;
   addExclusion(span: Span): void;
-  /** close the window at corrected time `end` (first take: L = end − t0) and return the committed take */
+  /** close the window at corrected time `end` (overdub: clamped to ts + L; first take: L = end − t0) → the take */
   finish(end: Sec): Take;
   discard(): void;
   /** raw (unzeroed) mic samples fed to this take; t = stamp of samples[0] */
@@ -111,9 +116,11 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
   let finished = false;
   let segmenterClosed = false;
 
-  // overdub: the window end is known, so analysis stops there (drums: plus a classification tail)
+  // overdub: the window end is known, so analysis stops just past it (a tail so the last frames / hit are complete);
+  // the segmenter is closed at the window end as soon as the tail is in, so the last note never waits for its
+  // 140 ms finalisation delay
   const windowEndStamp = win.type === 'overdub' ? win.ts + win.loopLength + inLat : Infinity;
-  const feedLimitFrame = Math.round((windowEndStamp + (drums ? DRUM_TAIL_SEC : 0)) * sr);
+  const feedLimitFrame = Math.round((windowEndStamp + (drums ? DRUM_TAIL_SEC : PITCH_TAIL_SEC)) * sr);
   const startStamp = win.type === 'first'
     ? win.t0 + inLat - PREROLL_FIRST_SEC
     : win.ts + inLat - OVERDUB_EARLY_CLIP_SEC - PREROLL_OVERDUB_SEC;
@@ -151,7 +158,7 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
           changed = true;
         }
       }
-      if (frame + limited.length >= Math.round(windowEndStamp * sr)) {
+      if (frame + limited.length >= feedLimitFrame) {
         rawNotes.push(...segmenter.close(windowEndStamp));
         segmenterClosed = true;
         changed = true;
@@ -252,11 +259,15 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
       exclusions.push({ ...span });
       emit();
     },
-    finish(end) {
+    finish(endAsked) {
+      // an overdub window never grows past ts + L (a tap inside the commit margin must not wrap notes to pos 0)
+      const end = win.type === 'overdub' ? Math.min(endAsked, win.ts + win.loopLength) : endAsked;
       if (segmenter && !segmenterClosed) {
         rawNotes.push(...segmenter.close(end + inLat));
         segmenterClosed = true;
       }
+      // a hit still waiting for its classification span (stop right after it) is classified on the audio we have
+      if (onsets) rawHits.push(...onsets.close(end + inLat));
       finished = true;
       unsubscribe();
       const L = win.type === 'first' ? end - win.t0 : win.loopLength;
