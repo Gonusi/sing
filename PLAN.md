@@ -16,7 +16,7 @@
 
 
 ## Context
-- **Spec:** `sing/SPEC.md` (copied from `~/Projects/personal/SPEC.md`). This plan replaces `sing/PLAN.md`; once approved it is copied there and becomes the progress file.
+- **Spec:** `sing/SPEC.md` (copied from `~/Projects/personal/SPEC.md`). This file is the progress file (Progress section on top).
 - **What the MVP does:** a universal PWA. You say "create drum / violin / synth / bass track", sing (beatbox for drums), and every track loops together. It runs on iPhone (the first test device), Android and desktop.
 - **Hosting:** https://kasparasanusauskas.com/sing/ from `Gonusi/sing` (public, empty, `main`). Pages is **not enabled yet** (the API returns 404).
 - **The owner is away and expects a working prototype on return**, with a minimal UI. Claude tests it end to end itself with a mocked mic. The owner's "no tests while prototyping" rule gives way to this ask.
@@ -109,7 +109,7 @@
 - Every scheduled event is logged (`LogEvent`) for the tests.
 
 **Tracks:**
-- One take per lane; recording into a lane replaces its take.
+- One take per lane. `record` fills the selected lane when it is empty; if it already has a take, a new lane of the same instrument is created and recorded (never destructive; `undo` removes it).
 - Several lanes of one instrument are allowed; `violin off` switches all of them.
 - `undo` restores a session snapshot, taken on commit / create / delete (not on on/off).
 - Persisted with idb-keyval.
