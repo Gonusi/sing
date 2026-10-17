@@ -30,6 +30,7 @@ const MAX_MEAN_ONSET_ERROR_SEC = 0.03;
 const MIN_DRUM_ACCURACY = 0.85;
 const MAX_DRUM_EXTRA_FRACTION = 0.1;
 const MIN_SPEED_X_REALTIME = 20;
+const NAME_COL = 26;
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
 // ---------- types ----------
@@ -239,7 +240,7 @@ function main(): number {
     const isDrumFixture = name.startsWith('beatbox') || (truth?.hits.length ?? 0) > 0;
     const isSilence = truth !== null && truth.notes.length === 0 && truth.hits.length === 0;
     const gated = truth?.gated !== false;
-    const label = (gated ? name : `${name}*`).padEnd(18);
+    const label = (gated ? name : `${name}*`).padEnd(NAME_COL);
     const doNotes = forceNotes || !isDrumFixture || isSilence;
     const doDrums = forceDrums || isDrumFixture || isSilence;
     console.log(`\n${name}  (${sampleRate} Hz, ${audioSec.toFixed(2)} s)${truth ? '  — ' + truth.description : ''}`);
@@ -326,7 +327,7 @@ function main(): number {
 
   if (noteRows.length) {
     console.log('\nNOTES');
-    console.log('fixture              gt  det  ok        %  onset mean/max  extra missed pitch  final p95/max  speed');
+    console.log('fixture'.padEnd(NAME_COL) + '   gt  det    ok       %  onset ms mean/max  extra missed pitch  final ms p95/max  speed');
     for (const r of noteRows) console.log(r);
     if (sung.gt > 0) {
       const acc = sung.correct / sung.gt;
@@ -346,7 +347,7 @@ function main(): number {
   }
   if (hitRows.length) {
     console.log('\nDRUMS');
-    console.log('fixture              gt  det  ok        %  onset mean/max  extra missed  kind  final max  speed  confusions');
+    console.log('fixture'.padEnd(NAME_COL) + '   gt  det    ok       %  onset ms mean/max  extra missed  kind  final ms max  speed  confusions');
     for (const r of hitRows) console.log(r);
     if (allHitDelays.length) console.log(`hit finalisation delay after onset: max ${ms(maxOf(allHitDelays))} ms`);
   }

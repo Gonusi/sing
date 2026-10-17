@@ -7,9 +7,10 @@
 //   3. pitch    — a value more than DEPART_SEMITONES from the running note median (same side, voiced frames in a
 //                 row) is a change candidate. It is confirmed after CONFIRM_FRAMES frames when its median is at least
 //                 CLEAR_DEPART_SEMITONES away, after CONFIRM_FRAMES_MARGINAL frames when it is closer (vibrato peaks
-//                 fall back before that), and only if it rounds to a different semitone than the note; the new note starts where the pitch crosses halfway between the two (the glide centre,
-//                 interpolated between frames). Shorter runs are folded back
-//                 into the note (an octave error is moved by ±12 first): this is the octave fold.
+//                 fall back before that), and only if it rounds to a different semitone than the note. The new note
+//                 starts where the pitch crosses halfway between the two (the glide centre, interpolated between
+//                 frames). Rejected runs are folded back into the note (an octave error is moved by ±12 first):
+//                 this is the octave fold.
 //   4. gaps     — UNVOICED_SPLIT_FRAMES unvoiced frames end a note (it becomes "held"); a single unvoiced frame is
 //                 bridged. A held note is merged with the next one when the gap < MERGE_GAP_SEC, both round to the
 //                 same semitone and no dip happened in between; otherwise it is finalised. A pitch change across
