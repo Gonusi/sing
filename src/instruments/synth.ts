@@ -7,7 +7,7 @@
 import { Synth } from 'tone';
 import type { Sec, Voice } from '../types.ts';
 import { createGate, createOutput, isNote, midiToHz, noteSpan, velGain, type Ctx } from './shared.ts';
-import { ensureToneContext, silenceEnvelope } from './tone-util.ts';
+import { silenceEnvelope, toneContext } from './tone-util.ts';
 
 /** most notes sounding at once; a further note steals the voice that frees up first */
 const POOL_MAX = 8;
@@ -27,7 +27,7 @@ interface PoolVoice {
 }
 
 export function createSynthVoice(ctx: Ctx): Voice {
-  ensureToneContext(ctx);
+  const tone = toneContext(ctx);
   const output = createOutput(ctx, OUTPUT_LEVEL);
   const gate = createGate(ctx);
   gate.node.connect(output);
@@ -37,7 +37,7 @@ export function createSynthVoice(ctx: Ctx): Voice {
     const idle = pool.find((v) => v.busyUntil <= t);
     if (idle) return idle;
     if (pool.length < POOL_MAX) {
-      const synth = new Synth({ oscillator: { type: 'custom', partials: PARTIALS }, envelope: ENVELOPE });
+      const synth = new Synth({ context: tone, oscillator: { type: 'custom', partials: PARTIALS }, envelope: ENVELOPE });
       synth.connect(gate.node);
       const v = { synth, busyUntil: -Infinity, lastStart: -Infinity };
       pool.push(v);

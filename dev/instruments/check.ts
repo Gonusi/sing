@@ -27,6 +27,7 @@ try {
       await page.goto(`${served.url}dev/instruments/index.html`);
       await page.waitForFunction(() => typeof window.runInstrumentChecks === 'function');
       const run: CheckRun = await page.evaluate(() => window.runInstrumentChecks());
+      run.results.push(...(await page.evaluate(() => window.runRealtimeSmoke())));
       const outDir = path.join(here, 'out', engine);
       await mkdir(outDir, { recursive: true });
       await Promise.all(

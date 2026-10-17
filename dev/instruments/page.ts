@@ -1,7 +1,9 @@
 // [instruments] Dev check page: every instrument rendered offline (render.ts) and measured (analysis.ts).
 // window.runInstrumentChecks() → { results, wavs } is called by dev/instruments/check.ts in Chromium and WebKit;
 // the "Run checks" button does the same by hand and adds play buttons for listening.
+import { setContext } from 'tone';
 import { playBlip } from '../../src/instruments/blip.ts';
+import { createVoice, preloadInstruments } from '../../src/instruments/index.ts';
 import { loadViolinAssets } from '../../src/instruments/violin-assets.ts';
 import type { DrumHit, DrumKind, InstrumentKind, Note, Sec, Voice } from '../../src/types.ts';
 import * as A from './analysis.ts';
@@ -23,6 +25,7 @@ export interface CheckRun {
 declare global {
   interface Window {
     runInstrumentChecks(): Promise<CheckRun>;
+    runRealtimeSmoke(): Promise<CheckResult[]>;
   }
 }
 
@@ -476,6 +479,73 @@ async function runAll(): Promise<CheckRun> {
 }
 
 window.runInstrumentChecks = runAll;
+window.runRealtimeSmoke = realtimeSmoke;
+
+// ---------- real-time smoke: a live AudioContext, as the engine runs it ----------
+
+/**
+ * Every voice on a live AudioContext with Tone.setContext(ctx) (as the engine does): notes handed over 0.12 s ahead
+ * by setTimeout, a legato continuation, captured through a ScriptProcessor tap. Checks it sounds, at the right pitch,
+ * and nothing throws. Runs in real time (~1.5 s per voice).
+ */
+async function realtimeSmoke(): Promise<CheckResult[]> {
+  const out: CheckResult[] = [];
+  const ctx = new AudioContext({ latencyHint: 'interactive' });
+  await ctx.resume();
+  setContext(ctx);
+  await preloadInstruments(ctx);
+  const sleep = (s: Sec) => new Promise((r) => setTimeout(r, s * 1000));
+  for (const kind of ['violin', 'synth', 'bass', 'drums'] as const) {
+    const errors: string[] = [];
+    const chunks: Float32Array[] = [];
+    const tap = ctx.createScriptProcessor(2048, 1, 1);
+    tap.onaudioprocess = (e) => chunks.push(e.inputBuffer.getChannelData(0).slice());
+    const mute = ctx.createGain();
+    mute.gain.value = 0;
+    tap.connect(mute).connect(ctx.destination);
+    let voice: Voice | null = null;
+    try {
+      voice = createVoice(kind, ctx);
+      voice.output.connect(tap);
+      const t0 = ctx.currentTime + 0.15;
+      const phrase = `rt:${kind}`;
+      const first: Note | DrumHit = kind === 'drums' ? hit('kick') : note(kind === 'bass' ? 40 : 64, 0.5, { phrase, legatoNext: true });
+      const second: Note | DrumHit = kind === 'drums' ? hit('snare') : note(kind === 'bass' ? 43 : 67, 0.5, { phrase });
+      voice.play(first, t0);
+      await sleep(t0 + 0.5 - 0.12 - ctx.currentTime);
+      voice.play(second, t0 + 0.5);
+      await sleep(1.2);
+    } catch (e) {
+      errors.push(String(e));
+    }
+    tap.disconnect();
+    voice?.dispose();
+    const pcm = new Float32Array(chunks.reduce((n, c) => n + c.length, 0));
+    chunks.reduce((o, c) => (pcm.set(c, o), o + c.length), 0);
+    const level = A.db(A.peak(pcm));
+    let pitch = '';
+    let pass = errors.length === 0 && level > -40;
+    if (kind !== 'drums') {
+      // the capture's start is not aligned to t0: look for the second note's pitch anywhere in the capture
+      const m = kind === 'bass' ? 43 : 67;
+      const sr = ctx.sampleRate;
+      let best = Infinity;
+      for (let t = 0; t + 0.3 < pcm.length / sr; t += 0.1) {
+        const hz = A.fundamental(pcm, sr, t, t + 0.3, hzOf(m));
+        if (hz) best = Math.min(best, Math.abs(A.cents(hz, m)));
+      }
+      pass &&= best <= PITCH_TOL;
+      pitch = ` · best second-note pitch error ${fmt(best, 0)} cents`;
+    }
+    out.push({
+      name: `${kind}: real-time AudioContext smoke`,
+      pass,
+      detail: `peak ${fmt(level)} dBFS${pitch} · rate ${ctx.sampleRate} Hz${errors.length ? ` · ERRORS ${errors.join('; ')}` : ''}`,
+    });
+  }
+  await ctx.close();
+  return out;
+}
 
 // ---------- manual use: run, read, listen ----------
 

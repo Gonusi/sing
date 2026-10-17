@@ -10,7 +10,7 @@
 import { Filter, MembraneSynth, MetalSynth, NoiseSynth, Synth } from 'tone';
 import type { DrumKind, Sec, Voice } from '../types.ts';
 import { createGate, createOutput, earliestStart, isNote, velGain, type Ctx } from './shared.ts';
-import { ensureToneContext, silenceEnvelope } from './tone-util.ts';
+import { silenceEnvelope, toneContext } from './tone-util.ts';
 
 /** two hits of one kind closer than this are one hit */
 const MIN_SPACING: Sec = 0.01;
@@ -55,18 +55,18 @@ const HAT_GAIN = 0.12;
 const OUTPUT_LEVEL = 0.65;
 
 export function createDrumVoice(ctx: Ctx): Voice {
-  ensureToneContext(ctx);
+  const tone = toneContext(ctx);
   const output = createOutput(ctx, OUTPUT_LEVEL);
   const gate = createGate(ctx);
   gate.node.connect(output);
 
-  const kick = new MembraneSynth(KICK).connect(gate.node);
-  const snareHighpass = new Filter(SNARE_HIGHPASS_HZ, 'highpass');
-  const snareLowpass = new Filter(SNARE_LOWPASS_HZ, 'lowpass');
-  const snareNoise = new NoiseSynth(SNARE_NOISE).chain(snareHighpass, snareLowpass);
+  const kick = new MembraneSynth({ ...KICK, context: tone }).connect(gate.node);
+  const snareHighpass = new Filter({ frequency: SNARE_HIGHPASS_HZ, type: 'highpass', context: tone });
+  const snareLowpass = new Filter({ frequency: SNARE_LOWPASS_HZ, type: 'lowpass', context: tone });
+  const snareNoise = new NoiseSynth({ ...SNARE_NOISE, context: tone }).chain(snareHighpass, snareLowpass);
   snareLowpass.connect(gate.node);
-  const snareBody = new Synth(SNARE_BODY).connect(gate.node);
-  const hat = new MetalSynth(HAT).connect(gate.node);
+  const snareBody = new Synth({ ...SNARE_BODY, context: tone }).connect(gate.node);
+  const hat = new MetalSynth({ ...HAT, context: tone }).connect(gate.node);
   const lastHit: Record<DrumKind, Sec> = { kick: -Infinity, snare: -Infinity, hat: -Infinity };
 
   function trigger(kind: DrumKind, t: Sec, v: number): void {

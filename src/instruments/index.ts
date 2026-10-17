@@ -1,5 +1,6 @@
 // [instruments] Public entry: preloadInstruments (violin samples + room impulse, cached per sample rate) and the
-// createVoice factory. Tone is only touched inside functions (after Tone.setContext in audio/context.ts).
+// createVoice factory. Tone is only touched inside functions, after the engine's Tone.setContext(ctx)
+// (audio/context.ts); no Tone globals are used and Tone's context is never set here (tone-util.ts).
 //
 // Files: shared.ts (helpers, stopAll gate) · phrase.ts (legato phrase lifecycle, used by violin + bass)
 //        violin.ts + violin-assets.ts · bass.ts · synth.ts + drums.ts (Tone, helpers in tone-util.ts) · blip.ts
