@@ -12,6 +12,7 @@ import { createController, type EngineController } from '../../src/app/controlle
 import { createScheduler, type SchedEvent } from '../../src/loop/clock.ts';
 import { preloadInstruments } from '../../src/instruments/index.ts';
 import { fakeAnalysis } from './fake-analysis.ts';
+import { createVocalVoice } from '../../src/audio/vocal-voice.ts';
 
 export interface Eng {
   booted: boolean;
@@ -57,6 +58,11 @@ export interface Eng {
   captureNode(node: AudioNode, sec: Sec): Promise<{ frame: number; pcm: Float32Array }>;
   /** click through a strip-like node (master + fxSend) with echo `amount`; limiter output around it */
   echoProbe(amount: number): Promise<{ clickFrame: number; frame: number; pcm: number[]; sampleRate: number }>;
+  /**
+   * late vocal starts like the scheduler's catch-up: read now, work `busyMs`, play(ev, at = now, offset 0.05);
+   * returns per start the frame error of the rendered content vs. the promised (when, offset) mapping
+   */
+  lateVocalStarts(n: number, busyMs: number): Promise<number[]>;
   /** stored vocal audio keys in IndexedDB */
   audioKeys(): Promise<string[]>;
   /** onChange calls since boot */
@@ -181,6 +187,36 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
       const src = fixtures.get(name);
       if (!src) throw new Error(`fixture ${name} not loaded`);
       mic.inject(sliceBuffer(ctx, src, from, to), at);
+    },
+    async lateVocalStarts(n: number, busyMs: number) {
+      const sr = ctx.sampleRate;
+      const N = 4096;
+      const buf = ctx.createBuffer(1, sr, sr); // 1 s, sample i encodes i mod N
+      const x = buf.getChannelData(0);
+      for (let i = 0; i < x.length; i++) x[i] = ((i % N) + 0.5) / N - 0.5;
+      const errs: number[] = [];
+      for (let k = 0; k < n; k++) {
+        const voice = createVocalVoice(ctx, () => buf);
+        const cap = createCapture(engine);
+        cap.start(voice.output);
+        await eng.sleep(0.05);
+        const now = ctx.currentTime;
+        const t = performance.now();
+        while (performance.now() - t < busyMs) { /* a tick's work */ }
+        // the scheduler's catch-up convention: at = its `now`, offset = how late (the event's when was now − 0.05)
+        const when = now - 0.05;
+        voice.play({ pos: 0, dur: 1, midi: 0, vel: 1, phrase: 'p', legatoNext: false }, now, 0.05);
+        await eng.sleep(0.25);
+        const r = await cap.stop();
+        voice.dispose();
+        // 80 ms after the asked start (past the fade-in), the content index should be (F/sr − when)·sr
+        const F = Math.round((now + 0.08) * sr);
+        const i = F - r.frame;
+        const got = Math.round((r.pcm[i] + 0.5) * N - 0.5);
+        const want = ((Math.round((F / sr - when) * sr) % N) + N) % N;
+        errs.push(((got - want + N / 2) % N + N) % N - N / 2);
+      }
+      return errs;
     },
     audioKeys: async () => (await keys()).filter((k): k is string => typeof k === 'string' && k.startsWith('sing.audio.')),
     noise(seed: number, n: number, amp = 0.3) {

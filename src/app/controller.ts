@@ -410,7 +410,11 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
   const startPlayback = (): Sec | null => {
     const L = store.current.loopLength;
     if (L === null) return null;
-    const origin = ctx.currentTime + engine.outLat() + START_LEAD_SEC;
+    // one read of the clock for the logged numbers: currentTime can advance by a quantum within a task
+    const now = ctx.currentTime;
+    const outLat = engine.outLat();
+    const origin = now + outLat + START_LEAD_SEC;
+    log('play', { now, outLat, origin });
     activeFrom.clear();
     pushTracks();
     scheduler.start(origin, L, origin);
