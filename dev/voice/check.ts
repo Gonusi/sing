@@ -112,12 +112,20 @@ async function loadModel(page: Page): Promise<LoadReport> {
   return page.evaluate(() => (window as unknown as W).__voice.load());
 }
 
-/** RSS (MB) of every process of the browser started with this profile dir (browser + renderers + GPU …) */
-function browserRssMb(profileDir: string): number | null {
+/**
+ * RSS (MB) of the browser's processes. Chromium: every process started with this profile dir and its descendants
+ * (browser + renderers + GPU …). WebKit: its XPC services are children of launchd, so: the WebContent processes of
+ * Playwright's WebKit build (the page + its workers live there; assumes one WebKit run at a time).
+ */
+function browserRssMb(profileDir: string, engine: Engine = 'chromium'): number | null {
   try {
     const rows = execFileSync('ps', ['-A', '-o', 'pid=,ppid=,rss=,command='], { encoding: 'utf8', maxBuffer: 64 << 20 })
       .split('\n').map((l) => /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter((m) => !!m)
       .map((m) => ({ pid: +m[1], ppid: +m[2], rss: +m[3], cmd: m[4] }));
+    if (engine === 'webkit') {
+      const wc = rows.filter((r) => r.cmd.includes('ms-playwright/webkit') && r.cmd.includes('WebKit.WebContent'));
+      return wc.length ? Math.round(wc.reduce((sum, r) => sum + r.rss, 0) / 1024) : null;
+    }
     const roots = rows.filter((r) => r.cmd.includes(profileDir) && !rows.some((p) => p.pid === r.ppid && p.cmd.includes(profileDir)));
     const tree = new Set(roots.map((r) => r.pid));
     for (let grew = true; grew; ) {
@@ -355,11 +363,11 @@ async function main(): Promise<void> {
       const loads: (LoadReport & { downloaded: boolean; rssBeforeMb: number | null; rssAfterMb: number | null })[] = [];
       for (let i = 0; i < args.pages; i++) {
         const p = await bootPage(ctx, pageUrl, errors);
-        const rssBeforeMb = browserRssMb(profileDir);
+        const rssBeforeMb = browserRssMb(profileDir, args.engine);
         const l = await loadModel(p);
         if (l.status !== 'ready') throw new Error(`model did not load: ${l.error ?? l.status}\n${errors.join('\n')}`);
         // a download reports byte progress; a cached load goes 0 → 1
-        loads.push({ ...l, downloaded: l.progress.length > 2, rssBeforeMb, rssAfterMb: browserRssMb(profileDir) });
+        loads.push({ ...l, downloaded: l.progress.length > 2, rssBeforeMb, rssAfterMb: browserRssMb(profileDir, args.engine) });
         pages.push(p);
       }
       for (const l of loads) {
@@ -371,7 +379,7 @@ async function main(): Promise<void> {
       const nPages = pages.length;
       const t0 = Date.now();
       const rows = await runFixtures(pages, fixtures, served.url, args.release);
-      const rssAfter = browserRssMb(profileDir);
+      const rssAfter = browserRssMb(profileDir, args.engine);
       const heap = await pages[0].evaluate(() => (window as unknown as W).__voice.jsHeap());
       console.log(`  ran ${rows.length} fixtures in ${((Date.now() - t0) / 1000).toFixed(1)} s · RSS after ${rssAfter} MB · main-thread JS heap ${heap === null ? '—' : `${(heap / 1048576).toFixed(1)} MB`}`);
       const s = summarise(rows);
