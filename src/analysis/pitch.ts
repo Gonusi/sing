@@ -8,7 +8,10 @@
 //   rms     = RMS of the central FRAME_RMS_SEC of the window (finer in time than the 43 ms window;
 //             the segmenter uses it for energy onsets and repeated-note dips)
 // A block whose `frame` does not continue the previous block restarts the window grid at that block.
-import { PitchDetector } from 'pitchy';
+// Lag-limited fallback: pitchy searches every lag of the window, and during a fast glide the NSDF at a very long lag
+// (few overlapping samples) can beat the real period, giving e.g. 26 Hz at clarity 0.96. When pitchy's answer is out
+// of range, the McLeod peak picking is redone over lags PITCH_MIN_HZ..PITCH_MAX_HZ only (pitchy's Autocorrelator).
+import { Autocorrelator, PitchDetector } from 'pitchy';
 import type { MicBlock, PitchFrame, PitchTracker } from '../types.ts';
 
 // ---------- constants ----------
@@ -22,6 +25,8 @@ export const PITCH_MIN_HZ = 70;
 export const PITCH_MAX_HZ = 1100;
 /** span around the window centre that PitchFrame.rms measures */
 export const FRAME_RMS_SEC = 0.02;
+/** McLeod "k": first NSDF key maximum >= k · the highest one (pitchy's default clarityThreshold) */
+export const MPM_PEAK_RATIO = 0.9;
 /** ring capacity in samples (power of two, > window + largest chunk written at once) */
 const RING_SAMPLES = 8192;
 const MAX_CHUNK_SAMPLES = RING_SAMPLES - PITCH_WINDOW_SAMPLES;
@@ -34,6 +39,7 @@ export function pitchHopSamples(sampleRate: number): number {
 export function createPitchTracker(): PitchTracker {
   const detector = PitchDetector.forFloat32Array(PITCH_WINDOW_SAMPLES);
   detector.minVolumeAbsolute = PITCH_MIN_RMS;
+  const fallback = createLagLimitedMpm(PITCH_WINDOW_SAMPLES);
   const ring = new Float32Array(RING_SAMPLES);
   const win = new Float32Array(PITCH_WINDOW_SAMPLES);
 
@@ -63,7 +69,7 @@ export function createPitchTracker(): PitchTracker {
     written += to - from;
     while (written - nextWindowOffset >= PITCH_WINDOW_SAMPLES) {
       for (let i = 0; i < PITCH_WINDOW_SAMPLES; i++) win[i] = ring[(nextWindowOffset + i) & (RING_SAMPLES - 1)];
-      out.push(analyseWindow(win, streamStartFrame + nextWindowOffset, sampleRate, rmsHalfSpan, detector));
+      out.push(analyseWindow(win, streamStartFrame + nextWindowOffset, sampleRate, rmsHalfSpan, detector, fallback));
       nextWindowOffset += hop;
     }
   }
@@ -89,13 +95,85 @@ export function analyseWindow(
   sampleRate: number,
   rmsHalfSpan: number,
   detector: PitchDetector<Float32Array>,
+  fallback: LagLimitedMpm,
 ): PitchFrame {
   const centre = win.length >> 1;
   const t = (startFrame + centre) / sampleRate;
   const rms = rmsOfRange(win, centre - rmsHalfSpan, centre + rmsHalfSpan);
-  const [hz, clarity] = detector.findPitch(win, sampleRate);
+  let [hz, clarity] = detector.findPitch(win, sampleRate);
+  if (clarity > 0 && !(hz >= PITCH_MIN_HZ && hz <= PITCH_MAX_HZ)) [hz, clarity] = fallback.findPitch(win, sampleRate);
   const voiced = Number.isFinite(hz) && clarity >= PITCH_MIN_CLARITY && hz >= PITCH_MIN_HZ && hz <= PITCH_MAX_HZ;
   return { t, hz: voiced ? hz : null, clarity: Number.isFinite(clarity) ? clarity : 0, rms };
+}
+
+export interface LagLimitedMpm {
+  /** McLeod pitch over lags for PITCH_MIN_HZ..PITCH_MAX_HZ only; [0, 0] when none */
+  findPitch(input: Float32Array, sampleRate: number): [number, number];
+}
+
+/** McLeod peak picking restricted to the singing range, on pitchy's FFT autocorrelation. */
+export function createLagLimitedMpm(inputLength: number): LagLimitedMpm {
+  const ac = Autocorrelator.forFloat32Array(inputLength);
+  const nsdf = new Float32Array(inputLength);
+  return {
+    findPitch(input, sampleRate) {
+      const n = input.length;
+      const minLag = Math.max(2, Math.floor(sampleRate / PITCH_MAX_HZ));
+      const maxLag = Math.min(n - 2, Math.ceil(sampleRate / PITCH_MIN_HZ));
+      ac.autocorrelate(input, nsdf);
+      // NSDF n(τ) = 2 r(τ) / m(τ), m(τ) = Σ x_j² + x_{j+τ}² (incremental, as in the MPM paper)
+      let m = 2 * nsdf[0];
+      for (let i = 0; i <= maxLag + 1; i++) {
+        nsdf[i] = m > 0 ? (2 * nsdf[i]) / m : 0;
+        m -= input[i] * input[i] + input[n - 1 - i] * input[n - 1 - i];
+      }
+      // key maxima: the highest point between a positive and the next negative zero crossing
+      let best = -1;
+      let nMax = 0;
+      let looking = false;
+      let peak = -Infinity;
+      let peakIdx = -1;
+      const keys: number[] = keyScratch;
+      keys.length = 0;
+      for (let i = 1; i <= maxLag + 1; i++) {
+        if (nsdf[i - 1] <= 0 && nsdf[i] > 0) {
+          looking = true;
+          peak = nsdf[i];
+          peakIdx = i;
+        } else if (nsdf[i - 1] > 0 && nsdf[i] <= 0) {
+          looking = false;
+          if (peakIdx >= minLag && peakIdx <= maxLag) keys.push(peakIdx);
+          peakIdx = -1;
+        } else if (looking && nsdf[i] > peak) {
+          peak = nsdf[i];
+          peakIdx = i;
+        }
+      }
+      if (looking && peakIdx >= minLag && peakIdx < maxLag) keys.push(peakIdx);
+      for (const k of keys) nMax = Math.max(nMax, nsdf[k]);
+      for (const k of keys) {
+        if (nsdf[k] >= MPM_PEAK_RATIO * nMax) {
+          best = k;
+          break;
+        }
+      }
+      if (best < 1) return [0, 0];
+      const [lag, clarity] = parabolicPeak(nsdf, best);
+      return [sampleRate / lag, Math.min(1, clarity)];
+    },
+  };
+}
+const keyScratch: number[] = [];
+
+/** vertex of the parabola through (i-1, i, i+1) */
+export function parabolicPeak(y: ArrayLike<number>, i: number): [number, number] {
+  const y0 = y[i - 1];
+  const y1 = y[i];
+  const y2 = y[i + 1];
+  const a = y0 / 2 - y1 + y2 / 2;
+  if (a === 0) return [i, y1];
+  const shift = (y0 - y2) / (4 * a);
+  return [i + shift, y1 - (y0 - y2) * shift / 4];
 }
 
 export function rmsOfRange(x: Float32Array, from: number, to: number): number {

@@ -6,11 +6,14 @@
 //                 minimum = a repeated note: split at the dip minimum, and never merge across it
 //   3. pitch    — a value more than DEPART_SEMITONES from the running note median (same side, CONFIRM_FRAMES voiced
 //                 frames in a row) is a change candidate; confirmed only if it rounds to a different semitone than the
-//                 note, then the new note is dated back to the first departed frame. Shorter runs are folded back
+//                 note; the new note starts where the pitch crosses halfway between the two (the glide centre,
+//                 interpolated between frames). Shorter runs are folded back
 //                 into the note (an octave error is moved by ±12 first): this is the octave fold.
 //   4. gaps     — UNVOICED_SPLIT_FRAMES unvoiced frames end a note (it becomes "held"); a single unvoiced frame is
 //                 bridged. A held note is merged with the next one when the gap < MERGE_GAP_SEC, both round to the
-//                 same semitone and no dip happened in between; otherwise it is finalised.
+//                 same semitone and no dip happened in between; otherwise it is finalised. A pitch change across
+//                 a gap < LEGATO_DROPOUT_MAX_SEC without a dip is a legato dropout (pitchy loses the pitch in a fast
+//                 glide): the new note starts in the middle of the gap.
 //   5. length   — notes shorter than MIN_NOTE_SEC are dropped; a short note that runs straight into the next one
 //                 (pitch or dip boundary) is absorbed into it instead (its onset moves back), e.g. a scoop.
 //   6. onset    — after a gap the onset is refined from frame RMS: where it crosses floor + ONSET_RMS_FRACTION of the
@@ -32,15 +35,19 @@ export const OCTAVE_FOLD_TOLERANCE_SEMITONES = 1.0;
 export const UNVOICED_SPLIT_FRAMES = 2;
 export const MIN_NOTE_SEC = 0.08;
 export const MERGE_GAP_SEC = 0.05;
+/** a pitch change across an unvoiced gap shorter than this with no energy dip is legato (a pitch-tracking dropout) */
+export const LEGATO_DROPOUT_MAX_SEC = 0.12;
 /** voiced frames a note needs after a short gap before it is compared with the held note */
 export const MERGE_DECIDE_FRAMES = 3;
 export const DIP_DROP_DB = 6;
-export const DIP_RECOVER_DB = 6;
+export const DIP_RECOVER_DB = 4;
 /** a dip that has not recovered within this long is a level change, not an articulation */
 export const DIP_MAX_SEC = 0.3;
 export const ONSET_LOOKBACK_FRAMES = 5;
 export const ONSET_LOOKAHEAD_FRAMES = 4;
 export const ONSET_RMS_FRACTION = 0.15;
+/** the energy refinement only runs when the note level is this far above the floor before it (a real attack) */
+export const ONSET_MIN_RISE_DB = 6;
 export const VEL_FLOOR_DBFS = -50;
 export const VEL_CEIL_DBFS = -10;
 /** a jump in frame time larger than this is a stream discontinuity: everything open is closed */
@@ -48,6 +55,7 @@ export const MAX_FRAME_GAP_SEC = 0.05;
 
 const DIP_DROP_RATIO = 10 ** (-DIP_DROP_DB / 20);
 const DIP_RECOVER_RATIO = 10 ** (DIP_RECOVER_DB / 20);
+const ONSET_MIN_RISE_RATIO = 10 ** (ONSET_MIN_RISE_DB / 20);
 /** raw frames kept for smoothing and onset refinement (power of two) */
 const RAW_RING = 64;
 
@@ -233,6 +241,10 @@ export function createSegmenter(): NoteSegmenter {
   let dipMinT = 0;
   let dipStartT = 0;
   let dipSinceHeld = false;
+  // the last note that ended in a gap (for legato dropouts)
+  let lastEnd = -Infinity;
+  let lastMidi = NaN;
+  let pendingDropout = false;
 
   let out: RawNote[] = [];
 
@@ -252,6 +264,9 @@ export function createSegmenter(): NoteSegmenter {
     dipActive = false;
     dipOpen = false;
     dipSinceHeld = false;
+    lastEnd = -Infinity;
+    lastMidi = NaN;
+    pendingDropout = false;
   }
 
   function smoothedMidi(i: number): number {
@@ -300,7 +315,7 @@ export function createSegmenter(): NoteSegmenter {
     }
     let floor = Infinity;
     for (let j = lo; j <= k0; j++) floor = Math.min(floor, rawRms[slot(j)]);
-    if (!(ref > floor)) return;
+    if (!(ref > floor * ONSET_MIN_RISE_RATIO)) return; // no attack (e.g. a legato dropout): keep the frame onset
     const thr = floor + ONSET_RMS_FRACTION * (ref - floor);
     let j = refIdx;
     while (j > lo && rawRms[slot(j - 1)] >= thr) j--;
@@ -329,20 +344,39 @@ export function createSegmenter(): NoteSegmenter {
       noteMoveTail(cur, 0, merged);
       held = null;
       cur = merged;
-    } else {
-      finaliseHeld();
+      return;
     }
+    if (!dipSinceHeld) {
+      // a pitch change across a short voicing dropout with no energy dip is legato: meet in the middle of the gap
+      const mid = 0.5 * (heldEnd + cur.onset);
+      heldEnd = mid;
+      cur.onset = mid;
+      cur.refineIdx = -1;
+    }
+    finaliseHeld();
+  }
+
+  /** a note that began after a gap (with no held note) and no dip: if its pitch differs, start it mid-gap */
+  function decideDropout(): void {
+    pendingDropout = false;
+    if (!cur || dipSinceHeld || Number.isNaN(lastMidi) || cur.sorted.length === 0) return;
+    if (Math.round(noteMedian(cur)) === Math.round(lastMidi)) return;
+    cur.onset = 0.5 * (lastEnd + cur.t.data[0] - hopSec / 2);
+    cur.refineIdx = -1;
   }
 
   function closeCurToHeld(): void {
     if (!cur) return;
     resolveCandidate();
     if (pendingMerge) decideMerge();
+    if (pendingDropout) decideDropout();
     if (!cur) return;
     refineOnset(cur);
     finaliseHeld();
     held = cur;
     heldEnd = noteEnd(cur);
+    lastEnd = heldEnd;
+    lastMidi = noteMedian(cur);
     cur = null;
     dipSinceHeld = false;
   }
@@ -371,6 +405,7 @@ export function createSegmenter(): NoteSegmenter {
   /** end `cur` before index `from`; the tail becomes the new current note starting at `onset` */
   function splitCur(from: number, onset: Sec, start: NoteStart): void {
     if (!cur) return;
+    if (pendingDropout) decideDropout();
     const old = cur;
     const next = newNote(onset, start);
     noteMoveTail(old, from, next);
@@ -394,6 +429,7 @@ export function createSegmenter(): NoteSegmenter {
       if (cur.sorted.length >= MERGE_DECIDE_FRAMES) decideMerge();
       return;
     }
+    if (pendingDropout && cur.sorted.length >= MERGE_DECIDE_FRAMES) decideDropout();
     const ref = noteMedian(cur);
     const d = v - ref;
     if (Number.isNaN(ref) || Math.abs(d) <= DEPART_SEMITONES) {
@@ -413,7 +449,8 @@ export function createSegmenter(): NoteSegmenter {
     if (candCount < CONFIRM_FRAMES) return;
     const candMid = candidateMedian(cur);
     if (Math.round(candMid) !== Math.round(ref)) {
-      splitCur(candStart, cur.t.data[candStart] - hopSec / 2, 'pitch');
+      const [idx, onset] = glideCrossing(cur, Math.max(1, candStart - CONFIRM_FRAMES), 0.5 * (ref + candMid), sign);
+      splitCur(idx, onset, 'pitch');
     } else {
       // same semitone (vibrato, drift): keep the note and take the values into its median
       for (let i = candStart; i < cur.t.length; i++) {
@@ -423,6 +460,23 @@ export function createSegmenter(): NoteSegmenter {
       candStart = -1;
       candCount = 0;
     }
+  }
+
+  /** first frame (from `from`) past `boundary` in direction `sign`, and the interpolated crossing time */
+  function glideCrossing(n: NoteAcc, from: number, boundary: number, sign: number): [number, Sec] {
+    let prev = -1;
+    for (let i = from; i < n.t.length; i++) {
+      const v = n.midi.data[i];
+      if (Number.isNaN(v)) continue;
+      if ((v - boundary) * sign >= 0) {
+        if (prev < 0) return [i, n.t.data[i] - hopSec / 2];
+        const v0 = n.midi.data[prev];
+        const t0 = n.t.data[prev];
+        return [i, t0 + ((boundary - v0) / (v - v0)) * (n.t.data[i] - t0)];
+      }
+      prev = i;
+    }
+    return [candStart, n.t.data[candStart] - hopSec / 2];
   }
 
   // ----- dips (repeated notes) -----
@@ -457,6 +511,7 @@ export function createSegmenter(): NoteSegmenter {
 
   function onDip(minT: Sec): void {
     dipSinceHeld = true;
+    pendingDropout = false;
     if (pendingMerge) decideMerge();
     if (!cur || minT <= cur.t.data[0]) return;
     let idx = -1;
@@ -478,7 +533,7 @@ export function createSegmenter(): NoteSegmenter {
     const rms = rawRms[s];
     const v = smoothedMidi(i);
 
-    if (!cur && !held) {
+    if (!cur && !held && !(t - lastEnd < LEGATO_DROPOUT_MAX_SEC)) {
       dipActive = false;
       dipOpen = false;
     }
@@ -494,6 +549,8 @@ export function createSegmenter(): NoteSegmenter {
         cur.refineFloorIdx = lastVoicedIdx;
         if (held) {
           pendingMerge = true;
+        } else if (!dipSinceHeld && cur.onset - lastEnd < LEGATO_DROPOUT_MAX_SEC) {
+          pendingDropout = true;
         } else {
           dipActive = true;
           dipOpen = false;
@@ -553,6 +610,7 @@ export function createSegmenter(): NoteSegmenter {
     if (cur) {
       resolveCandidate();
       if (pendingMerge) decideMerge();
+      if (pendingDropout) decideDropout();
     }
     finishAt(held, at, heldEnd);
     held = null;
