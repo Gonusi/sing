@@ -9,7 +9,7 @@
 //        hat ───────────────────────────────┘
 import { Filter, MembraneSynth, MetalSynth, NoiseSynth, Synth } from 'tone';
 import type { DrumKind, Sec, Voice } from '../types.ts';
-import { createGate, createOutput, isNote, velGain, type Ctx } from './shared.ts';
+import { createGate, createOutput, earliestStart, isNote, velGain, type Ctx } from './shared.ts';
 import { ensureToneContext, silenceEnvelope } from './tone-util.ts';
 
 /** two hits of one kind closer than this are one hit */
@@ -51,8 +51,8 @@ const HAT = {
 const HAT_DUR: Sec = 0.03;
 const HAT_GAIN = 0.12;
 
-/** fixed output trim */
-const OUTPUT_LEVEL = 0.8;
+/** fixed output trim: a vel-0.8 kick peaks at about −6 dBFS */
+const OUTPUT_LEVEL = 0.65;
 
 export function createDrumVoice(ctx: Ctx): Voice {
   ensureToneContext(ctx);
@@ -89,7 +89,7 @@ export function createDrumVoice(ctx: Ctx): Voice {
     output,
     play(ev, when) {
       if (isNote(ev)) return;
-      const t = Math.max(when, ctx.currentTime);
+      const t = earliestStart(ctx, when);
       if (t < lastHit[ev.kind] + MIN_SPACING) return;
       lastHit[ev.kind] = t;
       gate.open(t);

@@ -52,9 +52,9 @@ export function createSynthVoice(ctx: Ctx): Voice {
     output,
     play(ev, when, offset) {
       if (!isNote(ev)) return;
-      const span = noteSpan(ev, when, offset);
-      const t = Math.max(span.start, ctx.currentTime);
-      const dur = Math.max(0.01, span.end - t);
+      const span = noteSpan(ctx, ev, when, offset);
+      const t = span.start;
+      const dur = span.end - t;
       const v = freeVoice(t);
       if (!v) return;
       gate.open(t);

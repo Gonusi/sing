@@ -341,6 +341,24 @@ async function checkCatchUp(kind: InstrumentKind, midi: number): Promise<void> {
   );
 }
 
+// ---------- a note handed over after its time starts without a click ----------
+
+async function checkLateStart(kind: InstrumentKind): Promise<void> {
+  const WHEN = 0.3;
+  const r = await renderVoice(kind, 1.2, [{ ev: note(64, 0.5), when: WHEN, arrive: WHEN + 0.005 }]);
+  const p = A.peak(r.pcm);
+  let first = 0;
+  while (first < r.pcm.length && Math.abs(r.pcm[first]) < 1e-4) first++;
+  // largest level in the first 0.5 ms of sound, relative to the note's peak: an attack begun in the past jumps
+  const head = A.peak(r.pcm.subarray(first, first + Math.round(0.0005 * SR)));
+  const startMs = ((first / SR - WHEN) * 1000);
+  record(
+    `${kind}: a note handed over 5 ms late starts cleanly`,
+    head / p < 0.15 && r.errors.length === 0,
+    `starts ${fmt(startMs, 1)} ms after its time · first 0.5 ms at ${fmt(A.db(head / p))} dB re peak${errorsOf(r)}`,
+  );
+}
+
 // ---------- (f) a phrase wrapping across the loop end; an orphaned open phrase still ends ----------
 
 async function checkWrap(kind: InstrumentKind, a: number, b: number): Promise<void> {
@@ -440,6 +458,8 @@ async function runAll(): Promise<CheckRun> {
     ['catch-up violin', () => checkCatchUp('violin', 64)],
     ['catch-up synth', () => checkCatchUp('synth', 64)],
     ['catch-up bass', () => checkCatchUp('bass', 40)],
+    // drums are exempt: a kick is meant to reach its peak within a millisecond
+    ...(['violin', 'synth', 'bass'] as const).map((k): [string, () => Promise<void>] => [`late ${k}`, () => checkLateStart(k)]),
     ['wrap violin', () => checkWrap('violin', 72, 76)],
     ['wrap bass', () => checkWrap('bass', 43, 48)],
     ...(['violin', 'synth', 'bass', 'drums'] as const).map((k): [string, () => Promise<void>] => [`stopAll ${k}`, () => checkStopAll(k)]),

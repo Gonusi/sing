@@ -132,7 +132,7 @@ export function createPhraseVoice(o: PhraseVoiceOptions): PhraseVoice {
     play(note, when, offset = 0) {
       const now = ctx.currentTime;
       reap(now);
-      const span = noteSpan(note, when, offset);
+      const span = noteSpan(ctx, note, when, offset);
       let p: Phrase;
       if (open && open.id === note.phrase && canContinue(open, now)) {
         p = open;

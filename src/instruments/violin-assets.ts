@@ -85,7 +85,10 @@ export function loadViolinAssets(ctx: Ctx, onProgress?: (fraction: number) => vo
     pending.catch(() => cache.delete(rate));
     cache.set(rate, pending);
   } else {
-    void pending.then(() => onProgress?.(1));
+    pending.then(
+      () => onProgress?.(1),
+      () => {},
+    );
   }
   return pending;
 }
@@ -97,24 +100,31 @@ export function violinAssets(sampleRate: number): ViolinAssets {
   return assets;
 }
 
+/**
+ * Downloads run in parallel; decoding runs one file at a time, so at most one full decoded recording (13–17 s,
+ * ~3 MB) exists next to the kept buffers (peak memory matters on an iPhone that also holds the speech model).
+ */
 async function prepare(ctx: Ctx, onProgress?: (fraction: number) => void): Promise<ViolinAssets> {
   const steps = SAMPLE_TABLE.length + 1;
   let done = 0;
   const step = () => onProgress?.(++done / steps);
-  const samples = await Promise.all(
-    SAMPLE_TABLE.map(async (entry) => {
-      const url = `${import.meta.env.BASE_URL}samples/violin/${entry.name}.mp3`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`[instruments] ${url}: HTTP ${res.status}`);
-      const decoded = await ctx.decodeAudioData(await res.arrayBuffer());
-      const sample = prepareSample(ctx, decoded, entry.name, entry.midi + entry.cents / 100, entry.loop);
-      step();
-      return sample;
-    }),
-  );
+  const downloads = SAMPLE_TABLE.map((entry) => download(`${import.meta.env.BASE_URL}samples/violin/${entry.name}.mp3`));
+  downloads.forEach((d) => d.catch(() => {})); // each is awaited below; this only silences early rejections
+  const samples: ViolinSample[] = [];
+  for (const [i, entry] of SAMPLE_TABLE.entries()) {
+    const decoded = await ctx.decodeAudioData(await downloads[i]);
+    samples.push(prepareSample(ctx, decoded, entry.name, entry.midi + entry.cents / 100, entry.loop));
+    step();
+  }
   const room = makeRoomImpulse(ctx);
   step();
   return { samples: samples.sort((a, b) => a.root - b.root), room };
+}
+
+async function download(url: string): Promise<ArrayBuffer> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`[instruments] ${url}: HTTP ${res.status}`);
+  return res.arrayBuffer();
 }
 
 function prepareSample(

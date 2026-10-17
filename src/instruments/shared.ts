@@ -36,9 +36,25 @@ export interface NoteSpan {
   skipped: Sec;
 }
 
-export function noteSpan(note: Note, when: Sec, offset = 0): NoteSpan {
-  const skipped = Math.max(0, offset);
-  return { start: when, end: when + Math.max(MIN_NOTE_DUR, note.dur - skipped), skipped };
+/**
+ * A sound never starts earlier than this after ctx.currentTime: the audio thread may already be rendering a
+ * quantum or two past the currentTime JS sees, and an attack scheduled in the past would start part-way up (click).
+ */
+export const LATE_MARGIN: Sec = 0.01;
+
+/** Earliest safe start time for a sound scheduled now. */
+export function earliestStart(ctx: Ctx, when: Sec): Sec {
+  return Math.max(when, ctx.currentTime + LATE_MARGIN);
+}
+
+/**
+ * The span a note sounds in. A note handed over late (or caught up) starts at earliestStart() and skips what it
+ * missed, so it still ends at when + dur − offset.
+ */
+export function noteSpan(ctx: Ctx, note: Note, when: Sec, offset = 0): NoteSpan {
+  const end = when + Math.max(MIN_NOTE_DUR, note.dur - Math.max(0, offset));
+  const start = earliestStart(ctx, when);
+  return { start, end: Math.max(end, start + MIN_NOTE_DUR), skipped: Math.max(0, offset) + (start - when) };
 }
 
 // ---------- stopAll gate ----------
