@@ -10,7 +10,7 @@
 // - analyze() runs the REAL dsp (pitch tracker + segmenter, onset detector) on captured audio; frame = context frame
 //   of pcm[0], so detections come out in context time (the time the app PLAYED them).
 import type {
-  AppState, Command, DeviceSettings, Gesture, LogEvent, RawHit, RawNote, Recognizer, Sec, Session, SingTestApi, View,
+  AppState, Command, DeviceSettings, Gesture, LogEvent, PitchFrame, RawHit, RawNote, Recognizer, Sec, Session, SingTestApi, View,
   VoiceStatus,
 } from '../types.ts';
 import type { AudioEngine } from '../audio/context.ts';
@@ -40,6 +40,12 @@ const ANALYZE_BLOCK = 512;
 const PLAY_LEAD_SEC = 0.1;
 /** waitUntil poll period */
 const POLL_MS = 5;
+/** noise bed: chunk length, how far ahead chunks are queued, refill period */
+const NOISE_CHUNK_SEC = 2;
+const NOISE_AHEAD_SEC = 1;
+const NOISE_REFILL_MS = 200;
+const NOISE_LOWPASS_HZ = 9000;
+const SALIENCE_HARMONICS = 6;
 
 export interface PlayOptions {
   /** start this far into the file (seconds) */
@@ -102,6 +108,12 @@ export interface SingE2eApi extends SingTestApi {
     put(url: string, base64: string): Promise<{ duration: Sec; sampleRate: number }>;
     /** true when `url` is in the decode cache (loaded or put) */
     cached(url: string): boolean;
+    /**
+     * continuous room-noise bed into the mic from now (white noise low-passed at 9 kHz, RMS `dbfs`), like the fixtures'
+     * own room noise; null stops it. The test mic is otherwise digital silence, and a fixture starting out of
+     * digital silence is a sharp onset a real mic never produces.
+     */
+    noise(dbfs: number | null): void;
     /** like the contract's play, plus slicing; throws if `at` already passed after decoding */
     play(url: string, at?: Sec, opts?: PlayOptions): Promise<Sec>;
   };
@@ -111,8 +123,15 @@ export interface SingE2eApi extends SingTestApi {
     end(key: string): Promise<CaptureSummary>;
     /** real-dsp re-detection on a finished named capture, optionally only [from, to) context time */
     analyze(key: string, kind: 'notes' | 'drums', from?: Sec, to?: Sec): Analysed;
+    /** real pitch-tracker frames (t = window centre, context time) of a finished named capture inside [from, to) */
+    frames(key: string, from?: Sec, to?: Sec): PitchFrame[];
     /** RMS / peak of a finished named capture inside [from, to) */
     level(key: string, from?: Sec, to?: Sec): { rms: number; peak: number };
+    /**
+     * harmonic salience of each candidate MIDI note in [from, to): sum of Hann-windowed Goertzel power at harmonics
+     * 1..SALIENCE_HARMONICS. For pitches below the tracker's 70 Hz floor (low bass).
+     */
+    salience(key: string, from: Sec, to: Sec, midis: number[]): number[];
   };
   analyze(pcm: Float32Array, sampleRate: number, frame: number, kind: 'notes' | 'drums'): Analysed;
   /** route master → DelayNode(delaySec) → mic input; replaces an earlier loopback */
@@ -191,6 +210,33 @@ export function installTestHooks(deps: TestHookDeps): void {
     return out;
   };
 
+  // ---- noise bed: contiguous chunks scheduled at exact frames ----
+  let noiseTimer: ReturnType<typeof setInterval> | null = null;
+  const noiseBed = (dbfs: number | null) => {
+    if (noiseTimer !== null) clearInterval(noiseTimer);
+    noiseTimer = null;
+    if (dbfs === null) return;
+    const sr = ctx.sampleRate;
+    const n = Math.round(NOISE_CHUNK_SEC * sr);
+    let rng = 0x5eed;
+    const chunks = Array.from({ length: 3 }, () => {
+      const buf = ctx.createBuffer(1, n, sr);
+      const x = buf.getChannelData(0);
+      lowpassNoise(x, sr, () => ((rng = (rng * 1664525 + 1013904223) >>> 0) / 2 ** 32) * 2 - 1, 10 ** (dbfs / 20));
+      return buf;
+    });
+    let nextFrame = Math.ceil((ctx.currentTime + 0.05) * sr);
+    let i = 0;
+    const refill = () => {
+      while (nextFrame / sr < ctx.currentTime + NOISE_AHEAD_SEC) {
+        mic.inject(chunks[i++ % chunks.length], nextFrame / sr);
+        nextFrame += n;
+      }
+    };
+    refill();
+    noiseTimer = setInterval(refill, NOISE_REFILL_MS);
+  };
+
   // ---- captures ----
   const nodeFor = (trackId?: string | null): AudioNode => {
     if (!trackId) return engine.master;
@@ -240,6 +286,7 @@ export function installTestHooks(deps: TestHookDeps): void {
         return { duration: b.duration, sampleRate: b.sampleRate };
       },
       cached: (url) => decoded.has(url),
+      noise: noiseBed,
       async put(url, base64) {
         const bin = atob(base64);
         const bytes = new Uint8Array(bin.length);
@@ -289,8 +336,28 @@ export function installTestHooks(deps: TestHookDeps): void {
         const s = sliceResult(r, from, to);
         return analyze(s.pcm, r.sampleRate, s.frame, kind);
       },
+      frames(key, from, to) {
+        const r = finished(key);
+        const s = sliceResult(r, from, to);
+        const tracker = createPitchTracker();
+        const out: PitchFrame[] = [];
+        for (let i = 0; i < s.pcm.length; i += ANALYZE_BLOCK) {
+          out.push(...tracker.push({ frame: s.frame + i, samples: s.pcm.subarray(i, i + ANALYZE_BLOCK) }, r.sampleRate));
+        }
+        return out;
+      },
       level(key, from, to) {
         return levels(sliceResult(finished(key), from, to).pcm);
+      },
+      salience(key, from, to, midis) {
+        const r = finished(key);
+        const x = sliceResult(r, from, to).pcm;
+        return midis.map((m) => {
+          const f0 = 440 * 2 ** ((m - 69) / 12);
+          let sum = 0;
+          for (let k = 1; k <= SALIENCE_HARMONICS; k++) sum += goertzelPower(x, (k * f0) / r.sampleRate);
+          return sum;
+        });
       },
     },
     analyze,
@@ -353,6 +420,48 @@ export function analyze(pcm: Float32Array, sampleRate: number, frame: number, ki
     hits.push(...det.close(end));
   }
   return { notes, hits, t0: frame / sampleRate, t1: end, ...levels(pcm) };
+}
+
+/** power of the Hann-windowed signal at normalised frequency `f` (cycles per sample) */
+function goertzelPower(x: Float32Array, f: number): number {
+  const n = x.length;
+  const coeff = 2 * Math.cos(2 * Math.PI * f);
+  let s1 = 0;
+  let s2 = 0;
+  for (let i = 0; i < n; i++) {
+    const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / Math.max(1, n - 1));
+    const s0 = x[i] * w + coeff * s1 - s2;
+    s2 = s1;
+    s1 = s0;
+  }
+  return s1 * s1 + s2 * s2 - coeff * s1 * s2;
+}
+
+/** white noise through an RBJ 2nd-order low-pass, scaled to RMS `rms` */
+function lowpassNoise(x: Float32Array, sampleRate: number, rand: () => number, rms: number): void {
+  const w = (2 * Math.PI * NOISE_LOWPASS_HZ) / sampleRate;
+  const alpha = Math.sin(w) / (2 * Math.SQRT1_2);
+  const cos = Math.cos(w);
+  const a0 = 1 + alpha;
+  const b0 = (1 - cos) / 2 / a0;
+  const b1 = (1 - cos) / a0;
+  const a1 = (-2 * cos) / a0;
+  const a2 = (1 - alpha) / a0;
+  let x1 = 0;
+  let x2 = 0;
+  let y1 = 0;
+  let y2 = 0;
+  for (let i = 0; i < x.length; i++) {
+    const x0 = rand();
+    const y0 = b0 * x0 + b1 * x1 + b0 * x2 - a1 * y1 - a2 * y2;
+    x2 = x1;
+    x1 = x0;
+    y2 = y1;
+    y1 = y0;
+    x[i] = y0;
+  }
+  const g = rms / Math.max(1e-12, levels(x).rms);
+  for (let i = 0; i < x.length; i++) x[i] *= g;
 }
 
 function levels(pcm: Float32Array): { rms: number; peak: number } {

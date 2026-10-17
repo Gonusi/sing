@@ -5,12 +5,14 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, type BrowserContext, type Page } from '@playwright/test';
-import type { DrumHit, InstrumentKind, LogEvent, Note, RawHit, RawNote, Session, Track } from '../src/types.ts';
+import type { DrumHit, InstrumentKind, LogEvent, Note, PitchFrame, RawHit, RawNote, Session, Track } from '../src/types.ts';
 
 export const ROOT = join(import.meta.dirname, '..');
 export const FIXTURE_DIR = join(ROOT, 'dev/fixtures/out');
 export const OUT_DIR = join(ROOT, 'e2e/out');
 export const SESSION_KEY = 'sing.session.v1';
+/** the fixtures' own room noise level: the test mic gets the same floor, so a fixture start is not an onset */
+export const NOISE_BED_DBFS = -45;
 
 export function singUrl(query = 'test'): string {
   const base = process.env.SING_URL;
@@ -79,6 +81,8 @@ export interface BootOptions {
   seed?: Session;
   /** navigate first (false: the page is already at the app, e.g. after reload) */
   navigate?: boolean;
+  /** test-mic room-noise bed in dBFS (default −45, like the fixtures' room noise); null = digital silence */
+  noise?: number | null;
 }
 
 /** goto the app, tap the start screen, wait for window.__sing (only with ?test) */
@@ -90,7 +94,11 @@ export async function boot(page: Page, opts: BootOptions = {}): Promise<string[]
   if (opts.seed) await idbPut(page, SESSION_KEY, opts.seed);
   await page.locator('.start').click();
   await expect(page.locator('.stage')).toBeVisible({ timeout: 30_000 });
-  if (query.split('&').includes('test')) await page.waitForFunction(() => !!window.__sing, null, { timeout: 30_000 });
+  if (query.split('&').includes('test')) {
+    await page.waitForFunction(() => !!window.__sing, null, { timeout: 30_000 });
+    const noise = opts.noise === undefined ? NOISE_BED_DBFS : opts.noise;
+    if (noise !== null) await page.evaluate((db) => window.__sing!.mic.noise(db), noise);
+  }
   return errors;
 }
 
@@ -382,7 +390,8 @@ export function matchNotes(det: { t: number; midi: number }[], exp: { t: number;
       if (best < 0 || Math.abs(det[i].t - e.t) < Math.abs(det[best].t - e.t)) best = i;
     }
     if (best < 0) {
-      r.missed.push(`${e.midi}@${e.t.toFixed(3)}`);
+      const near = det.reduce((n, d, i) => (n < 0 || Math.abs(d.t - e.t) < Math.abs(det[n].t - e.t) ? i : n), -1);
+      r.missed.push(`${e.midi}@${e.t.toFixed(3)}${near >= 0 ? ` (nearest ${det[near].midi.toFixed(1)}@${det[near].t.toFixed(3)})` : ''}`);
       continue;
     }
     used.add(best);
@@ -422,3 +431,75 @@ export function matchHits(det: RawHit[], exp: { t: number; kind: string }[], tol
 export const maxAbs = (xs: number[]): number => xs.reduce((m, x) => Math.max(m, Math.abs(x)), 0);
 export const ms = (x: number): string => `${(x * 1000).toFixed(1)} ms`;
 export const rawNotes = (xs: RawNote[]): { t: number; midi: number }[] => xs.map((n) => ({ t: n.t, midi: n.midi }));
+
+// ---------- played-note check on pitch frames ----------
+
+export interface PlayedCheck {
+  checked: number;
+  /** notes whose pitch never appeared (3 frames in a row) inside the start window */
+  late: string[];
+  /** notes whose sustain is not mostly at their pitch */
+  offPitch: string[];
+  /** signed onset errors (first steady frame at the pitch − at), seconds */
+  errors: number[];
+}
+
+const frameMidi = (f: PitchFrame): number | null => (f.hz ? Math.round(69 + 12 * Math.log2(f.hz / 440)) : null);
+
+/** played-note check windows (see checkPlayed) */
+export const PLAYED_EARLY_SEC = 0.04;
+/** 40 ms tolerance + half the 43 ms pitch window + the violin's 50 ms legato glide, minus slack */
+export const PLAYED_LATE_SEC = 0.08;
+
+/**
+ * Did the output play each expected note? Works on a polyphonic mix with release tails (where the monophonic
+ * segmenter's onset refinement is fooled) and on legato glides:
+ * - start: the first run of 3 frames (window centres) at `midi`, searched from at − PLAYED_EARLY_SEC, lies within
+ *   [at − PLAYED_EARLY_SEC, at + PLAYED_LATE_SEC];
+ * - sustain: ≥ 60% of the voiced frames in [at + 80 ms, at + min(dur, 0.4) − 20 ms] are at `midi`.
+ */
+export function checkPlayed(frames: PitchFrame[], exp: { at: number; midi: number; dur: number }[]): PlayedCheck {
+  const r: PlayedCheck = { checked: exp.length, late: [], offPitch: [], errors: [] };
+  for (const e of exp) {
+    if (e.midi < TRACKER_FLOOR_MIDI) continue; // below the pitch tracker: see checkSalience
+    const i0 = frames.findIndex((f) => f.t >= e.at - PLAYED_EARLY_SEC);
+    let onset: number | null = null;
+    for (let i = Math.max(0, i0); i0 >= 0 && i + 2 < frames.length && frames[i].t <= e.at + PLAYED_LATE_SEC; i++) {
+      if ([0, 1, 2].every((k) => frameMidi(frames[i + k]) === e.midi)) {
+        onset = frames[i].t;
+        break;
+      }
+    }
+    if (onset === null) r.late.push(`${e.midi}@${e.at.toFixed(3)}`);
+    else r.errors.push(onset - e.at);
+    const a = e.at + 0.08;
+    const b = e.at + Math.max(0.1, Math.min(e.dur, 0.4) - 0.02);
+    const voiced = frames.filter((f) => f.t >= a && f.t <= b && f.hz);
+    const at = voiced.filter((f) => frameMidi(f) === e.midi).length;
+    if (voiced.length === 0 || at / voiced.length < 0.6) r.offPitch.push(`${e.midi}@${e.at.toFixed(3)} ${at}/${voiced.length}`);
+  }
+  return r;
+}
+
+/** lowest MIDI note the pitch tracker can see (PITCH_MIN_HZ 70 → 37.65) */
+export const TRACKER_FLOOR_MIDI = 38;
+
+/** sustain window used by checkPlayed / checkSalience */
+export const sustainWindow = (e: { at: number; dur: number }): [number, number] => [e.at + 0.08, e.at + Math.max(0.1, Math.min(e.dur, 0.4) - 0.02)];
+
+/**
+ * Pitch check for notes below the tracker floor: the harmonic salience of `midi` must beat every neighbour within
+ * ±2 semitones by 2× (salience = summed Goertzel power at harmonics 1..6 over the sustain window).
+ */
+export async function checkSalience(page: Page, key: string, exp: { at: number; midi: number; dur: number }[]): Promise<{ checked: number; offPitch: string[] }> {
+  const low = exp.filter((e) => e.midi < TRACKER_FLOOR_MIDI);
+  const offPitch: string[] = [];
+  for (const e of low) {
+    const [a, b] = sustainWindow(e);
+    const cands = [e.midi, e.midi - 2, e.midi - 1, e.midi + 1, e.midi + 2];
+    const sal = await page.evaluate(([k, a, b, c]) => window.__sing!.capture.salience(k, a, b, c), [key, a, b, cands] as const);
+    const best = Math.max(...sal.slice(1));
+    if (!(sal[0] > 2 * best)) offPitch.push(`${e.midi}@${e.at.toFixed(3)} salience ${(sal[0] / Math.max(1e-12, best)).toFixed(2)}×`);
+  }
+  return { checked: low.length, offPitch };
+}
