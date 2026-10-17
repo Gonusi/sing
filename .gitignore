@@ -1,0 +1,10 @@
+node_modules
+dist
+dev-dist
+public/vosk/
+test-results
+playwright-report
+e2e/out/
+dev/fixtures/out/
+.DS_Store
+*.log
