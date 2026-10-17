@@ -76,11 +76,16 @@ function parseArgs(argv: string[]): Args {
 
 // ---------- browser ----------
 
-async function openContext(engine: Engine, profileDir: string): Promise<BrowserContext> {
+/**
+ * blockServiceWorkers: for the dev page inside a production build — the PWA's autoUpdate reloads the page once its
+ * service worker controls it, and navigateFallback then serves the app's index.html instead of the dev page.
+ */
+async function openContext(engine: Engine, profileDir: string, blockServiceWorkers = false): Promise<BrowserContext> {
   mkdirSync(profileDir, { recursive: true });
+  const serviceWorkers = blockServiceWorkers ? 'block' : 'allow';
   const ctx = engine === 'webkit'
-    ? await webkit.launchPersistentContext(profileDir, { headless: true })
-    : await chromium.launchPersistentContext(profileDir, { headless: true, args: ['--autoplay-policy=no-user-gesture-required'] });
+    ? await webkit.launchPersistentContext(profileDir, { headless: true, serviceWorkers })
+    : await chromium.launchPersistentContext(profileDir, { headless: true, serviceWorkers, args: ['--autoplay-policy=no-user-gesture-required'] });
   await ctx.route(`**/${FIXTURE_ROUTE}**`, (route) => {
     const file = decodeURIComponent(basename(new URL(route.request().url()).pathname));
     return route.fulfill({ path: join(SPEECH_DIR, file), contentType: 'audio/wav' });
@@ -289,7 +294,8 @@ async function prodSmoke(engine: Engine): Promise<ProdSmoke> {
     const js = readdirSync(assets).filter((f) => f.endsWith('.js')).map((f) => ({ f, kb: Math.round(statSync(join(assets, f)).size / 1024), src: readFileSync(join(assets, f), 'utf8') }));
     const html = readFileSync(join(ROOT, 'dist', 'index.html'), 'utf8');
     const main = js.find((x) => html.includes(x.f))!;
-    const vosk = js.find((x) => x.src.includes('KaldiRecognizer'))!;
+    // a string literal of vosk-browser's Model (survives minification; the recogniser's own code doesn't contain it)
+    const vosk = js.find((x) => x.src.includes('Cannot create KaldiRecognizer'))!;
     const ctx = await openContext(engine, join(OUT_DIR, `profile-${engine}`));
     try {
       const page = await ctx.newPage();
@@ -298,9 +304,17 @@ async function prodSmoke(engine: Engine): Promise<ProdSmoke> {
       const t0 = Date.now();
       await page.dispatchEvent('.start', 'pointerup');
       await page.waitForSelector('[aria-label="Settings"]', { timeout: BOOT_TIMEOUT_MS });
+      // the status pill shows "voice NN%" while loading; the settings info lines are rendered when the sheet opens
+      let text = '';
+      for (const until = Date.now() + LOAD_TIMEOUT_MS; Date.now() < until; await new Promise((r) => setTimeout(r, 200))) {
+        text = await page.evaluate(() => document.body.innerText);
+        if (!/voice \d+%/.test(text) && Date.now() - t0 > 500) break;
+      }
+      const loadMs = Date.now() - t0;
       await page.click('[aria-label="Settings"]');
-      const status = await page.waitForFunction(() => /voice (ready|error|off)/.exec(document.body.innerText)?.[1], null, { timeout: LOAD_TIMEOUT_MS, polling: 250 });
-      return { mainChunkKb: main.kb, voskChunkKb: vosk.kb, voskInMainChunk: main === vosk, voiceStatus: String(await status.jsonValue()), loadMs: Date.now() - t0, errors };
+      text = await page.evaluate(() => document.body.innerText);
+      const voiceStatus = /voice (ready|error|off|loading)/.exec(text)?.[1] ?? `unknown: ${text.replace(/\s+/g, ' ').slice(0, 300)}`;
+      return { mainChunkKb: main.kb, voskChunkKb: vosk.kb, voskInMainChunk: main === vosk, voiceStatus, loadMs, errors };
     } finally {
       await ctx.close();
     }
@@ -335,7 +349,7 @@ async function main(): Promise<void> {
   try {
     const profileDir = join(OUT_DIR, `profile-${args.engine}`);
     if (!process.env.PORT) rmSync(profileDir, { recursive: true, force: true }); // see the header: cache key has the port
-    const ctx = await openContext(args.engine, profileDir);
+    const ctx = await openContext(args.engine, profileDir, args.prod);
     try {
       const pages: Page[] = [];
       const loads: (LoadReport & { downloaded: boolean; rssBeforeMb: number | null; rssAfterMb: number | null })[] = [];
