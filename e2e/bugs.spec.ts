@@ -65,3 +65,20 @@ test('BUG engine: one-sample clicks at vocal loop seams', async ({ page }) => {
     expect(seam, line).toBeLessThanOrEqual(steady * 2 + 0.01);
   }
 });
+
+test('BUG engine/dsp: a drum first take of room noise only (−45 dBFS) records phantom hats', async ({ page }) => {
+  test.fail(true, 'src/loop/take.ts + src/analysis/drums.ts: with the fixtures\' own −45 dBFS room noise, an empty drum first take gets 2 hats (pos ≈ 0.03 and ≈ 0.23 s; the 2nd right after the 80 ms record-beep exclusion, which zeroes the noise without ramps: noise resuming from 0 is a sharp onset). −60 dBFS or silence: none.');
+  await boot(page, { noise: -45 });
+  const hits = await page.evaluate(async () => {
+    const s = window.__sing!;
+    s.command({ type: 'create', kind: 'drums' });
+    const t0 = s.now();
+    await s.waitUntil(t0 + 0.1);
+    s.gesture({ type: 'tap', tDown: t0 });
+    await s.waitUntil(t0 + 2.0);
+    s.gesture({ type: 'tap', tDown: t0 + 1.9 });
+    return s.session().tracks[0].take?.hits.map((h) => `${h.kind}@${h.pos.toFixed(3)}`) ?? [];
+  });
+  console.log(`[bug phantom hats] ${JSON.stringify(hits)}`);
+  expect(hits).toEqual([]);
+});

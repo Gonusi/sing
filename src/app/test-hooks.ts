@@ -56,6 +56,8 @@ export interface PlayOptions {
   dur?: Sec;
   /** linear gain applied to the samples */
   gain?: number;
+  /** raised-cosine fade-in and fade-out (seconds) at the slice edges, so a cut is not a sharp onset */
+  fade?: Sec;
 }
 
 export interface Analysed {
@@ -135,6 +137,8 @@ export interface SingE2eApi extends SingTestApi {
      * Returns the best lag (s; + = capture later than assumed) and its NCC (1 = identical up to gain).
      */
     xcorr(key: string, url: string, offset: Sec, from: Sec, to: Sec, maxLag: Sec): Promise<{ lag: Sec; ncc: number; nccAtZero: number }>;
+    /** RMS per `block` seconds inside [from, to) (envelope; element i covers from + i·block) */
+    envelope(key: string, from: Sec, to: Sec, block: Sec): number[];
     /** largest |x[n] − x[n−1]| inside [from, to) (click / seam check) */
     maxJump(key: string, from: Sec, to: Sec): number;
     /** raw samples inside [from, to) as a plain array (small spans only, for diagnosis); t = time of the first */
@@ -216,11 +220,16 @@ export function installTestHooks(deps: TestHookDeps): void {
     const a = Math.max(0, Math.round((o.from ?? 0) * sr));
     const b = Math.min(buf.length, o.dur === undefined ? buf.length : a + Math.round(o.dur * sr));
     const gain = o.gain ?? 1;
-    if (a === 0 && b === buf.length && gain === 1) return buf;
+    const fade = Math.min(Math.round((o.fade ?? 0) * sr), Math.floor((b - a) / 2));
+    if (a === 0 && b === buf.length && gain === 1 && fade === 0) return buf;
     const out = ctx.createBuffer(1, Math.max(1, b - a), sr);
     const src = buf.getChannelData(0).subarray(a, b);
     const dst = out.getChannelData(0);
-    for (let i = 0; i < src.length; i++) dst[i] = src[i] * gain;
+    for (let i = 0; i < src.length; i++) {
+      const edge = Math.min(i, src.length - 1 - i);
+      const w = edge < fade ? 0.5 - 0.5 * Math.cos((Math.PI * edge) / fade) : 1;
+      dst[i] = src[i] * gain * w;
+    }
     return out;
   };
 
@@ -396,6 +405,14 @@ export function installTestHooks(deps: TestHookDeps): void {
           }
         }
         return { lag: best / sr, ncc: bestV, nccAtZero: ncc(0) };
+      },
+      envelope(key, from, to, block) {
+        const r = finished(key);
+        const x = sliceResult(r, from, to).pcm;
+        const n = Math.max(1, Math.round(block * r.sampleRate));
+        const out: number[] = [];
+        for (let i = 0; i + n <= x.length; i += n) out.push(levels(x.subarray(i, i + n)).rms);
+        return out;
       },
       samples(key, from, to) {
         const r = finished(key);

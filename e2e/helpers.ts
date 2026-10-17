@@ -181,6 +181,8 @@ export async function firstTake(
   page: Page,
   o: {
     fixture: string; L: number; lead?: number; from?: number; dur?: number; kind?: InstrumentKind;
+    /** fade (s) at the slice edges (mic.play PlayOptions.fade) */
+    fade?: number;
     /** begin a named capture of the take's lane output right before the stop tap */
     captureKey?: string;
   },
@@ -192,7 +194,7 @@ export async function firstTake(
     await s.mic.load(url);
     if (o.kind && !s.command({ type: 'create', kind: o.kind })) throw new Error(`create ${o.kind} refused`);
     const t0 = s.now();
-    const at = await s.mic.play(url, t0 + (o.lead ?? 0.1), { from: o.from, dur: o.dur });
+    const at = await s.mic.play(url, t0 + (o.lead ?? 0.1), { from: o.from, dur: o.dur, fade: o.fade });
     await s.waitUntil(t0 + 0.1);
     s.gesture({ type: 'tap', tDown: t0 });
     const start = s.logSince(t0).find((e) => e.type === 'take' && e.data?.phase === 'start');
