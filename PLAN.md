@@ -286,9 +286,9 @@ Design rule from the owner: users are super-amateurs humming roughly in tune →
 ## Round 3 — setup wizard (owner, 2026-10-18)
 One tutorial on first launch for now (later: each step launchable alone; whether to show on first launch is to be reconsidered). Steps: listening (output kind → ec + mic), mic check (level, noise floor), latency (calibration v2), teach drums (kick/snare/hat ×3 + test pad), your voice (sing along → tuning offset; optional range), commands (try one, shown not run). Saved in DeviceSettings.
 - [x] contract: OutputKind, DrumTemplate, DeviceSettings.output/tuningOffset/range/drums/setupDone, RawHit.features, OnsetDetectorOptions, SetupApi; stubs (analysis/drum-templates.ts, analysis/voice-profile.ts, app/setup.ts, ui/wizard.ts); main.ts wiring
-- [ ] dsp: hitFeatures + classifyByTemplates (+ detector options), pitchOffset + heldNote
+- [x] dsp: hitFeatures + classifyByTemplates (+ detector options), pitchOffset + heldNote
 - [ ] engine: createSetupApi; drum takes use DeviceSettings.drums; tuningOffset/range used in note derivation
-- [ ] shell: wizard UI (6 step cards), ⋯ → Setup row
+- [x] shell: wizard UI (6 step cards), ⋯ → Setup row
 - [ ] tester: e2e for the wizard (injected audio)
 
 ## Known issues
