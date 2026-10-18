@@ -9,9 +9,9 @@ import { startDev } from '../lib/serve.ts';
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const OUT_DIR = fileURLToPath(new URL('./out/', import.meta.url));
 const VIEWPORT = { width: 390, height: 844 };
-const SCENES = ['empty', 'four', 'five', 'recording', 'recording-vocals', 'overdub', 'command', 'toast', 'settings', 'plus', 'many'];
+const SCENES = ['empty', 'four', 'five', 'recording', 'recording-vocals', 'overdub', 'command', 'toast', 'settings', 'plus', 'menu', 'many'];
 const FROZEN_T = 1.6; // loop position for stable screenshots
-const SETTLE_MS = 700; // transitions (sheet 200 ms, overlay 120 ms) finished; toast still fully visible
+const SETTLE_MS = 1100; // transitions (sheet 200 ms, overlay 120 ms) finished; toast still fully visible
 const HOLD_MS = 500;
 const FREE_SPOT = { x: 195, y: 650 }; // empty part of the lanes area in the `four` scene
 
@@ -119,6 +119,54 @@ async function checkGestures(page: Page, url: string, cdp: CDPSession): Promise<
   check('strip: no gesture emitted', (await gestureTypes(page)).length === 0);
 }
 
+async function press(cdp: CDPSession, x: number, y: number, ms: number): Promise<void> {
+  await touch(cdp, 'touchStart', x, y);
+  await page_wait(ms);
+  await touch(cdp, 'touchEnd');
+}
+const page_wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+async function checkLaneMenu(page: Page, url: string, cdp: CDPSession): Promise<void> {
+  await openScene(page, url, 'four');
+  const strip = await center(page, '.lane-strip[data-id="violin"]');
+  const open = (): Promise<number> => page.locator('.lane-menu').count();
+
+  await resetLogs(page);
+  await page.touchscreen.tap(strip.x, strip.y);
+  await page.waitForTimeout(100);
+  check('menu: short strip tap still acts (toggle on the selected lane), no menu', (await open()) === 0 && (await actions(page)).join() === 'toggle:violin', (await actions(page)).join());
+
+  await resetLogs(page);
+  await press(cdp, strip.x, strip.y, 600);
+  await page.waitForTimeout(100);
+  check('menu: 600 ms strip press opens the menu', (await open()) === 1);
+  check('menu: hold emits no gesture, no select/toggle', (await gestureTypes(page)).length === 0 && (await actions(page)).length === 0, `${(await gestureTypes(page)).join()} ${(await actions(page)).join()}`);
+  check('menu: title and items', (await page.locator('.lane-menu-title').textContent()) === 'violin track' && (await page.locator('.lane-menu-item').allTextContents()).join() === 'mute,delete');
+
+  await page.locator('.lane-menu-item.danger').tap();
+  await page.waitForTimeout(100);
+  check('menu: delete calls onDelete with the track id and closes', (await actions(page)).join() === 'delete:violin' && (await open()) === 0, (await actions(page)).join());
+  check('menu: deleted lane is gone', (await page.locator('.lane-strip[data-id="violin"]').count()) === 0);
+
+  await openScene(page, url, 'four');
+  await page.locator('.lane-strip[data-id="violin"]').waitFor(); // strips appear after the first frame
+  await resetLogs(page);
+  await press(cdp, strip.x, strip.y, 600);
+  await page.waitForTimeout(100);
+  await page.touchscreen.tap(300, 700); // backdrop
+  await page.waitForTimeout(100);
+  check('menu: backdrop tap closes without action or gesture', (await open()) === 0 && (await actions(page)).length === 0 && (await gestureTypes(page)).length === 0, `open=${await open()} actions=${(await actions(page)).join()} gestures=${(await gestureTypes(page)).join()}`);
+
+  await resetLogs(page);
+  await page.touchscreen.tap(strip.x, strip.y);
+  check('menu: strip tap works again after a hold', (await actions(page)).join() === 'toggle:violin', (await actions(page)).join());
+
+  await press(cdp, strip.x, strip.y, 600);
+  await page.waitForTimeout(100);
+  await page.keyboard.press('Escape');
+  check('menu: Escape closes', (await open()) === 0);
+}
+
 async function checkEcho(page: Page): Promise<void> {
   const initial = await page.locator('.topbar .echo-slider').inputValue();
   check('echo: slider starts at getEcho()', initial === '0.4', `value=${initial}`);
@@ -199,6 +247,7 @@ async function main(): Promise<void> {
     await checkStart(page, dev.url);
     await checkGestures(page, dev.url, cdp);
     await checkSheets(page, dev.url);
+    await checkLaneMenu(page, dev.url, cdp);
   } finally {
     await browser.close();
     await dev.close();
