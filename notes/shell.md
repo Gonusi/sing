@@ -70,3 +70,8 @@ Dev pages: `${url}dev/ui/index.html?s=<scene>[&t=<loopPos seconds>]`, `${url}dev
 - `LanesOptions` gains `onDelete(trackId: string): void`. main.ts must wire it (tsc fails there until it does).
 - Backdrop closes only on a click that started with a pointerdown on it (the opening press ends on the backdrop, its click must not close the menu). Escape closes.
 - Selectors: `.lane-menu`, `.lane-menu-title`, `.lane-menu-item` (`.danger` = delete), `.lane-menu-backdrop`. dev scene `menu` (hold on the violin strip); shots.ts `checkLaneMenu`. Screenshot: `dev/ui/out/menu.png`.
+
+## Calibration v2 + microphone row (branch shell5)
+- `SheetActions.calibrate(onClick(i, n, phase 'listen'|'measure'))`: row title shows "listen… i/4" / "clap or say “ta” · i/12" then the result text; sub-line "wear your headphones; any mic works" while running (idle: "clap or say “ta” along with 16 clicks"); dot --fg in listen, --rec in measure. Row has `data-row="calibrate"`.
+- New row "Microphone" (`createMicRow`, div `.row.row-mic`, `.mic-select`) after Echo cancellation; list refreshed on every sheet open; `SheetActions` gains `listMics()`, `getMic()`, `setMic(id|null): Promise<boolean>`; false -> select back to default, sub-line "couldn’t switch — using default" for 2 s. main.ts must wire them (tsc fails there until it does).
+- dev/ui: scene `calibrating` (`?ci=<ms>` fake click period, default 100), fake mics "iPhone Microphone"/"AirPods Pro"; shots.ts `checkMic`, `checkCalibrate`, shot `calibrating.png`. Screenshots: `/Users/kasparasanusauskas/Projects/personal/sing-worktrees/shell5/dev/ui/out/{settings,calibrating}.png`.

@@ -59,6 +59,16 @@ async function shootScenes(page: Page, url: string): Promise<void> {
   }
 }
 
+/** calibration with 400 ms clicks: 4 listen clicks take 1.6 s, so ~2.8 s in it is mid-measure (clap or say “ta” · ~3/12) */
+async function shootCalibrating(page: Page, url: string): Promise<void> {
+  await page.goto(`${url}dev/ui/index.html?s=calibrating&t=${FROZEN_T}&ci=400`);
+  await page.waitForFunction(() => window.__ready);
+  await page.waitForFunction(() => document.body.textContent?.includes('clap or say “ta” ·'));
+  await page.waitForTimeout(700);
+  await page.screenshot({ path: `${OUT_DIR}calibrating.png` });
+  console.log('shot calibrating');
+}
+
 async function shootStart(page: Page, url: string): Promise<void> {
   const shots: Array<[string, string]> = [['start', ''], ['start-progress', '?p=0.6'], ['start-error', '?e=Microphone%20permission%20denied']];
   for (const [name, query] of shots) {
@@ -198,6 +208,42 @@ async function checkSmoothing(page: Page): Promise<void> {
   check('smoothing: moving the slider calls setSmoothing, no gesture', acts.length > 0 && Math.abs(Number(value) - 0.9) < 0.1 && (await gestureTypes(page)).length === 0, `acts=${acts.join()} value=${value} gestures=${(await gestureTypes(page)).join()}`);
 }
 
+async function checkMic(page: Page): Promise<void> {
+  const select = page.locator('.mic-select');
+  const options = await select.locator('option').allTextContents();
+  check('mic: select lists default + 2 mics', options.join('|') === 'default|iPhone Microphone|AirPods Pro', options.join('|'));
+  const box = await select.boundingBox();
+  check('mic: select fits inside the 390 px screen', !!box && box.x >= 0 && box.x + box.width <= VIEWPORT.width, JSON.stringify(box));
+  await resetLogs(page);
+  await select.selectOption('airpods');
+  await page.waitForTimeout(50);
+  check('mic: change calls setMic(id)', (await actions(page)).join() === 'setMic:airpods', (await actions(page)).join());
+  await select.selectOption('');
+  check('mic: default calls setMic(null)', (await actions(page)).includes('setMic:null'));
+}
+
+async function checkCalibrate(page: Page): Promise<void> {
+  const title = page.locator('[data-row="calibrate"]').locator('.row-title');
+  const idleSub = await page.locator('[data-row="calibrate"]').locator('.row-sub').textContent();
+  check('calibrate: idle sub-line', idleSub === 'clap or say “ta” along with 16 clicks', `sub=${idleSub}`);
+  await resetLogs(page);
+  // record every title text the row shows (clicks come 100 ms apart, faster than polling is reliable)
+  await page.evaluate(() => {
+    const row = document.querySelector<HTMLElement>('[data-row="calibrate"]')!;
+    const seen: string[] = [];
+    (window as unknown as { __titles: string[] }).__titles = seen;
+    new MutationObserver(() => seen.push(row.querySelector('.row-title')!.textContent ?? '')).observe(row, { subtree: true, childList: true, characterData: true });
+  });
+  await page.locator('[data-row="calibrate"]').tap();
+  const sub = await page.locator('[data-row="calibrate"] .row-sub', { hasText: 'wear your headphones' }).count();
+  await page.waitForFunction(() => document.body.textContent?.includes('latency 312 ms · heard 9/12'), undefined, { timeout: 5000 });
+  const seen = await page.evaluate(() => (window as unknown as { __titles: string[] }).__titles);
+  const listenAt = seen.findIndex((t) => /^listen… 1\/4$/.test(t));
+  const measureAt = seen.findIndex((t) => /^clap or say “ta” · 1\/12$/.test(t));
+  check('calibrate: shows "listen… i/4", then "clap or say “ta” · i/12", with the headphones line', listenAt >= 0 && measureAt > listenAt && sub === 1, `listen@${listenAt} measure@${measureAt} sub=${sub}`);
+  check('calibrate: ends with the result text', (await title.textContent()) === 'latency 312 ms · heard 9/12', (await title.textContent()) ?? '');
+}
+
 async function checkSheets(page: Page, url: string): Promise<void> {
   await openScene(page, url, 'four');
   await resetLogs(page);
@@ -220,6 +266,8 @@ async function checkSheets(page: Page, url: string): Promise<void> {
   await tap(page, '[data-action="settings"]');
   await page.waitForTimeout(350);
   await checkSmoothing(page);
+  await checkMic(page);
+  await checkCalibrate(page);
   const download = page.waitForEvent('download', { timeout: 3000 });
   await page.getByText('Export last take (WAV)').tap();
   const file = (await download).suggestedFilename();
@@ -243,6 +291,7 @@ async function main(): Promise<void> {
     const cdp = await context.newCDPSession(page);
 
     await shootScenes(page, dev.url);
+    await shootCalibrating(page, dev.url);
     await shootStart(page, dev.url);
     await checkStart(page, dev.url);
     await checkGestures(page, dev.url, cdp);
