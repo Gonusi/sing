@@ -32,7 +32,7 @@ test('fake capture device → real mic path → a take with the sung notes', asy
     const page = await context.newPage();
     const errors = watchErrors(page);
     const t0 = Date.now();
-    await boot(page, { query: '' });
+    await boot(page, { query: 'nosetup' }); // real mic path without the first-launch setup wizard
     await page.waitForTimeout(300);
     await page.mouse.click(SPOT.x, SPOT.y, { delay: 60 }); // record
     await expect(page.locator('.pill')).toHaveClass(/recordingFirst/);

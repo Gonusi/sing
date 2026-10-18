@@ -124,7 +124,10 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
   let holdDown: Sec = 0;
   let fired = false;
   recognizer.onPartial((text) => (ui.partial = text));
+  // the wizard's "try a command" must not run the command: main's handler ignores commands while it is active
+  const setup = createSetupApi({ engine, mic, controller, recognizer, voiceProgress: () => ui.voiceProgress });
   recognizer.onCommand((c) => {
+    if (setup.tryingCommand()) return;
     if (fired) return;
     fired = true;
     run(c, holdDown);
@@ -171,7 +174,6 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
     recognizer.load((f) => (ui.voiceProgress = f)).catch((e: unknown) => console.warn('voice failed to load', e));
   }
   // setup wizard: on first launch (until completed or skipped); never in ?test unless ?setup is given
-  const setup = createSetupApi({ engine, mic, controller, recognizer });
   const openSetup = () => {
     const close = mountWizard(root, setup, {
       onDone: () => {
@@ -181,7 +183,7 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
     });
   };
   openSetupLate = openSetup;
-  if ((!TEST && !controller.device.setupDone) || params.has('setup')) openSetup();
+  if ((!TEST && !params.has('nosetup') && !controller.device.setupDone) || params.has('setup')) openSetup();
 
   if (TEST) {
     const { installTestHooks } = await import('./app/test-hooks.ts');

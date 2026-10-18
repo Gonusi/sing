@@ -287,9 +287,9 @@ Design rule from the owner: users are super-amateurs humming roughly in tune →
 One tutorial on first launch for now (later: each step launchable alone; whether to show on first launch is to be reconsidered). Steps: listening (output kind → ec + mic), mic check (level, noise floor), latency (calibration v2), teach drums (kick/snare/hat ×3 + test pad), your voice (sing along → tuning offset; optional range), commands (try one, shown not run). Saved in DeviceSettings.
 - [x] contract: OutputKind, DrumTemplate, DeviceSettings.output/tuningOffset/range/drums/setupDone, RawHit.features, OnsetDetectorOptions, SetupApi; stubs (analysis/drum-templates.ts, analysis/voice-profile.ts, app/setup.ts, ui/wizard.ts); main.ts wiring
 - [x] dsp: hitFeatures + classifyByTemplates (+ detector options), pitchOffset + heldNote
-- [ ] engine: createSetupApi; drum takes use DeviceSettings.drums; tuningOffset/range used in note derivation
+- [x] engine: createSetupApi; drum takes use DeviceSettings.drums; tuningOffset/range used in note derivation
 - [x] shell: wizard UI (6 step cards), ⋯ → Setup row
-- [ ] tester: e2e for the wizard (injected audio)
+- [ ] tester: e2e for the wizard (deferred: engine check already runs all 6 steps against the real SetupApi on Chromium + WebKit; add as regression later)
 
 ## Known issues
 - (fixed locally 2026-10-17, not yet deployed) WebKit advances currentTime mid-task: vocal starts lost a render quantum (2.7 ms late) → 10 ms start margin; the states.spec failure was a two-clock-reads test artefact.
