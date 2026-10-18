@@ -278,6 +278,7 @@ Design rule from the owner: users are super-amateurs humming roughly in tune →
 
 - [ ] engine: calibration v2 (16 clicks ≈92 bpm, 4 listen + 12 measured, grid-phase cluster up to ~0.6 s round trip, clap or "ta", ≥6/12, IQR < 60 ms, "heard n/12"); mic choice (DeviceSettings.micId, list inputs)
 - [ ] shell: calibration instructions + per-click listen/clap feedback; Microphone row in ⋯
+- [ ] lane menu: hold a lane's letter → mute/unmute, delete (shell4 running; engine deleteTrack queued)
 - [ ] owner (iPhone): does choosing the iPhone mic keep AirPods playback in high quality?
 
 ## Known issues
