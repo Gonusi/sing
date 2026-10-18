@@ -1,6 +1,6 @@
 // [shell] Top bar (title, ＋ instrument picker, ⋯ settings) and the two bottom sheets they open.
 // Everything here is data-no-gesture: taps never reach the record/stop gesture layer.
-// The top bar also holds the echo slider (0..1, live). Settings rows: echo cancellation, microphone picker, note smoothing slider, calibrate latency, audio probe, export last take, clear session, info, credits.
+// The top bar also holds the echo slider (0..1, live). Settings rows: echo cancellation, microphone picker, note smoothing slider, calibrate latency, setup wizard, audio probe, export last take, clear session, info, credits.
 import { INSTRUMENTS } from '../types.ts';
 import type { InstrumentKind } from '../types.ts';
 
@@ -24,6 +24,8 @@ export interface SheetActions {
   setMic(id: string | null): Promise<boolean>;
   /** start the audio probe (tone while the mic is open); returns live level + stop */
   probe(): { level(): number; stop(): void };
+  /** open the setup wizard (listening, mic, latency, drums, voice); the ⋯ sheet closes first */
+  openSetup(): void;
   /** raw mic WAV of the last take, or null */
   exportTake(): Blob | null;
   clearSession(): Promise<void>;
@@ -345,6 +347,16 @@ function createProbeRow(actions: SheetActions): SettingsRow {
   return { root, reset: stop, stop };
 }
 
+function createSetupRow(actions: SheetActions, close: () => void): SettingsRow {
+  const { root } = makeRow('Setup', 'listening, mic, latency, drums, voice');
+  root.dataset.row = 'setup';
+  root.addEventListener('click', () => {
+    close();
+    actions.openSetup();
+  });
+  return { root, reset: () => {} };
+}
+
 function createExportRow(actions: SheetActions, parent: HTMLElement): SettingsRow {
   const LABEL = 'Export last take (WAV)';
   const { root, title } = makeRow(LABEL);
@@ -474,6 +486,7 @@ export function mountSheets(root: HTMLElement, actions: SheetActions): () => voi
     createMicRow(actions),
     createSmoothingRow(actions),
     createCalibrateRow(actions),
+    createSetupRow(actions, settings.close),
     probe,
     createExportRow(actions, root),
     createClearRow(actions, settings.close),

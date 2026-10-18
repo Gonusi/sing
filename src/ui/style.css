@@ -409,3 +409,86 @@ button:focus-visible { outline: 2px solid var(--cmd); outline-offset: 2px; }
 
 .info { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; font-size: 12px; line-height: 1.6; color: var(--dim); }
 .credits { margin-top: 8px; font-size: 11px; line-height: 1.5; color: var(--dim); }
+
+/* ---------- setup wizard ---------- */
+.wizard {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  padding: max(12px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+  background: var(--bg);
+  touch-action: manipulation;
+}
+.wizard [hidden] { display: none !important; }
+.wiz-top { display: flex; align-items: center; justify-content: space-between; flex: none; min-height: 52px; gap: 8px; }
+.wiz-bottom { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; flex: none; min-height: 56px; gap: 8px; }
+.wiz-bottom > :first-child { justify-self: start; }
+.wiz-bottom > :last-child { justify-self: end; }
+.wiz-dots { display: flex; gap: 8px; }
+.wiz-dot { width: 8px; height: 8px; box-sizing: border-box; border: 1px solid var(--dim); border-radius: 50%; }
+.wiz-dot.on { border-color: var(--fg); background: var(--fg); }
+.wiz-text-btn { min-height: 48px; padding: 0 4px; font-size: 15px; color: var(--dim); }
+.wiz-small { font-size: 13px; }
+.wiz-main { display: flex; flex: 1; min-height: 0; overflow-y: auto; }
+.wiz-card { display: flex; flex-direction: column; align-items: center; gap: 20px; width: 100%; max-width: 420px; margin: auto; padding: 8px 0; text-align: center; }
+.wiz-title { margin: 0; font-size: 24px; font-weight: 700; line-height: 1.2; }
+.wiz-instruction { margin: 0; font-size: 16px; line-height: 1.4; color: var(--dim); }
+.wiz-body { display: flex; flex-direction: column; align-items: center; gap: 16px; width: 100%; }
+.wiz-result { min-height: 40px; font-size: 15px; line-height: 1.35; color: var(--fg); }
+.wiz-result.bad { color: var(--rec); }
+.wiz-result.dim { color: var(--dim); }
+.wiz-next { min-width: 128px; height: 52px; padding: 0 28px; border-radius: 26px; background: var(--fg); color: var(--bg); font-size: 17px; font-weight: 600; }
+.wiz-next:disabled { background: var(--surface); color: var(--dim); cursor: default; }
+
+.wiz-btn { min-height: 52px; padding: 0 28px; border-radius: 16px; background: var(--surface); font-size: 17px; color: var(--fg); }
+.wiz-btn.go { background: color-mix(in srgb, var(--cmd) 55%, var(--surface)); }
+.wiz-pair { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; }
+
+/* listening */
+.wiz-options { display: flex; flex-direction: column; gap: 12px; width: 100%; }
+.wiz-opt {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  box-sizing: border-box; width: 100%; height: 64px; padding: 0 20px;
+  border: 1.5px solid transparent; border-radius: 16px; background: var(--surface);
+  font-size: 17px; color: var(--fg);
+}
+.wiz-opt.guess { border: 1.5px dashed var(--dim); }
+.wiz-opt.on { border: 1.5px solid var(--cmd); background: color-mix(in srgb, var(--cmd) 18%, var(--surface)); }
+.wiz-opt-tag { font-size: 12px; color: var(--dim); }
+.wiz-test, .wiz-question { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.wiz-ask { font-size: 17px; }
+
+/* mic */
+.wiz-meter { position: relative; width: 100%; height: 14px; margin-bottom: 22px; border-radius: 7px; background: var(--line); }
+.wiz-meter-fill { position: absolute; top: 0; bottom: 0; left: 0; width: 0; border-radius: 7px; background: var(--dim); }
+.wiz-meter-fill.good { background: var(--vocals); }
+.wiz-meter-mark { position: absolute; top: -5px; bottom: -5px; width: 2px; margin-left: -1px; background: var(--fg); }
+.wiz-meter-cap { position: absolute; top: 100%; left: 50%; margin-top: 4px; font-size: 12px; transform: translateX(-50%); color: var(--dim); }
+
+/* latency */
+.wiz-click-dot { width: 28px; height: 28px; border-radius: 50%; background: var(--rec); opacity: 0.15; }
+.wiz-click-dot.listen { background: var(--fg); }
+.wiz-phase { min-height: 28px; font-size: 20px; }
+
+/* drums */
+.wiz-chips { display: flex; gap: 8px; }
+.wiz-chip { padding: 4px 12px; border-radius: 12px; font-size: 13px; color: var(--dim); }
+.wiz-chip.on { background: color-mix(in srgb, var(--drums) 22%, transparent); color: var(--fg); }
+.wiz-circles { display: flex; gap: 16px; }
+.wiz-circle { width: 32px; height: 32px; box-sizing: border-box; border: 2px solid var(--drums); border-radius: 50%; transition: background 100ms ease; }
+.wiz-circle.on { background: var(--drums); }
+.wiz-pads { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; width: 100%; }
+.wiz-pad { display: grid; place-items: center; height: 96px; border-radius: 16px; background: var(--surface); font-size: 17px; color: var(--dim); transition: background 160ms ease, color 160ms ease; }
+.wiz-pad.hit { background: var(--drums); color: var(--bg); transition-duration: 0s; }
+
+/* voice */
+.wiz-pitch { display: block; width: 100%; height: 160px; border-radius: 16px; background: var(--surface); }
+.wiz-note { min-height: 96px; font-size: 64px; font-weight: 700; line-height: 96px; color: var(--vocals); }
+
+/* commands */
+.wiz-hold { width: 132px; height: 132px; box-sizing: border-box; border: 2px solid var(--cmd); border-radius: 50%; background: var(--surface); font-size: 17px; touch-action: none; transition: background 120ms ease, transform 120ms ease; }
+.wiz-hold.on { background: color-mix(in srgb, var(--cmd) 40%, var(--surface)); transform: scale(1.06); }
+.wiz-hold:disabled { border-color: var(--line); color: var(--dim); cursor: default; }

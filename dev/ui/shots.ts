@@ -280,6 +280,206 @@ async function checkSheets(page: Page, url: string): Promise<void> {
   check('settings: clear needs two taps, then clears and closes', armed === 'tap again to clear' && (await actions(page)).includes('clear') && (await page.locator('.sheet-layer.open').count()) === 0, `armed=${armed}`);
 }
 
+
+// ---------- setup wizard ----------
+interface WizHooks {
+  done: boolean[];
+  mounts: Record<string, number>;
+  cleanups: Record<string, number>;
+  levelCalls: number;
+  outputs: string[];
+  testDrumsStops: number;
+  tryCommandStops: number;
+  saves: Array<Record<string, unknown>>;
+}
+const wiz = (page: Page): Promise<WizHooks> => page.evaluate(() => window.__wiz as unknown as WizHooks);
+const wizUrl = (url: string, query: string): string => `${url}dev/ui/wizard.html?${query}`;
+const waitText = (page: Page, text: string, timeout = 15000): Promise<unknown> =>
+  page.waitForFunction((t) => document.querySelector('.wizard')?.textContent?.includes(t), text, { timeout });
+const currentStep = (page: Page): Promise<string | undefined> => page.evaluate(() => document.querySelector<HTMLElement>('.wizard')?.dataset.step);
+
+async function openWizard(page: Page, url: string, query: string): Promise<void> {
+  await page.goto(wizUrl(url, query));
+  await page.waitForFunction(() => window.__wiz?.ready);
+}
+const shot = async (page: Page, name: string): Promise<void> => {
+  await page.screenshot({ path: `${OUT_DIR}${name}.png` });
+  console.log(`shot ${name}`);
+};
+const tapText = (page: Page, text: string): Promise<void> => page.locator('.wizard button', { hasText: text }).first().tap();
+
+async function shootWizard(page: Page, url: string): Promise<void> {
+  // each step alone (also proves single-step launching)
+  await openWizard(page, url, 'steps=listening');
+  await page.locator('.wiz-opt[data-kind="wired"]').tap();
+  await page.getByText('play test tone').tap();
+  await page.waitForTimeout(300);
+  await shot(page, 'wizard-listening');
+
+  await openWizard(page, url, 'steps=mic&t=0.2');
+  await waitText(page, 'now hum');
+  await page.waitForTimeout(1800);
+  await shot(page, 'wizard-mic');
+  await waitText(page, 'your mic sounds good');
+  await shot(page, 'wizard-mic-result');
+
+  await openWizard(page, url, 'steps=latency&ms=400');
+  await page.getByText('start', { exact: true }).tap();
+  await waitText(page, 'clap or say “ta” · 3/12');
+  await page.waitForTimeout(150);
+  await shot(page, 'wizard-latency');
+
+  await openWizard(page, url, 'steps=drums&ms=300');
+  await page.getByText('start', { exact: true }).tap();
+  await page.waitForFunction(() => document.querySelectorAll('.wiz-circle.on').length === 2);
+  await shot(page, 'wizard-drums');
+  await waitText(page, 'got 3');
+  for (const _ of ['snare', 'hat']) {
+    await page.getByText('start', { exact: true }).tap();
+    await waitText(page, 'got 3');
+    await page.waitForTimeout(900);
+  }
+  await page.waitForSelector('.wiz-pads');
+  await page.evaluate(() => document.querySelector('.wiz-pad[data-kind="snare"]')!.classList.add('hit')); // freeze a flash
+  await page.waitForTimeout(100);
+  await shot(page, 'wizard-drums-pad');
+
+  await openWizard(page, url, 'steps=voice');
+  await page.getByText('start', { exact: true }).tap();
+  await waitText(page, 'cents flat');
+  await shot(page, 'wizard-voice');
+  await tapText(page, 'your range');
+  await page.waitForFunction(() => document.querySelector('.wiz-note')?.textContent === 'A2');
+  await shot(page, 'wizard-voice-range');
+
+  await openWizard(page, url, 'steps=commands&t=1');
+  await page.waitForTimeout(500);
+  await shot(page, 'wizard-commands-loading');
+  await page.waitForFunction(() => !document.querySelector<HTMLButtonElement>('.wiz-hold')!.disabled);
+  const hold = await center(page, '.wiz-hold');
+  const cdp = await page.context().newCDPSession(page);
+  await touch(cdp, 'touchStart', hold.x, hold.y);
+  await page.waitForTimeout(400);
+  await shot(page, 'wizard-commands-holding');
+  await touch(cdp, 'touchEnd');
+  await waitText(page, 'heard:');
+  await shot(page, 'wizard-commands');
+}
+
+async function checkWizard(page: Page, url: string, cdp: CDPSession): Promise<void> {
+  await openWizard(page, url, 'ms=30&t=0.1');
+  const dots = await page.locator('.wiz-dot').count();
+  const on = await page.locator('.wiz-dot.on').count();
+  const vis = (sel: string): Promise<string> => page.locator(sel).evaluate((e) => getComputedStyle(e).visibility);
+  check('wizard: 6 dots, first one filled', dots === 6 && on === 1 && (await page.locator('.wiz-dot').first().getAttribute('class'))!.includes('on'));
+  check('wizard: first step has no back; next disabled until a result', (await vis('[data-wiz="back"]')) === 'hidden' && (await page.locator('[data-wiz="next"]').isDisabled()));
+  check('wizard: layer is a no-gesture zone above everything', (await page.locator('.wizard[data-no-gesture]').count()) === 1 && (await page.evaluate(() => Number(getComputedStyle(document.querySelector('.wizard')!).zIndex))) > 100);
+  check('listening: guess outlined and tagged "looks like"', (await page.locator('.wiz-opt.guess[data-kind="bluetooth"] .wiz-opt-tag').textContent()) === 'looks like');
+
+  // gestures must not leak: a 600 ms press on the card, taps on buttons
+  await touch(cdp, 'touchStart', 195, 300);
+  await page.waitForTimeout(600);
+  await touch(cdp, 'touchEnd');
+  await page.locator('.wiz-opt[data-kind="wired"]').tap();
+  await page.getByText('play test tone').tap();
+  await tapText(page, 'no, it’s quiet');
+  check('listening: choosing applies the output; "no" shows the tip and allows next', (await wiz(page)).outputs.join() === 'wired' && (await page.locator('.wiz-result').textContent())!.includes('turn echo cancellation on in ⋯') && !(await page.locator('[data-wiz="next"]').isDisabled()));
+  await tapText(page, 'yes');
+  check('listening: "yes" says good', (await page.locator('.wiz-result').textContent()) === 'good — all set');
+
+  await tap(page, '[data-wiz="next"]');
+  check('next goes to mic; listening cleanup ran once', (await currentStep(page)) === 'mic' && (await wiz(page)).cleanups.listening === 1);
+  check('back is visible now', (await vis('[data-wiz="back"]')) === 'visible');
+  await tap(page, '[data-wiz="back"]');
+  check('back returns to listening (mic cleaned up), next stays enabled (has a result)', (await currentStep(page)) === 'listening' && (await wiz(page)).cleanups.mic === 1 && !(await page.locator('[data-wiz="next"]').isDisabled()));
+  await tap(page, '[data-wiz="skip-step"]');
+  await waitText(page, 'your mic sounds good');
+  check('mic: a loud hum reads "your mic sounds good", next enabled', !(await page.locator('[data-wiz="next"]').isDisabled()));
+  await tap(page, '[data-wiz="skip-step"]'); // mic -> latency (skip works even with a result)
+  const before = (await wiz(page)).levelCalls;
+  await page.waitForTimeout(300);
+  check('mic: cleanup stops the level meter', (await wiz(page)).levelCalls === before && (await wiz(page)).cleanups.mic === 2, `calls ${before} -> ${(await wiz(page)).levelCalls}`);
+
+  await page.getByText('start', { exact: true }).tap();
+  await waitText(page, 'latency 312 ms');
+  check('latency: result text shown, next enabled', !(await page.locator('[data-wiz="next"]').isDisabled()));
+  await tap(page, '[data-wiz="next"]');
+
+  for (const kind of ['kick', 'snare', 'hat']) {
+    await page.getByText('start', { exact: true }).tap();
+    check(`drums: "${kind}" is the highlighted sound`, (await page.locator('.wiz-chip.on').textContent()) === kind);
+    await waitText(page, 'got 3');
+    await page.waitForTimeout(800);
+  }
+  await page.waitForSelector('.wiz-pads');
+  check('drums: after three sounds the test pad shows kick/snare/hat', (await page.locator('.wiz-pad').allTextContents()).join() === 'kick,snare,hat');
+  await page.waitForSelector('.wiz-pad.hit', { timeout: 3000 });
+  check('drums: pad flashes on testDrums hits', true);
+  await tapText(page, 'sounds right');
+  await waitText(page, 'saved');
+  const saved = (await wiz(page)).saves.find((p) => 'drums' in p);
+  check('drums: "sounds right" saves all 9 templates; testDrums stopped', Array.isArray(saved?.drums) && (saved!.drums as unknown[]).length === 9 && (await wiz(page)).testDrumsStops === 1);
+  await tap(page, '[data-wiz="next"]');
+  check('voice step reached; drums cleanup ran', (await currentStep(page)) === 'voice' && (await wiz(page)).cleanups.drums === 1);
+
+  await page.getByText('start', { exact: true }).tap();
+  await waitText(page, 'you sing 33 cents flat — I’ll correct for that');
+  check('voice: offset saved as tuningOffset', (await wiz(page)).saves.some((p) => p.tuningOffset === -0.33));
+  await tapText(page, 'your range');
+  await waitText(page, 'range A2 – E4 saved');
+  const range = (await wiz(page)).saves.find((p) => 'range' in p)?.range as { lo: number; hi: number } | undefined;
+  check('voice: range saved', range?.lo === 45 && range?.hi === 64, JSON.stringify(range));
+  await tap(page, '[data-wiz="next"]');
+
+  await waitText(page, 'voice is still downloading');
+  check('commands: shows download progress, hold disabled', (await page.locator('.wiz-hold').isDisabled()));
+  await page.waitForFunction(() => !document.querySelector<HTMLButtonElement>('.wiz-hold')!.disabled);
+  check('commands: next says "done"', (await page.locator('[data-wiz="next"]').textContent()) === 'done');
+  const hold = await center(page, '.wiz-hold');
+  await touch(cdp, 'touchStart', hold.x, hold.y);
+  await page.waitForTimeout(400);
+  check('commands: holding shows listening…', (await page.locator('.wiz-hold').textContent()) === 'listening…');
+  await touch(cdp, 'touchEnd');
+  await waitText(page, 'heard: “create violin track” ✓');
+  check('commands: heard text shown, tryCommand stopped once', (await wiz(page)).tryCommandStops === 1);
+  check('no gesture leaked to the stage during the whole wizard', (await gestureTypes(page)).length === 0, (await gestureTypes(page)).join());
+  await tap(page, '[data-wiz="next"]');
+  await page.waitForTimeout(100);
+  const h = await wiz(page);
+  check('finishing calls onDone(true) once and removes the layer; commands cleaned up', h.done.join() === 'true' && (await page.locator('.wizard').count()) === 0 && h.cleanups.commands === 1, h.done.join());
+
+  // skip setup
+  await openWizard(page, url, 'ms=30');
+  await tap(page, '[data-wiz="skip-setup"]');
+  const h2 = await wiz(page);
+  check('skip setup calls onDone(false); current step cleaned up', h2.done.join() === 'false' && h2.cleanups.listening === 1 && (await page.locator('.wizard').count()) === 0);
+
+  // a failed command hold, leaving mid-hold stops listening
+  await openWizard(page, url, 'steps=commands&voice=ready&miss=1');
+  const hold2 = await center(page, '.wiz-hold');
+  await touch(cdp, 'touchStart', hold2.x, hold2.y);
+  await page.waitForTimeout(150);
+  await touch(cdp, 'touchEnd');
+  await waitText(page, 'didn’t catch that — try again');
+  check('commands: nothing heard -> "didn’t catch that", next stays disabled', await page.locator('[data-wiz="next"]').isDisabled());
+  await openWizard(page, url, 'steps=commands&voice=error');
+  check('commands: voice error -> "voice isn’t available…" and next allowed', (await page.locator('.wiz-result').textContent())!.startsWith('voice isn’t available on this device') && !(await page.locator('[data-wiz="next"]').isDisabled()));
+  await openWizard(page, url, 'steps=mic&quiet=1&t=0.1');
+  await waitText(page, 'too quiet', 8000);
+  check('mic: a quiet hum reads "too quiet — …iPhone mic in ⋯" and allows next', (await page.locator('.wiz-result').textContent())!.startsWith('too quiet') && !(await page.locator('[data-wiz="next"]').isDisabled()));
+}
+
+async function checkSetupRow(page: Page, url: string): Promise<void> {
+  await openScene(page, url, 'four');
+  await resetLogs(page);
+  await tap(page, '[data-action="settings"]');
+  await page.waitForTimeout(350);
+  const sub = await page.locator('[data-row="setup"] .row-sub').textContent();
+  await page.locator('[data-row="setup"]').tap();
+  await page.waitForTimeout(350);
+  check('settings: Setup row calls openSetup and closes the sheet', sub === 'listening, mic, latency, drums, voice' && (await actions(page)).join() === 'openSetup' && (await page.locator('.sheet-layer.open').count()) === 0, (await actions(page)).join());
+}
+
 async function main(): Promise<void> {
   mkdirSync(OUT_DIR, { recursive: true });
   const dev = await startDev(REPO_ROOT);
@@ -293,10 +493,13 @@ async function main(): Promise<void> {
     await shootScenes(page, dev.url);
     await shootCalibrating(page, dev.url);
     await shootStart(page, dev.url);
+    await shootWizard(page, dev.url);
     await checkStart(page, dev.url);
     await checkGestures(page, dev.url, cdp);
     await checkSheets(page, dev.url);
     await checkLaneMenu(page, dev.url, cdp);
+    await checkSetupRow(page, dev.url);
+    await checkWizard(page, dev.url, cdp);
   } finally {
     await browser.close();
     await dev.close();
