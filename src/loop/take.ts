@@ -10,20 +10,24 @@
 //   every note is clipped to end at the window end (the note open at the end is force-closed there).
 // Exclusions (holds): audio with tc in [from, to) is zeroed before analysis; a note starting inside one is
 // dropped and a note open at its start is cut there (post-filter, because a hold is known only 300 ms late).
-// Autotune: midi = snapMidi(raw) (+ registerShift of the take, computed at commit; the pending overdub track
-// uses the running shift of the notes so far). Phrases: assignPhrases at commit (running for pending).
+// Notes of a melodic take (deriveNotes, the ONE derivation, also used by controller.setSmoothing):
+//   take.raw   = detections in loop positions after inLat/window clipping, fractional midi (stored)
+//   take.notes = assignPhrases(registerShift + snapMidi(cleanNotes(raw, smoothing, L)))
+// Live notes during recording stay raw-ish (snapped, uncleaned); the pending overdub track uses deriveNotes on the
+// notes so far (running shift/phrases).
 // Vocal takes ('vocals'): no analysis; the raw mic audio is the take (buildVocalLoop): corrected by inLat, exactly
 // L long + a VOCAL_TAIL_SEC tail, exclusions zeroed (5 ms ramps), rotated so sample 0 = loop pos 0. The window seam
 // (first take: pos 0; overdub: pos of ts) is crossfaded over the tail length with the audio recorded just after the
 // window end; the tail is a copy of the loop's first samples, so the voice's cycle crossfade is click-free.
 import type {
-  DrumHit, InstrumentKind, MicBlock, MicFeed, Note, NoteSegmenter, OnsetDetector, PitchTracker, RawHit, RawNote, Sec, Take,
+  DrumHit, InstrumentKind, MicBlock, RawLoopNote, MicFeed, Note, NoteSegmenter, OnsetDetector, PitchTracker, RawHit, RawNote, Sec, Take,
 } from '../types.ts';
 import { createPitchTracker } from '../analysis/pitch.ts';
 import { createSegmenter } from '../analysis/segment.ts';
 import { createOnsetDetector } from '../analysis/drums.ts';
-import { registerShift, snapMidi } from '../analysis/autotune.ts';
+import { estimateKey, registerShift, snapMidi, snapToKey, type MusicalKey } from '../analysis/autotune.ts';
 import { assignPhrases, type PlainNote } from '../analysis/phrases.ts';
+import { DEFAULT_SMOOTHING, cleanNotes } from '../analysis/clean.ts';
 import { audioKey } from '../audio/audio-store.ts';
 
 /** first take: analysis starts this long before t0 */
@@ -64,11 +68,33 @@ export interface Analysis {
   snapMidi(midi: number): number;
   registerShift(midis: number[], kind: InstrumentKind): number;
   assignPhrases(notes: PlainNote[], loopLength: Sec, takeId: string): Note[];
+  cleanNotes(raw: RawLoopNote[], smoothing: number, loopLength: Sec): RawLoopNote[];
+  estimateKey(notes: { midi: number; dur: number }[]): MusicalKey | null;
+  snapToKey(midi: number, key: MusicalKey): number;
 }
 
+/** key snap needs this many (cleaned) notes; fewer → nearest semitone */
+export const KEY_SNAP_MIN_NOTES = 6;
+
 export const REAL_ANALYSIS: Analysis = {
-  createPitchTracker, createSegmenter, createOnsetDetector, snapMidi, registerShift, assignPhrases,
+  createPitchTracker, createSegmenter, createOnsetDetector, snapMidi, registerShift, assignPhrases, cleanNotes, estimateKey, snapToKey,
 };
+
+/**
+ * take.notes from take.raw: cleanNotes(smoothing) → snap (≥ KEY_SNAP_MIN_NOTES notes: to the estimated key, after
+ * removing the singer's tuning offset; else nearest semitone) → register fit (per take) → phrases
+ */
+export function deriveNotes(
+  raw: RawLoopNote[], smoothing: number, L: Sec, kind: InstrumentKind, takeId: string, analysis: Partial<Analysis> = {},
+): Note[] {
+  const A: Analysis = { ...REAL_ANALYSIS, ...analysis };
+  const cleaned = A.cleanNotes(raw, smoothing, L);
+  const key = cleaned.length >= KEY_SNAP_MIN_NOTES ? A.estimateKey(cleaned) : null;
+  const snapped = cleaned.map((n) => ({ ...n, midi: key ? A.snapToKey(n.midi, key) : A.snapMidi(n.midi) }));
+  const shift = snapped.length ? A.registerShift(snapped.map((n) => n.midi), kind) : 0;
+  const plain: PlainNote[] = snapped.map((n) => ({ pos: n.pos, dur: n.dur, midi: n.midi + shift, vel: n.vel }));
+  return A.assignPhrases(plain, L, takeId);
+}
 
 export type TakeWindow =
   | { type: 'first'; t0: Sec }
@@ -82,6 +108,8 @@ export interface TakeOptions {
   inLat: Sec;
   window: TakeWindow;
   analysis?: Partial<Analysis>;
+  /** note smoothing (Session.fx.smooth), read when the notes are derived */
+  smoothing?: () => number;
 }
 
 /** corrected-time span [from, to) */
@@ -262,12 +290,10 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
       .filter((h): h is DrumHit => h !== null)
       .sort((a, b) => a.pos - b.pos);
   };
-  const buildNotes = (placed: PlacedNote[], L: Sec): Note[] => {
-    const snapped = placed.map((p) => ({ ...p, midi: A.snapMidi(p.midi) }));
-    const shift = snapped.length ? A.registerShift(snapped.map((n) => n.midi), kind) : 0;
-    const plain: PlainNote[] = snapped.map((n) => ({ pos: n.pos, dur: n.dur, midi: n.midi + shift, vel: n.vel }));
-    return A.assignPhrases(plain, L, takeId);
-  };
+  const toRaw = (placed: PlacedNote[]): RawLoopNote[] =>
+    placed.map((p) => ({ pos: p.pos, dur: p.dur, midi: p.midi, vel: p.vel, ...(p.attack ? { attack: true } : {}) }));
+  const buildNotes = (raw: RawLoopNote[], L: Sec): Note[] =>
+    deriveNotes(raw, opts.smoothing?.() ?? DEFAULT_SMOOTHING, L, kind, takeId, A);
 
   return {
     takeId,
@@ -288,7 +314,7 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
     },
     pendingTake() {
       const L = win.type === 'overdub' ? win.loopLength : 0;
-      return { id: takeId, notes: drums ? [] : buildNotes(placedNotes(), L), hits: drums ? placedHits() : [] };
+      return { id: takeId, notes: melodic ? buildNotes(toRaw(placedNotes()), L) : [], hits: drums ? placedHits() : [] };
     },
     onUpdate(cb) {
       subs.add(cb);
@@ -327,11 +353,9 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
           peaks: loopPeaks(loopPcm, loopPcm.length - Math.round(VOCAL_TAIL_SEC * sr)),
         };
       }
-      return {
-        id: takeId,
-        notes: drums ? [] : buildNotes(placedNotes(end), L),
-        hits: drums ? placedHits(end) : [],
-      };
+      if (drums) return { id: takeId, notes: [], hits: placedHits(end) };
+      const raw = toRaw(placedNotes(end));
+      return { id: takeId, notes: buildNotes(raw, L), hits: [], raw };
     },
     discard() {
       finished = true;
@@ -451,6 +475,8 @@ export interface PlacedNote {
   vel: number;
   /** corrected start (after clipping) */
   tc: Sec;
+  /** RawNote.attack: a new articulation (cleanNotes never merges across it) */
+  attack?: boolean;
 }
 
 function windowOf(c: PlaceContext): { start: Sec; end: Sec; earliest: Sec } {
@@ -478,7 +504,7 @@ export function placeNote(raw: RawNote, c: PlaceContext): PlacedNote | null {
   start = Math.max(start, w.start);
   end = Math.min(end, w.end);
   if (end - start < MIN_NOTE_SEC) return null;
-  return { pos: loopPos(c, start), dur: end - start, midi: raw.midi, vel: raw.vel, tc: start };
+  return { pos: loopPos(c, start), dur: end - start, midi: raw.midi, vel: raw.vel, tc: start, ...(raw.attack ? { attack: true } : {}) };
 }
 
 export function placeHit(raw: RawHit, c: PlaceContext): DrumHit | null {

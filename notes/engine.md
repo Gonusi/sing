@@ -146,6 +146,33 @@ a multi-call glitch (misplaced audio once, v1), and a block re-stamped mid-way k
 late vocal starts on fresh capture taps (20/20 exact on both engines).
 Risk: a glitch that read AHEAD (never observed) would make all later stamps 2.7 ms late.
 
+## Round 2 (2026-10-18): smoothing, key snap, calibration v2, mic choice, deleteTrack
+- **Notes:** melodic takes store `take.raw` (loop positions after inLat/window clipping, fractional midi, `attack` copied from
+  RawNote). `take.notes = deriveNotes(raw, smoothing, L, kind, takeId)` (loop/take.ts, the only derivation): cleanNotes →
+  snap (≥ 6 notes: estimateKey + snapToKey, i.e. the singer's tuning offset removed; else snapMidi) → registerShift → assignPhrases.
+  Live notes stay snapped-uncleaned. `setSmoothing(a)` clamps, writes `fx.smooth` (fx always carries both echo and smooth; no undo
+  point; undo/clear keep fx and undo re-derives the restored takes), re-derives every take with raw, and re-syncs the scheduler with
+  `catchUp: false` (a re-derived note that is already sounding is not started twice). Old takes without raw keep their notes.
+  Real take (dev/replay-take.ts, synth): 27 raw detections → 21 committed notes for ≈ 20 syllables.
+- **Device:** `DEFAULT_DEVICE.ec = true` (stored settings keep theirs); `micId` persisted and validated.
+- **Calibration v2** (audio/latency.ts): 4 listen clicks (2.4 kHz) + 12 measured clicks (1.4 kHz), period 0.65 s. Every onset's
+  phase vs. the grid (window [−0.05, 0.60) s → round trips up to 0.6 s, Bluetooth); pass 1 = densest 120 ms cluster over all
+  phases, pass 2 = per click the phase nearest the cluster centre → median; ok when ≥ 6/12 and IQR < 60 ms. Onset detector: first
+  sample over max(0.004, 5 × floor), 0.3 s warm-up, 150 ms refractory (clap, spoken "ta", suppressed headset mic).
+  `onClick(i, n, phase: 'listen' | 'measure')`, i = 1..n within the phase. Result adds `heard`, `measured` (= 12).
+  Checks: e1 loopback 120 ms (0.04 ms off), e2 450 ms (Bluetooth-like, 0.04 ms off), e3 200 synthetic clap sessions
+  (±30 ms jitter, 3 missed, 3 spurious): all ok, 198/200 within ±20 ms, worst 24.6 ms (the median of 9 such claps alone has σ ≈ 9 ms).
+- **Mic choice:** `mic.listInputs()` (enumerateDevices audioinput; [] in test mode), `mic.setInput(id | null)` → true if that input
+  opened, false = it failed and the default is in use (the choice is kept for next time), `mic.inputId()`.
+  `controller.setDevice({micId})` applies it; the stored micId is applied at boot. Check k2 (Chromium fake devices).
+  **iOS + AirPods (research, not verified on a device):** native apps get A2DP output + built-in mic only with
+  `.playAndRecord` + `.allowBluetoothA2DP` and WITHOUT `.allowBluetooth` (HFP) [Apple forums 784318, 741513]; a page can't set
+  those options, and WebKit bug 282939 (open) reports getUserMedia mostly returning the iPhone mic with AirPods connected and
+  sometimes moving output to the speaker; WebKit 252175 (open) AirPods stop when capture starts. **Owner to test:** with AirPods,
+  (1) the default mic — which label is chosen, does playback sound full-range (A2DP) or telephone-like (HFP)?; (2) choose
+  "iPhone Microphone" — does output stay on the AirPods and full-range?; (3) calibration in both cases (heard n/12, latency).
+- **deleteTrack(id)** (EngineController): see its doc comment; check t1.
+
 ## Known risks
 - **Vocal first replay** misses ≈ 0.13 s after an overdub window (commit latency); a provisional commit before the window end could
   close it, not built. **Beep exclusion** zeroes 80 ms of a vocal take right after the record tap (on speakers the mic hears the beep).

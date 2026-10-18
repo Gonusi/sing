@@ -8,7 +8,8 @@ import { get, set } from 'idb-keyval';
 import type { DeviceSettings, InstrumentKind, Session, Track } from '../types.ts';
 import { INSTRUMENTS } from '../types.ts';
 
-export const DEFAULT_DEVICE: DeviceSettings = { inLat: 0.01, ec: false, calibrated: false };
+/** ec on by default: with EC off, iOS routes playback to the quiet earpiece (WebKit 326286); stored settings keep theirs */
+export const DEFAULT_DEVICE: DeviceSettings = { inLat: 0.01, ec: true, calibrated: false };
 export const SESSION_KEY = 'sing.session.v1';
 export const DEVICE_KEY = 'sing.device.v1';
 /** debounce for session saves */
@@ -45,6 +46,7 @@ function validDevice(d: Partial<DeviceSettings> | undefined): Partial<DeviceSett
   if (typeof d.inLat === 'number' && Number.isFinite(d.inLat)) out.inLat = d.inLat;
   if (typeof d.ec === 'boolean') out.ec = d.ec;
   if (typeof d.calibrated === 'boolean') out.calibrated = d.calibrated;
+  if (typeof d.micId === 'string' || d.micId === null) out.micId = d.micId;
   return out;
 }
 
