@@ -1,13 +1,20 @@
 // [dsp] Offline analyzer: streams WAVs through the live analysis pipeline exactly as the engine does
 // (512-sample blocks, frame counter from 0) and scores them against ground truth when a .json sits next to the WAV.
 //
-// Usage: node dev/analyze.ts [--drums] [--notes] [--verbose] [files...]
-//   no files  → every WAV in dev/fixtures/out/ (generated first with dev/make-fixtures.ts if missing)
+// Usage: node dev/analyze.ts [--drums] [--notes] [--verbose] [--smooth x] [files...]
+//   no files  → every WAV in dev/fixtures/out/ (generated first with dev/make-fixtures.ts if missing) plus the owner's
+//               real takes in dev/fixtures/real/ (local only, gitignored; reported, never gated)
+//   --smooth  → cleanNotes smoothing for the "clean" stage (default DEFAULT_SMOOTHING)
+//   --key     → snap with snapToKey(estimateKey(stage notes)) instead of the nearest semitone (key-snap proposal)
 //   --drums   → run the onset detector on every file (default: only beatbox* files and files whose truth has hits)
 //   --notes   → run the note pipeline on every file (default: every file that is not a drum fixture)
 //   --verbose → list every detection next to the truth
+// Note stages: "live" = what the segmenter returns; "clean" = cleanNotes(live, smoothing) (what a take commits).
 // Scoring:
 //   notes: correct = snapped MIDI equal AND onset within NOTE_ONSET_TOLERANCE_SEC (nearest unmatched detection)
+//   contour truth (real takes, truth.mode = 'contour'): each syllable is matched to the nearest note within
+//     truth.toleranceSec; found = non-optional syllables matched, extra = notes matched to no syllable, intervals =
+//     snapped steps between consecutive matched syllables within truth.intervalToleranceSt of the melody's steps
 //   drums: correct = same kind AND onset within HIT_ONSET_TOLERANCE_SEC
 // Exit code 1 when a threshold below fails (only files with ground truth count; stress-* fixtures, truth.gated = false,
 // are reported with a * but never fail the run).
@@ -16,9 +23,10 @@ import { basename, join } from 'node:path';
 import { createOnsetDetector } from '../src/analysis/drums.ts';
 import { createPitchTracker } from '../src/analysis/pitch.ts';
 import { createSegmenter } from '../src/analysis/segment.ts';
-import { snapMidi } from '../src/analysis/autotune.ts';
+import { estimateKey, snapMidi, snapToKey } from '../src/analysis/autotune.ts';
+import { cleanNotes, DEFAULT_SMOOTHING } from '../src/analysis/clean.ts';
 import type { RawHit, RawNote } from '../src/types.ts';
-import { FIXTURE_OUT_DIR, makeFixtures, type FixtureTruth } from './make-fixtures.ts';
+import { FIXTURE_OUT_DIR, makeFixtures, type ContourSyllable, type FixtureTruth, type NoteStage } from './make-fixtures.ts';
 import { readWavMono } from './wav.ts';
 
 // ---------- constants ----------
@@ -30,7 +38,10 @@ const MAX_MEAN_ONSET_ERROR_SEC = 0.03;
 const MIN_DRUM_ACCURACY = 0.85;
 const MAX_DRUM_EXTRA_FRACTION = 0.1;
 const MIN_SPEED_X_REALTIME = 20;
-const NAME_COL = 26;
+const NAME_COL = 30;
+const REAL_DIR = join(import.meta.dirname, 'fixtures', 'real');
+const DEFAULT_CONTOUR_TOLERANCE_SEC = 0.08;
+const DEFAULT_INTERVAL_TOLERANCE_ST = 1;
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
 // ---------- types ----------
@@ -119,6 +130,12 @@ export function runDrums(samples: Float32Array, sampleRate: number): { hits: Tim
   return { hits, seconds: (performance.now() - t0) / 1000 };
 }
 
+/** the commit stage: cleanNotes on the live notes, treating file time as loop position (a first take) */
+export function cleanStage(notes: TimedNote[], smoothing: number, durationSec: number): TimedNote[] {
+  const raw = notes.map((n) => ({ pos: n.t, dur: n.dur, midi: n.midi, vel: n.vel, attack: (n as { attack?: boolean }).attack }));
+  return cleanNotes(raw, smoothing, durationSec).map((n) => ({ t: n.pos, dur: n.dur, midi: n.midi, vel: n.vel, emittedAt: Infinity }));
+}
+
 // ---------- scoring ----------
 /** greedy nearest-onset matching within `tol`; returns det index per truth index (-1 = none) */
 function matchByTime(truthT: number[], detT: number[], tol: number): number[] {
@@ -138,7 +155,15 @@ function matchByTime(truthT: number[], detT: number[], tol: number): number[] {
   });
 }
 
-function scoreNotes(truth: FixtureTruth['notes'], notes: TimedNote[], verbose: boolean): NoteScore {
+type Snap = (midi: number) => number;
+
+/** the snap used for scoring: nearest semitone, or (--key) the take's estimated key */
+function snapperFor(notes: TimedNote[], useKey: boolean): { snap: Snap; key: string } {
+  const key = useKey ? estimateKey(notes) : null;
+  return key ? { snap: (m) => snapToKey(m, key), key: key.name } : { snap: snapMidi, key: '' };
+}
+
+function scoreNotes(truth: FixtureTruth['notes'], notes: TimedNote[], verbose: boolean, snap: Snap = snapMidi): NoteScore {
   const match = matchByTime(truth.map((n) => n.t), notes.map((n) => n.t), NOTE_ONSET_TOLERANCE_SEC);
   const score: NoteScore = { gt: truth.length, det: notes.length, correct: 0, wrongPitch: 0, missed: 0, extra: 0, onsetErrors: [], finalDelays: [] };
   const matched = new Set<number>();
@@ -152,7 +177,7 @@ function scoreNotes(truth: FixtureTruth['notes'], notes: TimedNote[], verbose: b
     matched.add(j);
     const d = notes[j];
     score.onsetErrors.push(Math.abs(d.t - gt.t));
-    const ok = snapMidi(d.midi) === gt.midi;
+    const ok = snap(d.midi) === gt.midi;
     if (ok) score.correct++;
     else score.wrongPitch++;
     if (verbose || !ok) {
@@ -168,6 +193,73 @@ function scoreNotes(truth: FixtureTruth['notes'], notes: TimedNote[], verbose: b
     console.log(`    EXTRA det ${d.t.toFixed(3)} midi ${d.midi.toFixed(2)} (${noteName(d.midi)}) dur ${d.dur.toFixed(3)} vel ${d.vel.toFixed(2)}`);
   });
   return score;
+}
+
+export interface ContourScore {
+  syllables: number;
+  found: number;
+  optionalFound: number;
+  extra: number;
+  intervals: number;
+  intervalsOk: number;
+}
+
+export function scoreContour(truth: FixtureTruth, notes: TimedNote[], verbose: boolean, snap: Snap = snapMidi): ContourScore {
+  const syl: ContourSyllable[] = truth.syllables ?? [];
+  const tol = truth.toleranceSec ?? DEFAULT_CONTOUR_TOLERANCE_SEC;
+  const itol = truth.intervalToleranceSt ?? DEFAULT_INTERVAL_TOLERANCE_ST;
+  // required syllables claim their notes first, optional ones take what is left
+  const order = syl.map((_, i) => i).sort((a, b) => Number(!!syl[a].optional) - Number(!!syl[b].optional));
+  const used = new Set<number>();
+  const match = new Array<number>(syl.length).fill(-1);
+  for (const i of order) {
+    let best = -1;
+    let bestErr = tol;
+    notes.forEach((n, j) => {
+      const e = Math.abs(n.t - syl[i].t);
+      if (!used.has(j) && e <= bestErr) {
+        best = j;
+        bestErr = e;
+      }
+    });
+    if (best >= 0) {
+      used.add(best);
+      match[i] = best;
+    }
+  }
+  const s: ContourScore = { syllables: 0, found: 0, optionalFound: 0, extra: 0, intervals: 0, intervalsOk: 0 };
+  let prev = -1;
+  let stepSum = 0;
+  syl.forEach((x, i) => {
+    if (!x.optional) s.syllables++;
+    if (i > 0) stepSum += x.step ?? 0;
+    const j = match[i];
+    let note = '      —';
+    if (j >= 0) {
+      if (x.optional) s.optionalFound++;
+      else s.found++;
+      note = `${notes[j].t.toFixed(3)} ${noteName(snap(notes[j].midi)).padEnd(4)} ${notes[j].midi.toFixed(2)}`;
+      let mark = '';
+      if (prev >= 0) {
+        const got = snap(notes[j].midi) - snap(notes[match[prev]].midi);
+        const ok = Math.abs(got - stepSum) <= itol;
+        s.intervals++;
+        if (ok) s.intervalsOk++;
+        mark = `step ${String(got).padStart(3)} (want ${String(stepSum).padStart(3)})${ok ? '' : '  WRONG'}`;
+      }
+      if (verbose || mark.endsWith('WRONG')) console.log(`    ${String(x.phrase)} ${x.text.padEnd(8)} ${x.t.toFixed(2)}  ${note}  ${mark}`);
+      prev = i;
+      stepSum = 0;
+    } else if (!x.optional) {
+      console.log(`    ${String(x.phrase)} ${x.text.padEnd(8)} ${x.t.toFixed(2)}  MISSED`);
+    }
+  });
+  notes.forEach((n, j) => {
+    if (used.has(j)) return;
+    s.extra++;
+    console.log(`    EXTRA ${n.t.toFixed(3)} ${noteName(n.midi)} ${n.midi.toFixed(2)} dur ${n.dur.toFixed(3)}`);
+  });
+  return s;
 }
 
 function scoreHits(truth: FixtureTruth['hits'], hits: TimedHit[], verbose: boolean): HitScore {
@@ -207,10 +299,8 @@ function listDefaultFiles(): string[] {
     console.log(`no fixtures in ${FIXTURE_OUT_DIR}: generating them (dev/make-fixtures.ts)`);
     makeFixtures(FIXTURE_OUT_DIR);
   }
-  return readdirSync(FIXTURE_OUT_DIR)
-    .filter((f) => f.endsWith('.wav'))
-    .sort()
-    .map((f) => join(FIXTURE_OUT_DIR, f));
+  const wavs = (dir: string) => (existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith('.wav')).sort().map((f) => join(dir, f)) : []);
+  return [...wavs(FIXTURE_OUT_DIR), ...wavs(REAL_DIR)];
 }
 
 function main(): number {
@@ -218,7 +308,10 @@ function main(): number {
   const forceDrums = args.includes('--drums');
   const forceNotes = args.includes('--notes');
   const verbose = args.includes('--verbose');
-  const files = args.filter((a) => !a.startsWith('--'));
+  const smoothIdx = args.indexOf('--smooth');
+  const smoothing = smoothIdx >= 0 ? Number(args[smoothIdx + 1]) : DEFAULT_SMOOTHING;
+  const useKey = args.includes('--key');
+  const files = args.filter((a, i) => !a.startsWith('--') && !(i > 0 && args[i - 1] === '--smooth'));
   const paths = files.length ? files : listDefaultFiles();
 
   const noteRows: string[] = [];
@@ -228,8 +321,10 @@ function main(): number {
   let noteCpuSec = 0;
   let drumAudioSec = 0;
   let drumCpuSec = 0;
-  const sung = { gt: 0, correct: 0, onsetErrors: [] as number[], finalDelays: [] as number[] };
-  const stress = { gt: 0, correct: 0, onsetErrors: [] as number[] };
+  const totals = (): { gt: number; correct: number; extra: number; onsetErrors: number[]; finalDelays: number[] } => ({ gt: 0, correct: 0, extra: 0, onsetErrors: [], finalDelays: [] });
+  const sung: Record<NoteStage, ReturnType<typeof totals>> = { live: totals(), clean: totals() };
+  const stress: Record<NoteStage, ReturnType<typeof totals>> = { live: totals(), clean: totals() };
+  const contourRows: string[] = [];
   const allHitDelays: number[] = [];
 
   for (const path of paths) {
@@ -238,7 +333,7 @@ function main(): number {
     const { sampleRate, samples } = readWavMono(path);
     const audioSec = samples.length / sampleRate;
     const isDrumFixture = name.startsWith('beatbox') || (truth?.hits.length ?? 0) > 0;
-    const isSilence = truth !== null && truth.notes.length === 0 && truth.hits.length === 0;
+    const isSilence = truth !== null && truth.mode !== 'contour' && truth.notes.length === 0 && truth.hits.length === 0;
     const gated = truth?.gated !== false;
     const label = (gated ? name : `${name}*`).padEnd(NAME_COL);
     const doNotes = forceNotes || !isDrumFixture || isSilence;
@@ -246,41 +341,58 @@ function main(): number {
     console.log(`\n${name}  (${sampleRate} Hz, ${audioSec.toFixed(2)} s)${truth ? '  — ' + truth.description : ''}`);
 
     if (doNotes) {
-      const { notes, seconds } = runNotes(samples, sampleRate);
+      const { notes: live, seconds } = runNotes(samples, sampleRate);
       noteAudioSec += audioSec;
       noteCpuSec += seconds;
+      const stages: Record<NoteStage, TimedNote[]> = { live, clean: cleanStage(live, smoothing, audioSec) };
       if (!truth) {
-        for (const n of notes) console.log(`    note ${n.t.toFixed(3)} dur ${n.dur.toFixed(3)} midi ${n.midi.toFixed(2)} ${noteName(n.midi)} vel ${n.vel.toFixed(2)}`);
-        noteRows.push(`${label} ${'-'.padStart(4)} ${String(notes.length).padStart(4)}   (no ground truth)`);
-      } else {
-        const s = scoreNotes(truth.notes, notes, verbose);
-        if (truth.notes.length > 0 && !gated) {
-          stress.gt += s.gt;
-          stress.correct += s.correct;
-          stress.onsetErrors.push(...s.onsetErrors);
-        } else if (truth.notes.length > 0) {
-          sung.gt += s.gt;
-          sung.correct += s.correct;
-          sung.onsetErrors.push(...s.onsetErrors);
-          sung.finalDelays.push(...s.finalDelays);
-        } else if (notes.length > 0 && gated) {
-          failures.push(`${name}: ${notes.length} notes on a fixture that must yield none`);
+        for (const stage of ['live', 'clean'] as const) {
+          console.log(`  ${stage}:`);
+          for (const n of stages[stage]) console.log(`    note ${n.t.toFixed(3)} dur ${n.dur.toFixed(3)} midi ${n.midi.toFixed(2)} ${noteName(n.midi)} vel ${n.vel.toFixed(2)}`);
+          noteRows.push(`${(label + ' ' + stage).padEnd(NAME_COL + 6)} ${'-'.padStart(4)} ${String(stages[stage].length).padStart(4)}   (no ground truth)`);
         }
-        noteRows.push(
-          [
-            label,
-            String(s.gt).padStart(4),
-            String(s.det).padStart(4),
-            String(s.correct).padStart(5),
-            (s.gt ? pct(s.correct / s.gt) : '-').padStart(7),
-            `${ms(mean(s.onsetErrors))}/${ms(maxOf(s.onsetErrors))}`.padStart(11),
-            String(s.extra).padStart(5),
-            String(s.missed).padStart(6),
-            String(s.wrongPitch).padStart(6),
-            `${ms(percentile(s.finalDelays, 0.95))}/${ms(maxOf(s.finalDelays))}`.padStart(13),
-            `${(audioSec / seconds).toFixed(0)}x`.padStart(6),
-          ].join(' '),
-        );
+      } else if (truth.mode === 'contour') {
+        for (const stage of ['live', 'clean'] as const) {
+          const sn = snapperFor(stages[stage], useKey);
+          console.log(`  ${stage}${stage === 'clean' ? ` (smoothing ${smoothing})` : ''}${sn.key ? ` key ${sn.key}` : ''}:`);
+          const c = scoreContour(truth, stages[stage], verbose, sn.snap);
+          contourRows.push(
+            `${(label + ' ' + stage).padEnd(NAME_COL + 6)} syllables ${c.found}/${c.syllables} (+${c.optionalFound} optional)  extra ${c.extra}  notes ${stages[stage].length}  intervals ${c.intervalsOk}/${c.intervals}${sn.key ? `  (key ${sn.key})` : ''}`,
+          );
+        }
+      } else {
+        const gateStages = truth.gateStages ?? ['live', 'clean'];
+        for (const stage of ['live', 'clean'] as const) {
+          const sn = snapperFor(stages[stage], useKey);
+          if (verbose) console.log(`  ${stage}${sn.key ? ` key ${sn.key}` : ''}:`);
+          const s = scoreNotes(truth.notes, stages[stage], verbose, sn.snap);
+          const bucket = truth.notes.length > 0 && gated && gateStages.includes(stage) ? sung[stage] : truth.notes.length > 0 ? stress[stage] : null;
+          if (bucket) {
+            bucket.gt += s.gt;
+            bucket.correct += s.correct;
+            bucket.extra += s.extra;
+            bucket.onsetErrors.push(...s.onsetErrors);
+            bucket.finalDelays.push(...s.finalDelays);
+          } else if (truth.notes.length === 0 && stages[stage].length > 0 && gated) {
+            failures.push(`${name} ${stage}: ${stages[stage].length} notes on a fixture that must yield none`);
+          }
+          const ungatedStage = gated && truth.notes.length > 0 && !gateStages.includes(stage);
+          noteRows.push(
+            [
+              `${label.trimEnd()}${ungatedStage ? '*' : ''} ${stage}`.padEnd(NAME_COL + 6),
+              String(s.gt).padStart(4),
+              String(s.det).padStart(4),
+              String(s.correct).padStart(5),
+              (s.gt ? pct(s.correct / s.gt) : '-').padStart(7),
+              `${ms(mean(s.onsetErrors))}/${ms(maxOf(s.onsetErrors))}`.padStart(11),
+              String(s.extra).padStart(5),
+              String(s.missed).padStart(6),
+              String(s.wrongPitch).padStart(6),
+              (stage === 'live' ? `${ms(percentile(s.finalDelays, 0.95))}/${ms(maxOf(s.finalDelays))}` : '-').padStart(13),
+              (stage === 'live' ? `${(audioSec / seconds).toFixed(0)}x` : '').padStart(6),
+            ].join(' '),
+          );
+        }
       }
     }
 
@@ -327,23 +439,29 @@ function main(): number {
 
   if (noteRows.length) {
     console.log('\nNOTES');
-    console.log('fixture'.padEnd(NAME_COL) + '   gt  det    ok       %  onset ms mean/max  extra missed pitch  final ms p95/max  speed');
+    console.log('fixture  stage'.padEnd(NAME_COL + 6) + '   gt  det    ok       %  onset ms mean/max  extra missed pitch  final ms p95/max  speed');
     for (const r of noteRows) console.log(r);
-    if (sung.gt > 0) {
-      const acc = sung.correct / sung.gt;
-      const meanErr = mean(sung.onsetErrors);
+    for (const stage of ['live', 'clean'] as const) {
+      const t = sung[stage];
+      if (t.gt === 0) continue;
+      const acc = t.correct / t.gt;
+      const meanErr = mean(t.onsetErrors);
       console.log(
-        `sung total: ${sung.correct}/${sung.gt} = ${pct(acc)} correct, onset error mean ${ms(meanErr)} ms max ${ms(maxOf(sung.onsetErrors))} ms, ` +
-          `finalisation delay after note end p95 ${ms(percentile(sung.finalDelays, 0.95))} ms max ${ms(maxOf(sung.finalDelays))} ms`,
+        `sung total ${stage}: ${t.correct}/${t.gt} = ${pct(acc)} correct, ${t.extra} extra, onset error mean ${ms(meanErr)} ms max ${ms(maxOf(t.onsetErrors))} ms` +
+          (stage === 'live' ? `, finalisation delay after note end p95 ${ms(percentile(t.finalDelays, 0.95))} ms max ${ms(maxOf(t.finalDelays))} ms` : ` (smoothing ${smoothing})`),
       );
-      if (acc < MIN_NOTE_ACCURACY) failures.push(`notes: ${pct(acc)} correct < ${pct(MIN_NOTE_ACCURACY)}`);
-      if (meanErr >= MAX_MEAN_ONSET_ERROR_SEC) failures.push(`notes: mean onset error ${ms(meanErr)} ms >= ${ms(MAX_MEAN_ONSET_ERROR_SEC)} ms`);
+      if (acc < MIN_NOTE_ACCURACY) failures.push(`notes ${stage}: ${pct(acc)} correct < ${pct(MIN_NOTE_ACCURACY)}`);
+      if (meanErr >= MAX_MEAN_ONSET_ERROR_SEC) failures.push(`notes ${stage}: mean onset error ${ms(meanErr)} ms >= ${ms(MAX_MEAN_ONSET_ERROR_SEC)} ms`);
     }
-    if (stress.gt > 0) {
-      console.log(
-        `stress total (not gated): ${stress.correct}/${stress.gt} = ${pct(stress.correct / stress.gt)} correct, onset error mean ${ms(mean(stress.onsetErrors))} ms max ${ms(maxOf(stress.onsetErrors))} ms`,
-      );
+    for (const stage of ['live', 'clean'] as const) {
+      const t = stress[stage];
+      if (t.gt === 0) continue;
+      console.log(`stress / ungated ${stage}: ${t.correct}/${t.gt} = ${pct(t.correct / t.gt)} correct, ${t.extra} extra, onset error mean ${ms(mean(t.onsetErrors))} ms max ${ms(maxOf(t.onsetErrors))} ms`);
     }
+  }
+  if (contourRows.length) {
+    console.log('\nREAL TAKES (contour truth, not gated)');
+    for (const r of contourRows) console.log(r);
   }
   if (hitRows.length) {
     console.log('\nDRUMS');

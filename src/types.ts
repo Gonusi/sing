@@ -50,6 +50,8 @@ export interface RawLoopNote {
   dur: Sec;
   midi: number;
   vel: number;
+  /** see RawNote.attack */
+  attack?: boolean;
 }
 
 /** One recorded take. Drum tracks use `hits`, vocal tracks use `audio` + `peaks`, all others use `notes`. */
@@ -89,6 +91,8 @@ export interface DeviceSettings {
   /** getUserMedia echoCancellation */
   ec: boolean;
   calibrated: boolean;
+  /** chosen audio input deviceId (null/missing = browser default, e.g. a Bluetooth headset's mic) */
+  micId?: string | null;
 }
 
 // ---------- raw detections (analysis output, context time, not yet snapped) ----------
@@ -100,6 +104,8 @@ export interface RawNote {
   /** fractional MIDI (median over the note), not snapped */
   midi: number;
   vel: number;
+  /** true when the note starts a new articulation (after silence or an energy dip); smoothing never merges across it */
+  attack?: boolean;
 }
 
 export interface RawHit {

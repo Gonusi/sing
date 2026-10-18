@@ -58,3 +58,9 @@ Dev pages: `${url}dev/ui/index.html?s=<scene>[&t=<loopPos seconds>]`, `${url}dev
 1. While the sheet is open the slider is behind the backdrop, so `getEcho()` on close only matters for changes made by voice/engine; fine to keep or drop.
 2. The hint's second line was left unchanged as briefed.
 3. During a first vocal take the waveform's empty tail draws 1 px baseline bars (min height), looks like a flat line; kept.
+
+## Note smoothing row (branch shell3)
+- ⋯ sheet: row "Note smoothing" right after Echo cancellation (`createSmoothingRow`, sheet.ts): div `.row.row-slider`, range 0..1 step 0.05, classes `echo-slider smooth-slider` (same CSS as the echo slider, width 100% via `.row-slider .smooth-slider`). Re-read from `getSmoothing()` on every sheet open (row `reset`); `input` -> `setSmoothing` live.
+- `SheetActions` gains `getSmoothing(): number` and `setSmoothing(amount: number): void`. main.ts must wire them (tsc fails there until it does).
+- Echo cancellation sub-line is now "on: phone speaker · off: headphones (cleanest vocals)" (wraps to two lines at 390 px).
+- Selector note: top-bar echo slider is `.topbar .echo-slider` (`.echo-slider` alone now matches both); smoothing is `.smooth-slider`. shots.ts: `checkSmoothing`.

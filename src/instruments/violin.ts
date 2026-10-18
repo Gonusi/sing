@@ -33,8 +33,9 @@ const RETIRE_MARGIN: Sec = 0.005;
 const CURVE_GAP: Sec = 0.001;
 const LOWPASS_HZ = 7000;
 const DRY_LEVEL = 1;
-/** room level after the convolver's own normalisation */
-const ROOM_WET = 0.18;
+/** room level after the convolver's own normalisation. 0: the global echo slider is the only reverb (owner: "always a
+ * bit of echo despite the slider") — the room convolver stays wired so a later per-instrument room is one number. */
+const ROOM_WET = 0;
 /** fixed output trim (sample RMS 0.12 × velGain → about −20 dBFS RMS per note) */
 const OUTPUT_LEVEL = 1;
 
@@ -55,7 +56,7 @@ export function createViolinVoice(ctx: Ctx): Voice {
   const wet = ctx.createGain();
   wet.gain.value = ROOM_WET;
   lowpass.connect(dry).connect(gate.node);
-  lowpass.connect(room).connect(wet).connect(gate.node);
+  if (ROOM_WET > 0) lowpass.connect(room).connect(wet).connect(gate.node); // a convolver costs CPU even into gain 0
   gate.node.connect(output);
 
   const phrases = createPhraseVoice({

@@ -12,6 +12,7 @@ import { preloadInstruments } from './instruments/index.ts';
 import { playBlip } from './instruments/blip.ts';
 import { createRecognizer } from './voice/recognizer.ts';
 import { describeCommand } from './voice/grammar.ts';
+import { DEFAULT_SMOOTHING } from './analysis/clean.ts';
 import { mountStart } from './ui/start.ts';
 import { mountInput } from './ui/input.ts';
 import { mountLanes } from './ui/lanes.ts';
@@ -78,6 +79,8 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
     create: (kind: InstrumentKind) => run({ type: 'create', kind }, ctx.currentTime),
     getEcho: () => controller.session.fx?.echo ?? 0,
     setEcho: (amount) => controller.setEcho(amount),
+    getSmoothing: () => controller.session.fx?.smooth ?? DEFAULT_SMOOTHING,
+    setSmoothing: (amount) => controller.setSmoothing(amount),
     getEc: () => controller.device.ec,
     setEc: async (ec) => {
       await controller.setDevice({ ec });
