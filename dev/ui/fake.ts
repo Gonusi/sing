@@ -214,6 +214,7 @@ let mic: string | null = null;
 const clickMs = Number(params.get('ci') ?? 100);
 mountSheets(stage, {
   create: (kind) => log(`create:${kind}`),
+  openSetup: () => log('openSetup'),
   getEcho: () => echo,
   setEcho: (amount) => {
     echo = amount;
