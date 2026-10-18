@@ -388,6 +388,22 @@ button:focus-visible { outline: 2px solid var(--cmd); outline-offset: 2px; }
 .row[aria-checked="true"] .switch::after { transform: translateX(20px); }
 
 .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--rec); opacity: 0; }
+.pulse-dot.listen { background: var(--fg); }
+.row-mic { cursor: default; }
+.mic-select {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 55%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  font-size: 14px;
+  text-overflow: ellipsis;
+}
+.mic-select:focus-visible { outline: 2px solid var(--cmd); outline-offset: 2px; }
 .level { width: 120px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .level-fill { display: block; width: 0; height: 100%; background: var(--fg); }
 

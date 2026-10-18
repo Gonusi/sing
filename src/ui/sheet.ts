@@ -1,6 +1,6 @@
 // [shell] Top bar (title, ＋ instrument picker, ⋯ settings) and the two bottom sheets they open.
 // Everything here is data-no-gesture: taps never reach the record/stop gesture layer.
-// The top bar also holds the echo slider (0..1, live). Settings rows: echo cancellation, note smoothing slider, calibrate latency, audio probe, export last take, clear session, info, credits.
+// The top bar also holds the echo slider (0..1, live). Settings rows: echo cancellation, microphone picker, note smoothing slider, calibrate latency, audio probe, export last take, clear session, info, credits.
 import { INSTRUMENTS } from '../types.ts';
 import type { InstrumentKind } from '../types.ts';
 
@@ -14,8 +14,14 @@ export interface SheetActions {
   setSmoothing(amount: number): void;
   getEc(): boolean;
   setEc(ec: boolean): Promise<void>;
-  /** runs the clap-along; onClick fires per click so the sheet can pulse; resolves with a short result text */
-  calibrate(onClick: (i: number, n: number) => void): Promise<string>;
+  /** runs the clap-along; onClick fires per click (listen = first clicks to tune in, measure = clap or say "ta") so the sheet can pulse; resolves with a short result text */
+  calibrate(onClick: (i: number, n: number, phase: 'listen' | 'measure') => void): Promise<string>;
+  /** audio inputs (id + label; label may be empty) */
+  listMics(): Promise<{ id: string; label: string }[]>;
+  /** the input asked for (null = default) */
+  getMic(): string | null;
+  /** switch input (null = default); resolves false when it failed and the default is used instead */
+  setMic(id: string | null): Promise<boolean>;
   /** start the audio probe (tone while the mic is open); returns live level + stop */
   probe(): { level(): number; stop(): void };
   /** raw mic WAV of the last take, or null */
@@ -34,6 +40,9 @@ const LETTERS: Record<InstrumentKind, string> = { drums: 'D', violin: 'V', synth
 const EXPORT_EMPTY_MS = 1500;
 const CLEAR_ARM_MS = 3000;
 const PULSE_MS = 300;
+const MIC_FAIL_MS = 2000;
+const MIC_SUB = 'iPhone mic keeps Bluetooth headphones in high quality — try it';
+const MIC_FAIL_SUB = 'couldn’t switch — using default';
 const DOWNLOAD_REVOKE_MS = 10_000;
 
 // ---------- small DOM helpers ----------
@@ -140,6 +149,7 @@ interface SettingsRow {
 interface RowParts {
   root: HTMLButtonElement;
   title: HTMLElement;
+  sub: HTMLElement | null;
   end: HTMLElement;
 }
 
@@ -148,10 +158,11 @@ function makeRow(titleText: string, subText?: string): RowParts {
   const main = el('div', 'row-main');
   const title = el('div', 'row-title', titleText);
   main.append(title);
-  if (subText) main.append(el('div', 'row-sub', subText));
+  const sub = subText ? el('div', 'row-sub', subText) : null;
+  if (sub) main.append(sub);
   const end = el('div', 'row-end');
   root.append(main, end);
-  return { root, title, end };
+  return { root, title, sub, end };
 }
 
 function createEcRow(actions: SheetActions): SettingsRow {
@@ -203,19 +214,25 @@ function createSmoothingRow(actions: SheetActions): SettingsRow {
 
 function createCalibrateRow(actions: SheetActions): SettingsRow {
   const LABEL = 'Calibrate latency';
-  const { root, title, end } = makeRow(LABEL);
-  const count = el('span');
+  const IDLE_SUB = 'clap or say “ta” along with 16 clicks';
+  const RUN_SUB = 'wear your headphones; any mic works';
+  const { root, title, sub, end } = makeRow(LABEL, IDLE_SUB);
+  const subLine = sub!;
+  root.dataset.row = 'calibrate';
   const dot = el('span', 'pulse-dot');
-  end.append(count, dot);
+  end.append(dot);
   let busy = false;
-  function pulse(i: number, n: number): void {
-    count.textContent = `${i}/${n}`;
+  function pulse(i: number, n: number, phase: 'listen' | 'measure'): void {
+    title.textContent = phase === 'listen' ? `listen… ${i}/${n}` : `clap or say “ta” · ${i}/${n}`;
+    dot.classList.toggle('listen', phase === 'listen');
     dot.animate([{ opacity: 1, transform: 'scale(1.6)' }, { opacity: 0, transform: 'scale(1)' }], { duration: PULSE_MS });
   }
   root.addEventListener('click', async () => {
     if (busy) return;
     busy = true;
-    title.textContent = 'clap on each click…';
+    title.textContent = 'listen…';
+    subLine.textContent = RUN_SUB;
+    dot.classList.add('listen');
     try {
       title.textContent = await actions.calibrate(pulse);
     } catch (e) {
@@ -223,7 +240,7 @@ function createCalibrateRow(actions: SheetActions): SettingsRow {
       title.textContent = 'calibration failed';
     } finally {
       busy = false;
-      count.textContent = '';
+      subLine.textContent = IDLE_SUB;
     }
   });
   return {
@@ -231,6 +248,59 @@ function createCalibrateRow(actions: SheetActions): SettingsRow {
     reset: () => {
       if (!busy) title.textContent = LABEL;
     },
+  };
+}
+
+function createMicRow(actions: SheetActions): SettingsRow {
+  const root = noGesture(el('div', 'row row-mic'));
+  const main = el('div', 'row-main');
+  const sub = el('div', 'row-sub', MIC_SUB);
+  main.append(el('div', 'row-title', 'Microphone'), sub);
+  const select = noGesture(el('select', 'mic-select'));
+  select.setAttribute('aria-label', 'microphone');
+  root.append(main, select);
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let seq = 0; // a late listMics() from an earlier open must not overwrite a newer list
+  function resetSub(): void {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    sub.textContent = MIC_SUB;
+  }
+  async function refresh(): Promise<void> {
+    const mine = ++seq;
+    let mics: { id: string; label: string }[] = [];
+    try {
+      mics = await actions.listMics();
+    } catch (e) {
+      console.error(e);
+    }
+    if (mine !== seq) return;
+    const options = [new Option('default', ''), ...mics.map((m, i) => new Option(m.label || `microphone ${i + 1}`, m.id))];
+    select.replaceChildren(...options);
+    select.value = actions.getMic() ?? '';
+    if (select.value !== (actions.getMic() ?? '')) select.value = '';
+  }
+  select.addEventListener('change', async () => {
+    resetSub();
+    let ok = false;
+    try {
+      ok = await actions.setMic(select.value || null);
+    } catch (e) {
+      console.error(e);
+    }
+    if (ok) return;
+    select.value = '';
+    sub.textContent = MIC_FAIL_SUB;
+    timer = setTimeout(resetSub, MIC_FAIL_MS);
+  });
+  return {
+    root,
+    reset: () => {
+      resetSub();
+      refresh().catch((e: unknown) => console.error(e));
+    },
+    stop: resetSub,
   };
 }
 
@@ -401,6 +471,7 @@ export function mountSheets(root: HTMLElement, actions: SheetActions): () => voi
   });
   rows.push(
     createEcRow(actions),
+    createMicRow(actions),
     createSmoothingRow(actions),
     createCalibrateRow(actions),
     probe,

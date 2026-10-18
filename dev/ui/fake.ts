@@ -1,5 +1,5 @@
 // [shell] Dev page: mounts the real UI modules on a scripted fake UiView. Pick the scene with ?s=<name>:
-//   empty | four | five (four + vocals) | recording | recording-vocals | overdub | command | toast | settings | plus | menu (lane menu on violin) | many (12 lanes, scrolls)
+//   empty | four | five (four + vocals) | recording | recording-vocals | overdub | command | toast | settings | calibrating (settings + calibration running; ?ci=<ms> click period) | plus | menu (lane menu on violin) | many (12 lanes, scrolls)
 // ?t=<seconds> freezes the loop position (used for stable screenshots). Actions only log.
 // Test hooks: window.__gestures (every Gesture emitted), window.__actions (every action called), window.__ready.
 import '../../src/ui/style.css';
@@ -179,6 +179,7 @@ const SCENES: Record<string, () => UiView> = {
   toast: toastView,
   many: manyView,
   settings: fourView,
+  calibrating: fourView,
   plus: fourView,
   menu: fourView,
 };
@@ -208,6 +209,9 @@ mountStatus(stage, { view });
 let ec = false;
 let echo = 0.4;
 let smoothing = 0.5;
+let mic: string | null = null;
+/** ?ci=<ms> sets the fake calibration click period (slow for the mid-measure screenshot) */
+const clickMs = Number(params.get('ci') ?? 100);
 mountSheets(stage, {
   create: (kind) => log(`create:${kind}`),
   getEcho: () => echo,
@@ -227,18 +231,30 @@ mountSheets(stage, {
   },
   calibrate: (onClick) =>
     new Promise((resolve) => {
-      const clicks = 4;
+      const LISTEN = 4;
+      const MEASURE = 12;
       let i = 0;
       log('calibrate');
       const timer = setInterval(() => {
         i += 1;
-        onClick(i, clicks);
-        if (i === clicks) {
+        if (i <= LISTEN) onClick(i, LISTEN, 'listen');
+        else onClick(i - LISTEN, MEASURE, 'measure');
+        if (i === LISTEN + MEASURE) {
           clearInterval(timer);
-          resolve('latency 42 ms (±6)');
+          resolve('latency 312 ms · heard 9/12');
         }
-      }, 400);
+      }, clickMs);
     }),
+  listMics: async () => [
+    { id: 'iphone', label: 'iPhone Microphone' },
+    { id: 'airpods', label: 'AirPods Pro' },
+  ],
+  getMic: () => mic,
+  setMic: async (id) => {
+    mic = id;
+    log(`setMic:${id}`);
+    return true;
+  },
   probe: () => {
     log('probe');
     return { level: () => 0.02 + 0.015 * Math.sin(performance.now() / 150), stop: () => log('probe-stop') };
@@ -256,7 +272,8 @@ mountInput(stage, {
   onGesture: (g) => window.__gestures.push(g),
 });
 
-if (scene === 'settings') document.querySelector<HTMLElement>('[data-action="settings"]')!.click();
+if (scene === 'settings' || scene === 'calibrating') document.querySelector<HTMLElement>('[data-action="settings"]')!.click();
+if (scene === 'calibrating') document.querySelector<HTMLElement>('[data-row="calibrate"]')!.click();
 if (scene === 'plus') document.querySelector<HTMLElement>('[data-action="new-track"]')!.click();
 if (scene === 'menu') {
   // a real hold on the violin strip (pointer events), so the scene exercises the same path as a finger
