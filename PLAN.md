@@ -274,13 +274,13 @@ Design rule from the owner: users are super-amateurs humming roughly in tune →
 - [x] contract: Take.raw (RawLoopNote), Session.fx.smooth, Controller.setSmoothing, analysis/clean.ts stub (coordinator)
 - [x] dsp: cleanNotes (scoop/tail absorption, hysteresis, stable onsets), scoop fixtures, real-take replay through loop/take.ts, key snap proposal — real take 27→20 notes (20 syllables), intervals 19/19 within ±1 st; DEFAULT_SMOOTHING 0.55; volume gate 0.008→0.002
 - [x] synth register fit G3–E4 (hummed E2–E3 was inaudible on the phone speaker); attack flag in the contract
-- [ ] engine: copy `attack` in placeNote; key snap (estimateKey + snapToKey, takes with ≥ 6 notes) in the note derivation
-- [ ] engine: store raw, derive notes via cleanNotes, re-derive on setSmoothing, EC default on
+- [x] engine: copy `attack` in placeNote; key snap (estimateKey + snapToKey, takes with ≥ 6 notes) in the note derivation
+- [x] engine: store raw, derive notes via cleanNotes, re-derive on setSmoothing, EC default on
 - [x] shell: smoothing slider in ⋯, EC sub-line text
 
-- [ ] engine: calibration v2 (16 clicks ≈92 bpm, 4 listen + 12 measured, grid-phase cluster up to ~0.6 s round trip, clap or "ta", ≥6/12, IQR < 60 ms, "heard n/12"); mic choice (DeviceSettings.micId, list inputs)
-- [ ] shell: calibration instructions + per-click listen/clap feedback; Microphone row in ⋯
-- [ ] lane menu: hold a lane's letter → mute/unmute, delete (shell4 running; engine deleteTrack queued)
+- [x] engine: calibration v2 (16 clicks ≈92 bpm, 4 listen + 12 measured, grid-phase cluster up to ~0.6 s round trip, clap or "ta", ≥6/12, IQR < 60 ms, "heard n/12"); mic choice (DeviceSettings.micId, list inputs)
+- [x] shell: calibration instructions + per-click listen/clap feedback; Microphone row in ⋯
+- [x] lane menu: hold a lane's letter → mute/unmute, delete (shell4 running; engine deleteTrack queued)
 - [ ] owner (iPhone): does choosing the iPhone mic keep AirPods playback in high quality?
 
 ## Known issues
