@@ -64,3 +64,9 @@ Dev pages: `${url}dev/ui/index.html?s=<scene>[&t=<loopPos seconds>]`, `${url}dev
 - `SheetActions` gains `getSmoothing(): number` and `setSmoothing(amount: number): void`. main.ts must wire them (tsc fails there until it does).
 - Echo cancellation sub-line is now "on: phone speaker · off: headphones (cleanest vocals)" (wraps to two lines at 390 px).
 - Selector note: top-bar echo slider is `.topbar .echo-slider` (`.echo-slider` alone now matches both); smoothing is `.smooth-slider`. shots.ts: `checkSmoothing`.
+
+## Lane menu (branch shell4)
+- Hold a strip button >= 450 ms (`HOLD_MS`, lanes.ts) -> popover from `src/ui/lanemenu.ts` (`openLaneMenu`): title "<kind> track", "mute"/"unmute" -> `onToggle`, "delete" (--rec) -> `onDelete`. Release of the hold does not select/toggle; pointerleave/pointercancel cancel the timer; `navigator.vibrate?.(10)`.
+- `LanesOptions` gains `onDelete(trackId: string): void`. main.ts must wire it (tsc fails there until it does).
+- Backdrop closes only on a click that started with a pointerdown on it (the opening press ends on the backdrop, its click must not close the menu). Escape closes.
+- Selectors: `.lane-menu`, `.lane-menu-title`, `.lane-menu-item` (`.danger` = delete), `.lane-menu-backdrop`. dev scene `menu` (hold on the violin strip); shots.ts `checkLaneMenu`. Screenshot: `dev/ui/out/menu.png`.

@@ -1,8 +1,10 @@
 // [shell] Canvas lanes: one horizontal band per track, notes/hits, live take, playhead, left strip (select, on/off).
+// Holding a strip button 450 ms opens the lane menu (lanemenu.ts: mute/unmute, delete) instead of the tap action.
 // One <canvas class="lanes"> is redrawn every animation frame from view(). The strip buttons are DOM <button>s
 // (data-no-gesture) laid over the canvas; the canvas only paints their circle + letter.
 // Colours are read from the CSS tokens in style.css (single source of truth).
 // Coordinates: "lane-local" x starts at the lane's left edge (LANE_MARGIN_X); all other x are canvas css px.
+import { openLaneMenu } from './lanemenu.ts';
 import type { DrumKind, InstrumentKind, Note, Sec, Track, UiView } from '../types.ts';
 
 type OpenNote = NonNullable<UiView['openNote']>;
@@ -11,6 +13,8 @@ export interface LanesOptions {
   view: () => UiView;
   onSelect(trackId: string): void;
   onToggle(trackId: string): void;
+  /** holding a strip button (lane menu -> delete) */
+  onDelete(trackId: string): void;
 }
 
 // ---------- layout constants (css px) ----------
@@ -24,6 +28,8 @@ const STRIP_CIRCLE_D = 32;
 const STRIP_CIRCLE_X = 28; // lane-local centre
 const BODY_LEFT = 64; // lane-local
 const BODY_RIGHT_PAD = 12;
+const HOLD_MS = 450; // holding a strip button this long opens the lane menu
+const HOLD_HAPTIC_MS = 10;
 
 // ---------- lane look ----------
 const FILL_ALPHA = 0.08;
@@ -405,13 +411,49 @@ export function mountLanes(root: HTMLElement, opts: LanesOptions): () => void {
     else opts.onSelect(trackId);
   }
 
+  // Hold: pointerdown arms a timer; if it fires while still pressed the lane menu opens and the release's click is swallowed.
+  // `swallowClick` is cleared at the next pointerdown, so a release that never produces a click on the strip cannot eat a later tap.
+  let swallowClick = false;
+  let closeMenu: (() => void) | null = null;
+
+  function openMenu(trackId: string, button: HTMLElement): void {
+    const track = opts.view().session.tracks.find((t) => t.id === trackId);
+    if (!track) return;
+    try {
+      navigator.vibrate?.(HOLD_HAPTIC_MS);
+    } catch {
+      /* haptics are optional */
+    }
+    closeMenu?.();
+    closeMenu = openLaneMenu(root, button, track, opts);
+  }
+
+  function armHold(button: HTMLButtonElement, trackId: string): void {
+    let timer = 0;
+    const cancel = (): void => window.clearTimeout(timer);
+    button.addEventListener('pointerdown', (e) => {
+      swallowClick = false;
+      if (e.button !== 0) return;
+      cancel();
+      timer = window.setTimeout(() => {
+        swallowClick = true;
+        openMenu(trackId, button);
+      }, HOLD_MS);
+    });
+    for (const type of ['pointerup', 'pointerleave', 'pointercancel']) button.addEventListener(type, cancel);
+  }
+
   function createStrip(track: Track): HTMLButtonElement {
     const button = document.createElement('button');
     button.className = 'lane-strip';
     button.dataset.noGesture = '';
     button.dataset.id = track.id;
     button.setAttribute('aria-label', `${track.kind} lane`);
-    button.addEventListener('click', () => handleStripClick(track.id));
+    button.addEventListener('click', () => {
+      if (swallowClick) swallowClick = false;
+      else handleStripClick(track.id);
+    });
+    armHold(button, track.id);
     content.append(button);
     return button;
   }
@@ -468,6 +510,7 @@ export function mountLanes(root: HTMLElement, opts: LanesOptions): () => void {
 
   return () => {
     cancelAnimationFrame(raf);
+    closeMenu?.();
     resizeObserver.disconnect();
     area.remove();
     strips.clear();

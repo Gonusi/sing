@@ -1,5 +1,5 @@
 // [shell] Dev page: mounts the real UI modules on a scripted fake UiView. Pick the scene with ?s=<name>:
-//   empty | four | five (four + vocals) | recording | recording-vocals | overdub | command | toast | settings | plus | many (12 lanes, scrolls)
+//   empty | four | five (four + vocals) | recording | recording-vocals | overdub | command | toast | settings | plus | menu (lane menu on violin) | many (12 lanes, scrolls)
 // ?t=<seconds> freezes the loop position (used for stable screenshots). Actions only log.
 // Test hooks: window.__gestures (every Gesture emitted), window.__actions (every action called), window.__ready.
 import '../../src/ui/style.css';
@@ -180,8 +180,15 @@ const SCENES: Record<string, () => UiView> = {
   many: manyView,
   settings: fourView,
   plus: fourView,
+  menu: fourView,
 };
-const view = SCENES[scene] ?? fourView;
+const baseSceneView = SCENES[scene] ?? fourView;
+/** tracks removed by onDelete (the fake session keeps them out of every later view) */
+const deleted = new Set<string>();
+const view = (): UiView => {
+  const v = baseSceneView();
+  return deleted.size === 0 ? v : { ...v, session: { ...v.session, tracks: v.session.tracks.filter((t) => !deleted.has(t.id)) } };
+};
 
 // ---------- mount (same order as src/main.ts) ----------
 const stage = document.createElement('div');
@@ -192,6 +199,10 @@ mountLanes(stage, {
   view,
   onSelect: (id) => log(`select:${id}`),
   onToggle: (id) => log(`toggle:${id}`),
+  onDelete: (id) => {
+    deleted.add(id);
+    log(`delete:${id}`);
+  },
 });
 mountStatus(stage, { view });
 let ec = false;
@@ -247,4 +258,13 @@ mountInput(stage, {
 
 if (scene === 'settings') document.querySelector<HTMLElement>('[data-action="settings"]')!.click();
 if (scene === 'plus') document.querySelector<HTMLElement>('[data-action="new-track"]')!.click();
+if (scene === 'menu') {
+  // a real hold on the violin strip (pointer events), so the scene exercises the same path as a finger
+  const press = (): void => {
+    const strip = document.querySelector<HTMLElement>('.lane-strip[data-id="violin"]');
+    if (!strip || strip.offsetHeight === 0) return void requestAnimationFrame(press);
+    strip.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'touch' }));
+  };
+  requestAnimationFrame(press);
+}
 window.__ready = true;
