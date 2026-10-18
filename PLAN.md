@@ -276,6 +276,10 @@ Design rule from the owner: users are super-amateurs humming roughly in tune →
 - [ ] engine: store raw, derive notes via cleanNotes, re-derive on setSmoothing, EC default on
 - [x] shell: smoothing slider in ⋯, EC sub-line text
 
+- [ ] engine: calibration v2 (16 clicks ≈92 bpm, 4 listen + 12 measured, grid-phase cluster up to ~0.6 s round trip, clap or "ta", ≥6/12, IQR < 60 ms, "heard n/12"); mic choice (DeviceSettings.micId, list inputs)
+- [ ] shell: calibration instructions + per-click listen/clap feedback; Microphone row in ⋯
+- [ ] owner (iPhone): does choosing the iPhone mic keep AirPods playback in high quality?
+
 ## Known issues
 - (fixed locally 2026-10-17, not yet deployed) WebKit advances currentTime mid-task: vocal starts lost a render quantum (2.7 ms late) → 10 ms start margin; the states.spec failure was a two-clock-reads test artefact.
 

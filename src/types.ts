@@ -89,6 +89,8 @@ export interface DeviceSettings {
   /** getUserMedia echoCancellation */
   ec: boolean;
   calibrated: boolean;
+  /** chosen audio input deviceId (null/missing = browser default, e.g. a Bluetooth headset's mic) */
+  micId?: string | null;
 }
 
 // ---------- raw detections (analysis output, context time, not yet snapped) ----------
