@@ -18,6 +18,8 @@ import { startDev } from '../lib/serve.ts';
 import { launch, type Engine } from '../lib/browser.ts';
 import { encodeWav16 } from '../../src/audio/wav-encode.ts';
 import { CLICK_PERIOD_SEC, MEASURE_CLICKS, evaluate, phasesOf } from '../../src/audio/latency.ts';
+import { createTakeRecorder, deriveNotes } from '../../src/loop/take.ts';
+import type { MicFeed, OnsetDetectorOptions } from '../../src/types.ts';
 
 interface Row {
   engine: Engine;
@@ -991,6 +993,145 @@ async function checkDeleteTrack(page: Page): Promise<void> {
     JSON.stringify({ d1: d.afterDel1, d2: d.afterDel2, d3: d.afterDel3, undo: d.afterUndo, logged: d.logged }));
 }
 
+// ---------- u: setup wizard API (injected audio; dsp parts stub-tolerant) ----------
+
+async function checkSetup(page: Page): Promise<void> {
+  const d = await page.evaluate(async () => {
+    const e = (window as unknown as W).__eng;
+    const S = e.setup;
+    await e.c.clearSession();
+    const sr = e.sampleRate;
+    // u1 level + noise floor: noise with RMS 0.01
+    e.setup.level();
+    e.injectSamples(e.noise(5, Math.round(1.6 * sr), 0.01 * Math.sqrt(3)), e.now() + 0.05);
+    await e.sleep(0.6);
+    const level = S.level();
+    const floor = await S.noiseFloor(0.6);
+    // u2 playTone: master only (echo 1 → still no tail)
+    e.c.setEcho(1);
+    await e.sleep(0.3);
+    const capP = e.captureNode(e.engine.limiter, 1.0);
+    await e.sleep(0.05);
+    const t0 = e.now();
+    S.playTone(69, 0.3);
+    const cap = await capP;
+    e.c.setEcho(0);
+    const rmsIn = (a: number, b: number) => {
+      const i0 = Math.max(0, Math.round((t0 + a) * sr) - cap.frame);
+      const i1 = Math.min(cap.pcm.length, Math.round((t0 + b) * sr) - cap.frame);
+      let s2 = 0;
+      for (let i = i0; i < i1; i++) s2 += cap.pcm[i] * cap.pcm[i];
+      return i1 > i0 ? Math.sqrt(s2 / (i1 - i0)) : 0;
+    };
+    const toneRms = rmsIn(0.05, 0.25);
+    const tailRms = rmsIn(0.4, 0.8);
+    // u3 teachDrum: 4 kicks from the beatbox fixture (any 4 hits — the fixture's sounds are the "user's")
+    await e.loadFixture('beatbox-basic');
+    const hitsSeen: number[] = [];
+    e.injectFixture('beatbox-basic', 0, 5.6, e.now() + 0.1);
+    const templates = await S.teachDrum('kick', 4, (i) => hitsSeen.push(i), 6);
+    await e.sleep(3.6); // let the fixture finish
+    // u4 testDrums
+    const kinds: string[] = [];
+    const stop = S.testDrums(templates, (k) => kinds.push(k));
+    e.injectFixture('beatbox-basic', 0, 5.6, e.now() + 0.1);
+    await e.sleep(5.8);
+    stop();
+    // u5 singAlong: a hum 0.3 st sharp of C4
+    const pitches: (number | null)[] = [];
+    const hz = 440 * 2 ** ((60.3 - 69) / 12);
+    e.injectSamples(new Float32Array(Math.round(2.6 * sr)).map((_, i) => 0.3 * Math.sin((2 * Math.PI * hz * i) / sr)), e.now() + 0.02);
+    const sing = await S.singAlong(60, 2.5, (m) => pitches.push(m));
+    // u6 captureRange: a held E3
+    const hz2 = 440 * 2 ** ((52 - 69) / 12);
+    e.injectSamples(new Float32Array(Math.round(2.1 * sr)).map((_, i) => 0.3 * Math.sin((2 * Math.PI * hz2 * i) / sr)), e.now() + 0.02);
+    const held = await S.captureRange('low', 2, () => {});
+    // u7 tryCommand: heard, not run
+    const stateBefore = e.c.state;
+    const tr = S.tryCommand();
+    const during = S.tryingCommand();
+    await e.sleep(0.3);
+    const heardCmd = await tr.stop();
+    // u8 output
+    const guess = S.guessOutput();
+    await S.applyOutput('bluetooth');
+    const bt = { ...S.device() };
+    await S.applyOutput('speaker');
+    const sp = { ...S.device() };
+    return {
+      level, floor, toneRms, tailRms, templates, hitsSeen, kinds, sing, voiced: pitches.filter((p) => p !== null).length,
+      medianPitch: [...pitches.filter((p): p is number => p !== null)].sort((a, b) => a - b)[Math.floor(pitches.filter((p) => p !== null).length / 2)] ?? null,
+      held, stateBefore, stateAfter: e.c.state, during, heardCmd, ran: e.ranCommands.length, guess, bt, sp,
+    };
+  });
+  check('u1 setup level + noiseFloor read the mic RMS (±25%)', Math.abs(d.level - 0.01) < 0.0025 && Math.abs(d.floor - 0.01) < 0.0025,
+    `level ${d.level.toFixed(4)} floor ${d.floor.toFixed(4)} (noise RMS 0.0100)`);
+  check('u2 playTone is heard on the output and never reaches the echo bus (echo 1: no tail)', d.toneRms > 0.02 && d.tailRms < 1e-4,
+    `tone RMS ${d.toneRms.toFixed(4)}, after it ${d.tailRms.toExponential(1)}`);
+  const featuresReal = d.templates.some((t) => t.features.length > 0);
+  check('u3 teachDrum collects N templates from live hits (onHit 1..N)', d.templates.length === 4 && d.templates.every((t) => t.kind === 'kick') && JSON.stringify(d.hitsSeen) === '[1,2,3,4]',
+    `${d.templates.length} templates, onHit ${d.hitsSeen.join(',')}, features ${featuresReal ? d.templates[0].features.length : 'stub (empty)'}`);
+  check('u4 testDrums classifies live hits until stopped', d.kinds.length >= 12, `${d.kinds.length} hits: ${d.kinds.map((k) => k[0]).join('')}`);
+  check('u5 singAlong: live pitch ≈ 60.3; offset +0.3 st', d.voiced > 50 && d.medianPitch !== null && Math.abs(d.medianPitch - 60.3) < 0.1 &&
+    d.sing.ok && Math.abs(d.sing.offset - 0.3) < 0.05, `voiced ${d.voiced}, live median ${d.medianPitch?.toFixed(2)}, offset ${d.sing.offset.toFixed(3)} spread ${d.sing.spread.toFixed(3)}`);
+  check('u6 captureRange: held E3', d.held === 52, `held ${d.held}`);
+  check('u7 tryCommand: heard "record", NOT run (main.ts guard), state unchanged', d.during && d.heardCmd.text === 'record' && d.heardCmd.command?.type === 'record' && d.ran === 0 && d.stateAfter === d.stateBefore,
+    `during ${d.during}, heard ${JSON.stringify(d.heardCmd)}, ran ${d.ran}, state ${d.stateBefore}→${d.stateAfter}`);
+  check('u8 guessOutput + applyOutput (bluetooth: ec off, built-in mic if listed; speaker: ec on)', d.guess === 'speaker' && d.bt.output === 'bluetooth' && d.bt.ec === false &&
+    d.sp.output === 'speaker' && d.sp.ec === true && (d.sp.micId ?? null) === null, `guess ${d.guess}; bt ${JSON.stringify({ ec: d.bt.ec, micId: d.bt.micId })}; speaker ${JSON.stringify({ ec: d.sp.ec, micId: d.sp.micId })}`);
+}
+
+/** teach kick/snare/hat from the fixture's isolated hits (3 each), then the test pad classifies the whole fixture */
+async function checkTaughtDrums(page: Page): Promise<void> {
+  const d = await page.evaluate(async () => {
+    const e = (window as unknown as W).__eng;
+    const truth = await e.loadFixture('beatbox-basic');
+    const templates: { kind: 'kick' | 'snare' | 'hat'; features: number[] }[] = [];
+    for (const kind of ['kick', 'snare', 'hat'] as const) {
+      const hits = truth.hits.filter((h) => h.kind === kind).slice(0, 3);
+      const p = e.setup.teachDrum(kind, 3, () => {}, 4);
+      hits.forEach((h, i) => e.injectFixture('beatbox-basic', h.t - 0.05, h.t + 0.25, e.now() + 0.1 + i * 0.4));
+      templates.push(...(await p));
+      await e.sleep(0.3);
+    }
+    // a room-noise bed (−45 dBFS, like the fixture's own) starts before the pad listens: the test mic is otherwise
+    // digital silence, and silence → the fixture's noise is a real onset at the injection start
+    const sr = e.sampleRate;
+    e.injectSamples(e.noise(9, Math.round(1.0 * sr), 10 ** (-45 / 20) * Math.sqrt(3)), e.now() + 0.02);
+    await e.sleep(0.5);
+    const kinds: string[] = [];
+    const stop = e.setup.testDrums(templates, (k) => kinds.push(k));
+    e.injectFixture('beatbox-basic', 0, 5.6, e.now() + 0.1);
+    await e.sleep(5.8);
+    stop();
+    return { taught: templates.map((t) => t.kind[0]).join(''), kinds: kinds.map((k) => k[0]).join(''), want: truth.hits.map((h) => h.kind[0]).join('') };
+  });
+  check('u11 taught templates: 3 × kick/snare/hat, then the test pad classifies the fixture exactly', d.taught === 'kkkssshhh' && d.kinds === d.want,
+    `taught ${d.taught}; heard ${d.kinds} want ${d.want}`);
+}
+
+/** pure (Node): the learned profile in the note derivation, and the drum templates reaching the detector */
+function checkLearnedSettings(): void {
+  const id = { cleanNotes: (r: { pos: number; dur: number; midi: number; vel: number }[]) => r, registerShift: () => 0, assignPhrases: (n: { pos: number; dur: number; midi: number; vel: number }[]) => n.map((x) => ({ ...x, phrase: 'p', legatoNext: false })) };
+  const raw = [{ pos: 0, dur: 0.4, midi: 59.45, vel: 0.8 }, { pos: 0.5, dur: 0.4, midi: 61.45, vel: 0.8 }];
+  const plain = deriveNotes(raw, 0.5, 2, 'violin', 'k', id).map((n) => n.midi);
+  const tuned = deriveNotes(raw, 0.5, 2, 'violin', 'k', id, { tuningOffset: -0.4 }).map((n) => n.midi);
+  const sung = [{ pos: 0, dur: 0.4, midi: 54, vel: 0.8 }]; // a low voice (36–48) singing near the top: stays high
+  const noRange = deriveNotes(sung, 0.5, 2, 'synth', 'k').map((n) => n.midi);
+  const withRange = deriveNotes(sung, 0.5, 2, 'synth', 'k', {}, { range: { lo: 36, hi: 48 } }).map((n) => n.midi);
+  check('u9 derivation: tuningOffset −0.4 turns 59.45/61.45 into 60/62; synth with range 36–48: shift from the range centre',
+    JSON.stringify(plain) === '[59,61]' && JSON.stringify(tuned) === '[60,62]' && noRange[0] === 54 && withRange[0] === 66,
+    `plain ${plain} tuned ${tuned}; synth 54 → ${noRange} (take median) / ${withRange} (range centre 42)`);
+  let seen: OnsetDetectorOptions | undefined;
+  const feed: MicFeed = { sampleRate: 48000, subscribe: () => () => {}, read: (from: number) => ({ t: from, samples: new Float32Array(0) }), inject: () => {} };
+  const templates = [{ kind: 'kick' as const, features: [1, 2, 3] }];
+  createTakeRecorder({
+    mic: feed, kind: 'drums', takeId: 'k', inLat: 0, window: { type: 'first', t0: 0 }, drumTemplates: templates,
+    analysis: { createOnsetDetector: (o) => ((seen = o), { push: () => [], close: () => [], reset: () => {} }) },
+  });
+  check('u10 drum takes hand the taught templates to the onset detector', seen?.templates === templates, `options ${JSON.stringify(seen)}`);
+}
+
 // ---------- h, i: probe and capture ----------
 
 async function checkProbeCapture(page: Page): Promise<void> {
@@ -1037,6 +1178,9 @@ async function runEngine(engine: Engine, url: string): Promise<void> {
       ['v8', () => checkLateVocalStart(page)],
       ['s', () => checkSmoothing(page)],
       ['t', () => checkDeleteTrack(page)],
+      ['u', () => checkSetup(page)],
+      ['u11', () => checkTaughtDrums(page)],
+      ['u9', async () => checkLearnedSettings()],
     ];
     for (const [name, fn] of steps) {
       if (ONLY && !ONLY.includes(name)) continue;

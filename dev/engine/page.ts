@@ -13,6 +13,8 @@ import { createScheduler, type SchedEvent } from '../../src/loop/clock.ts';
 import { preloadInstruments } from '../../src/instruments/index.ts';
 import { fakeAnalysis } from './fake-analysis.ts';
 import { createVocalVoice } from '../../src/audio/vocal-voice.ts';
+import { createSetupApi, type EngineSetupApi } from '../../src/app/setup.ts';
+import type { Recognizer } from '../../src/types.ts';
 
 export interface Eng {
   booted: boolean;
@@ -63,6 +65,10 @@ export interface Eng {
    * returns per start the frame error of the rendered content vs. the promised (when, offset) mapping
    */
   lateVocalStarts(n: number, busyMs: number): Promise<number[]>;
+  /** the setup wizard API on this page's engine, with a fake recogniser (hears `fakeHeard` on every hold) */
+  setup: EngineSetupApi;
+  /** commands a main.ts-like onCommand handler ran (it skips them while setup.tryingCommand()) */
+  ranCommands: Command[];
   /** stored vocal audio keys in IndexedDB */
   audioKeys(): Promise<string[]>;
   /** onChange calls since boot */
@@ -293,8 +299,42 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
       return { onsetFrame: r.frame + onset, expectedFrame: Math.round(at * ctx.sampleRate), frames: r.pcm.length };
     },
   });
+  const recognizer = fakeRecognizer(ctx);
+  const ranCommands: Command[] = [];
+  const setup = createSetupApi({ engine, mic, controller: c, recognizer });
+  recognizer.onCommand((cmd) => {
+    if (setup.tryingCommand()) return; // the one-line guard main.ts needs
+    ranCommands.push(cmd);
+  });
+  Object.assign(eng, { setup, ranCommands });
   eng.booted = true;
   out.textContent = `booted: ${ctx.sampleRate} Hz, outLat ${(engine.outLat() * 1000).toFixed(1)} ms`;
+}
+
+/** hears "record" 50 ms after begin(); onCommand early, end() resolves it */
+function fakeRecognizer(ctx: BaseAudioContext): Recognizer {
+  const partials = new Set<(t: string) => void>();
+  const commands = new Set<(c: Command) => void>();
+  return {
+    status: 'ready',
+    load: async () => {},
+    begin() {
+      setTimeout(() => {
+        partials.forEach((cb) => cb('record'));
+        commands.forEach((cb) => cb({ type: 'record' }));
+      }, 50);
+      void ctx;
+    },
+    end: async () => ({ type: 'record' }),
+    onCommand(cb) {
+      commands.add(cb);
+      return () => void commands.delete(cb);
+    },
+    onPartial(cb) {
+      partials.add(cb);
+      return () => void partials.delete(cb);
+    },
+  };
 }
 
 function sliceBuffer(ctx: BaseAudioContext, src: AudioBuffer, from: Sec, to: Sec): AudioBuffer {

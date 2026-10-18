@@ -184,6 +184,7 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
   /** Session.fx with both settings filled in (echo and smooth always travel together) */
   const withFx = (sess: Session, patch: Partial<NonNullable<Session['fx']>>): Session =>
     ({ ...sess, fx: { echo: echoOf(sess), smooth: smoothOf(sess), ...patch } });
+  const profileOf = () => ({ tuningOffset: device.tuningOffset, range: device.range });
   /** re-derive every melodic take's notes from its raw detections (old takes without raw keep their notes) */
   const rederive = (sess: Session, smoothing: number): Session => {
     const L = sess.loopLength;
@@ -192,7 +193,7 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     const tracks = sess.tracks.map((t) => {
       if (t.kind === 'drums' || t.kind === 'vocals' || !t.take?.raw) return t;
       changedAny = true;
-      return { ...t, take: { ...t.take, notes: deriveNotes(t.take.raw, smoothing, L, t.kind, t.take.id, deps.analysis) } };
+      return { ...t, take: { ...t.take, notes: deriveNotes(t.take.raw, smoothing, L, t.kind, t.take.id, deps.analysis, profileOf()) } };
     });
     return changedAny ? { ...sess, tracks } : sess;
   };
@@ -312,6 +313,8 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     const rec = createTakeRecorder({
       mic, kind: lane.kind, takeId: newId('k'), inLat: device.inLat, window, analysis: deps.analysis,
       smoothing: () => smoothOf(store.current),
+      profile: profileOf,
+      drumTemplates: device.drums,
     });
     const t: ActiveTake = {
       rec, trackId: lane.id, mode: window.type, start: window.type === 'first' ? window.t0 : window.ts,
@@ -722,8 +725,15 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
         const opened = await mic.setInput(patch.micId ?? null);
         if (!opened) log('error', { message: 'chosen mic failed, default in use', micId: patch.micId });
       }
+      const before = device;
       device = { ...device, ...patch };
       log('device', { ...device });
+      // a newly learned voice profile re-derives the takes (like a smoothing change)
+      if (before.tuningOffset !== device.tuningOffset || JSON.stringify(before.range) !== JSON.stringify(device.range)) {
+        store.set(rederive(store.current, smoothOf(store.current)));
+        syncVoices(false);
+        changed();
+      }
       await saveDevice(device);
     },
     async clearSession() {

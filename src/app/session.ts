@@ -47,6 +47,11 @@ function validDevice(d: Partial<DeviceSettings> | undefined): Partial<DeviceSett
   if (typeof d.ec === 'boolean') out.ec = d.ec;
   if (typeof d.calibrated === 'boolean') out.calibrated = d.calibrated;
   if (typeof d.micId === 'string' || d.micId === null) out.micId = d.micId;
+  if (d.output === 'wired' || d.output === 'bluetooth' || d.output === 'speaker') out.output = d.output;
+  if (typeof d.tuningOffset === 'number' && Number.isFinite(d.tuningOffset)) out.tuningOffset = d.tuningOffset;
+  if (d.range && Number.isFinite(d.range.lo) && Number.isFinite(d.range.hi)) out.range = { lo: d.range.lo, hi: d.range.hi };
+  if (Array.isArray(d.drums)) out.drums = d.drums.filter((t) => t && typeof t.kind === 'string' && Array.isArray(t.features));
+  if (typeof d.setupDone === 'boolean') out.setupDone = d.setupDone;
   return out;
 }
 

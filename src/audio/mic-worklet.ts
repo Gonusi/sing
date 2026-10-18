@@ -22,15 +22,16 @@ interface WorkletProcessor {
 const BLOCK_SIZE = 512;
 /** samples per capture-tap message */
 const CAPTURE_CHUNK = 8192;
-/** currentFrame further than this from our count is a real discontinuity → re-sync at once */
+/** currentFrame this far AHEAD of our count is a real discontinuity → re-sync at once */
 const RESYNC_FRAMES = 256;
 
 /**
- * Frame of each render quantum. Counts process() calls; the observed glitch only ever reads currentFrame BEHIND
- * the true frame (content = stamp + 128, never the reverse), so the count only moves forward:
- *   currentFrame behind the count (< 2 quanta)  → a glitched read: ignore it;
- *   currentFrame ahead of it (< 2 quanta)       → our count was behind (the first sync read a glitch): 'correct';
- *   ≥ RESYNC_FRAMES either way                  → a real discontinuity: 'jump'.
+ * Frame of each render quantum. Counts process() calls; the observed glitches only ever read currentFrame BEHIND
+ * the true frame (by 1 or 2 quanta; content = stamp + 128/256, never the reverse), and the real clock never runs
+ * backwards, so the count only moves forward:
+ *   currentFrame behind the count (any amount)   → a glitched read: ignore it;
+ *   currentFrame ahead of it (< RESYNC_FRAMES)    → our count was behind (the first sync read a glitch): 'correct';
+ *   ahead by ≥ RESYNC_FRAMES                      → a real discontinuity (node not processed for a while): 'jump'.
  */
 class FrameClock {
   private next = -1;
@@ -38,7 +39,7 @@ class FrameClock {
   change: 'none' | 'correct' | 'jump' = 'none';
   at(current: number, n: number): number {
     this.change = 'none';
-    if (this.next < 0 || Math.abs(current - this.next) >= RESYNC_FRAMES) {
+    if (this.next < 0 || current - this.next >= RESYNC_FRAMES) {
       if (this.next >= 0) this.change = 'jump';
       this.next = current;
     } else if (current > this.next) {
