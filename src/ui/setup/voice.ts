@@ -114,9 +114,11 @@ export const voiceStep: SetupStep = {
     const note = el('div', 'wiz-note'); // live note name during the range sub-step
     note.hidden = true;
     const start = button('start', 'go');
-    const rangeBtn = button('set my range (optional)');
+    const rangeBtn = button('your range');
     rangeBtn.hidden = true;
-    ui.body.append(view.canvas, note, start, rangeBtn);
+    const buttons = el('div', 'wiz-pair'); // range is optional: "next" is already enabled after the first result
+    buttons.append(start, rangeBtn);
+    ui.body.append(view.canvas, note, buttons);
     queueMicrotask(() => view.reset()); // first paint once attached
 
     async function sing(): Promise<void> {

@@ -43,7 +43,7 @@ window.__gestures = [];
 let quietPhase = false;
 let device: DeviceSettings = { inLat: 0.12, ec: false, calibrated: false };
 let missesLeft = params.has('miss') ? 1 : 0;
-const loadStart = performance.now();
+let loadStart = 0; // the fake download starts the first time someone asks about the voice
 const LOAD_MS = 2500;
 
 const fakeTemplate = (kind: DrumKind, i: number): DrumTemplate => ({ kind, features: [i, i + 1, i + 2] });
@@ -132,6 +132,7 @@ const api: SetupApi = {
     },
   }),
   voiceStatus: () => {
+    if (loadStart === 0) loadStart = performance.now();
     const f = Math.min(1, (performance.now() - loadStart) / LOAD_MS);
     const fixed: Record<string, VoiceStatus> = { ready: 'ready', error: 'error', off: 'off' };
     const status = fixed[voiceMode] ?? (f >= 1 ? 'ready' : 'loading');

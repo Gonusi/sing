@@ -75,3 +75,24 @@ Dev pages: `${url}dev/ui/index.html?s=<scene>[&t=<loopPos seconds>]`, `${url}dev
 - `SheetActions.calibrate(onClick(i, n, phase 'listen'|'measure'))`: row title shows "listen… i/4" / "clap or say “ta” · i/12" then the result text; sub-line "wear your headphones; any mic works" while running (idle: "clap or say “ta” along with 16 clicks"); dot --fg in listen, --rec in measure. Row has `data-row="calibrate"`.
 - New row "Microphone" (`createMicRow`, div `.row.row-mic`, `.mic-select`) after Echo cancellation; list refreshed on every sheet open; `SheetActions` gains `listMics()`, `getMic()`, `setMic(id|null): Promise<boolean>`; false -> select back to default, sub-line "couldn’t switch — using default" for 2 s. main.ts must wire them (tsc fails there until it does).
 - dev/ui: scene `calibrating` (`?ci=<ms>` fake click period, default 100), fake mics "iPhone Microphone"/"AirPods Pro"; shots.ts `checkMic`, `checkCalibrate`, shot `calibrating.png`. Screenshots: `/Users/kasparasanusauskas/Projects/personal/sing-worktrees/shell5/dev/ui/out/{settings,calibrating}.png`.
+
+## Setup wizard (branch shell6)
+- `src/ui/wizard.ts` `mountWizard(root, api, {steps?, onDone(completed)})` returns an idempotent unmount. Full-screen `.wizard` (z 200, `data-no-gesture`, safe areas): dots + "skip setup" on top, centred `.wiz-card` (wizard writes the step title, the step fills the rest), bottom grid back (visibility-hidden on step 1) / "skip this step" / next ("done" on the last). `onDone` runs the current step's cleanup first; the caller still unmounts.
+- Steps: `src/ui/setup/{listening,mic,latency,drums,voice,commands}.ts`, order in `setup/index.ts` (`ALL_STEPS`); shared contract + helpers (`SetupStep`, `buildCard`, `setResult`, `createLife` = cleanup + "still alive?" guard for async results, `frames`, `wait`, `midiName`) in `setup/kit.ts`. `done(ok)` enables "next" (ok=false = tried, problems shown; next still allowed). A step already done keeps next enabled when revisited with back.
+- ⋯ sheet row "Setup" (`data-row="setup"`): closes the sheet, calls `SheetActions.openSetup()` (main.ts must wire it; tsc fails there until it does).
+- Selectors: `.wizard[data-step=<id>]`, `[data-wiz="skip-setup|back|skip-step|next"]`, `.wiz-opt[data-kind]`, `.wiz-circle(.on)`, `.wiz-pad[data-kind](.hit)`, `.wiz-hold`, `.wiz-meter`, `.wiz-result(.bad|.dim)`.
+- Dev: `dev/ui/wizard.html` + `wizard-fake.ts` (fake SetupApi; params `steps=`, `ms=` click/hit period, `t=` wait scale, `voice=loading|ready|error|off`, `miss=1`, `quiet=1`; hooks `window.__wiz`, `window.__gestures`). shots.ts: `shootWizard`, `checkWizard`, `checkSetupRow`.
+- Screenshots (abs): `/Users/kasparasanusauskas/Projects/personal/sing-worktrees/shell6/dev/ui/out/wizard-{listening,mic,mic-result,latency,drums,drums-pad,voice,voice-range,commands-loading,commands-holding,commands}.png`
+
+### Decisions I took (brief did not settle)
+- Step titles: "What are you listening on?", "Mic check", "Latency", "Teach me your drums", "Your voice", "Voice commands"; the brief's sentences are the instruction line.
+- Mic: starts by itself on mount; hum window 4 s; "good" = peak >= 0.05 AND >= 3x the noise floor; meter is sqrt-scaled (mark at sqrt(0.05)); "try again" only after a bad result.
+- Listening: "play test tone" appears after a choice, the "hear it clearly?" question after the tone is pressed; "no" shows the tip and allows next.
+- Drums: >= 1 heard hit accepts a sound (0 -> "didn't hear that", retry); "teach again" restarts from kick and drops templates; "sounds right" stops the pad and saves.
+- Voice: the engine's `singAlong` plays the reference note (UI does not); display is octave-folded; "right on pitch" under 10 cents; `tuningOffset` saved on every ok result; range sub-step is a "your range" button (3 s per note, saved when hi > lo).
+- Commands: hold button needs status 'ready'; 'off'/'error' stop polling and allow next; first "heard" result = done(true).
+- `ALL_STEPS` objects are plain mutable, the dev page wraps their `mount` in place to count cleanups.
+
+### Questions
+1. Is a 4 s hum window / 3x floor rule right for the mic check, or should the engine return a verdict?
+2. The wizard lets the user finish with nothing done (every step skippable); setupDone is set on both onDone(true/false) in main.ts as today.
