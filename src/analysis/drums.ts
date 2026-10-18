@@ -9,7 +9,10 @@
 //   [onset, onset + ATTACK_SEC] is ATTACK_MIN_RISE_DB above the loudest one centred in
 //   [onset − PRE_FROM_SEC, onset − PRE_TO_SEC]. Breaths and decaying tails rise slowly or not at all; per band, so a
 //   quiet hat over louder low room noise still counts. Measured on the fixtures: hats ≥ 8 dB, breaths ≤ 5 dB.
-//   Onset time = centre of the peak frame + ONSET_TIME_OFFSET_SEC.
+//   Onset time = start of the swell: the earliest frame (≤ SWELL_MAX_FRAMES back) still within SWELL_FLOOR_DB of the
+//   hit's loudest frame — the peak frame itself for a sharp hit — + ONSET_TIME_OFFSET_SEC. The attack test is measured
+//   from that onset; a moved-back onset must rise SWELL_MIN_RISE_DB (a hummed "boom" rises 14+ dB over its 30 ms swell,
+//   a breath 5–7 dB).
 // Classification: band powers summed over the FFT frames inside [onset + CLASSIFY_FROM_SEC, onset + CLASSIFY_TO_SEC],
 //   minus the room-noise floor (the quietest NOISE_AVG_FRAMES-frame stretch of the last NOISE_LOOKBACK_SEC); frames
 //   below ACTIVE_FRAME_NOISE_RATIO × the floor are skipped (a 40 ms hat leaves most of the span to room noise). Then:
@@ -17,10 +20,14 @@
 //   hat   if the centroid > HAT_MIN_CENTROID_HZ, or energy > HAT_HIGH_HZ is > HAT_HIGH_RATIO of the total
 //   snare otherwise
 // A hit is returned by the push() whose block reaches the end of its classification span. vel from the peak 10 ms RMS.
+// Options (OnsetDetectorOptions): `captureFeatures` attaches RawHit.features (drum-templates.ts hitFeatures, 80 ms);
+// `templates` classifies by the nearest taught template, falling back to the rules when no template is near or when the
+// rules' kind was not taught. Either option holds each hit until HIT_FEATURE_SEC after its onset (≤ 92 ms delay).
 // close(at) (end of a drum take) force-finishes onsets still waiting, on the audio before `at` (later samples count as
 // silence), returns those hits and resets; hits before `at` are never returned after it.
 import FFT from 'fft.js';
 import type { DrumKind, MicBlock, OnsetDetector, RawHit, Sec, OnsetDetectorOptions } from '../types.ts';
+import { classifyByTemplates, hitFeatures, HIT_FEATURE_SEC } from './drum-templates.ts';
 
 // ---------- constants ----------
 export const ONSET_FFT_SIZE = 512;
@@ -42,6 +49,12 @@ export const ATTACK_MIN_RISE_DB = 6;
 export const PRE_FROM_SEC = 0.04;
 export const PRE_TO_SEC = 0.01;
 export const ONSET_TIME_OFFSET_SEC = 0;
+/** onset refinement for slow swells: walk back from the flux peak while frame power stays above this (dB below the peak) */
+export const SWELL_FLOOR_DB = 9;
+export const SWELL_MAX_FRAMES = 12;
+/** a swell onset must rise this much (booms measured 14–40 dB, breaths 5–7 dB from their walked-back start) */
+export const SWELL_MIN_RISE_DB = 10;
+const SWELL_FLOOR_RATIO = 10 ** (-SWELL_FLOOR_DB / 10);
 export const CLASSIFY_FROM_SEC = 0.01;
 export const CLASSIFY_TO_SEC = 0.07;
 export const NOISE_LOOKBACK_SEC = 1.0;
@@ -173,10 +186,11 @@ export function hitPreSamples(sampleRate: number): number {
 }
 
 const ATTACK_MIN_RISE_POWER = 10 ** (ATTACK_MIN_RISE_DB / 10);
+const SWELL_MIN_RISE_POWER = 10 ** (SWELL_MIN_RISE_DB / 10);
 
-/** true when the hit passes the level gate and the sharp-attack test */
-export function isHit(m: HitMeasure): boolean {
-  return m.gateRms >= HIT_GATE_RMS && m.attackRise >= ATTACK_MIN_RISE_POWER;
+/** true when the hit passes the level gate and the sharp-attack test (stricter for an onset moved back to a swell) */
+export function isHit(m: HitMeasure, swell = false): boolean {
+  return m.gateRms >= HIT_GATE_RMS && m.attackRise >= (swell ? SWELL_MIN_RISE_POWER : ATTACK_MIN_RISE_POWER);
 }
 
 /** loudest frame power below and above HAT_HIGH_HZ */
@@ -318,6 +332,8 @@ interface PendingHit {
   onsetOffset: number;
   /** flux-frame index of the onset peak (the noise floor is taken from frames before it) */
   frameIndex: number;
+  /** the onset was moved back from the flux peak to the start of a swell */
+  swell: boolean;
   t: Sec;
 }
 
@@ -327,7 +343,16 @@ export interface ClosableOnsetDetector extends OnsetDetector {
   close(at: Sec): RawHit[];
 }
 
-export function createOnsetDetector(_opts: OnsetDetectorOptions = {}): ClosableOnsetDetector {
+/** the kind for a hit: templates first (when the rules' kind was taught), the rules otherwise */
+export function decideKind(rulesKind: DrumKind, features: number[] | null, templates: OnsetDetectorOptions['templates']): DrumKind {
+  if (!templates || templates.length === 0 || !features) return rulesKind;
+  if (!templates.some((t) => t.kind === rulesKind)) return rulesKind;
+  return classifyByTemplates(features, templates) ?? rulesKind;
+}
+
+export function createOnsetDetector(opts: OnsetDetectorOptions = {}): ClosableOnsetDetector {
+  const templates = opts.templates && opts.templates.length > 0 ? opts.templates : null;
+  const needFeatures = !!opts.captureFeatures || templates !== null;
   const fa = createFrameAnalyser();
   const ring = new Float32Array(RING_SAMPLES);
   const frameBuf = new Float64Array(ONSET_FFT_SIZE);
@@ -354,7 +379,8 @@ export function createOnsetDetector(_opts: OnsetDetectorOptions = {}): ClosableO
   function restart(frameIndex: number, rate: number): void {
     if (rate !== sampleRate || span.length === 0) {
       pre = hitPreSamples(rate);
-      span = new Float32Array(pre + hitSpanSamples(rate));
+      const after = Math.max(hitSpanSamples(rate), needFeatures ? Math.round(HIT_FEATURE_SEC * rate) : 0);
+      span = new Float32Array(pre + after);
     }
     sampleRate = rate;
     started = true;
@@ -396,10 +422,36 @@ export function createOnsetDetector(_opts: OnsetDetectorOptions = {}): ClosableO
       if (j < p ? fj >= fp : fj > fp) return;
     }
     if (fp <= fluxThreshold(p)) return;
-    const onsetOffset = Math.round(fluxCentre[p & (FLUX_RING - 1)] + ONSET_TIME_OFFSET_SEC * sampleRate);
+    const onsetFrame = swellStart(p);
+    const onsetOffset = Math.round(fluxCentre[onsetFrame & (FLUX_RING - 1)] - (onsetFrame < p ? ONSET_HOP_SAMPLES / 2 : 0) + ONSET_TIME_OFFSET_SEC * sampleRate);
     if (onsetOffset - lastOnsetOffset < MIN_ONSET_GAP_SEC * sampleRate) return;
     lastOnsetOffset = onsetOffset;
-    pending.push({ onsetOffset, frameIndex: p, t: (streamStartFrame + onsetOffset) / sampleRate });
+    pending.push({ onsetOffset, frameIndex: p, swell: onsetFrame < p, t: (streamStartFrame + onsetOffset) / sampleRate });
+  }
+
+  /**
+   * A soft hummed "boom" swells for 20–40 ms and its flux peaks late in the swell: walk back from the peak frame while
+   * the 3-frame power stays within SWELL_FLOOR_DB of the hit's loudest (≤ SWELL_MAX_FRAMES), so the onset (and the
+   * attack test's pre-onset window) sits where the sound starts. A sharp hit stays on its peak frame.
+   */
+  function swellStart(p: number): number {
+    // power of frames j-2..j (causal, so a sharp hit's frame never pulls the frame before it up): one 512-sample frame of a low hum swings > 10 dB with where its pitch pulse falls
+    const oldest = Math.max(1, frameCount - FLUX_RING + 1);
+    const power3 = (j: number) => {
+      let e = 0;
+      for (let k = Math.max(oldest - 1, j - 2); k <= Math.min(frameCount - 1, j); k++) e += bandRing[k & (BAND_RING - 1)].total;
+      return e;
+    };
+    const noise = 3 * (noiseBefore(p)?.total ?? 0);
+    let peak = 0;
+    for (let j = p; j < frameCount && j <= p + PEAK_HALF_WIDTH_FRAMES; j++) peak = Math.max(peak, power3(j));
+    // the power above the room noise, so a soft hat in noise does not walk back into the noise
+    const floor = noise + (peak - noise) * SWELL_FLOOR_RATIO;
+    const limit = Math.max(oldest + 1, p - SWELL_MAX_FRAMES);
+    let j = p;
+    while (j > limit && power3(j - 1) >= floor) j--;
+    // still loud at the limit: a slow rise (breath, crescendo), not a swell — keep the peak frame
+    return j === limit && power3(j - 1) >= floor ? p : j;
   }
 
   /** median + FLUX_SPREAD_FACTOR · 1.4826 · MAD + FLUX_OFFSET of the FLUX_HISTORY_FRAMES frames before frame p */
@@ -429,8 +481,11 @@ export function createOnsetDetector(_opts: OnsetDetectorOptions = {}): ClosableO
     const first = h.onsetOffset - pre;
     for (let i = 0; i < span.length; i++) span[i] = first + i >= 0 && first + i < limit ? at(first + i) : 0;
     const m = measureHit(fa, span, pre, sampleRate, noiseBefore(h.frameIndex), hitBands, limit - first);
-    if (!isHit(m)) return null;
-    return { t: h.t, kind: classifyHit(m), vel: drumVelocityFromRms(m.peakRms) };
+    if (!isHit(m, h.swell)) return null;
+    const features = needFeatures ? hitFeatures(span.subarray(pre), sampleRate) : null;
+    const hit: RawHit = { t: h.t, kind: decideKind(classifyHit(m), features, templates ?? undefined), vel: drumVelocityFromRms(m.peakRms) };
+    if (opts.captureFeatures && features) hit.features = features;
+    return hit;
   }
 
   function drainPending(out: RawHit[]): void {

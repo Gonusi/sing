@@ -7,6 +7,39 @@ Run: `node dev/make-fixtures.ts` (≈1.5 s, 20 fixtures) then `node dev/analyze.
 also reports the owner's real takes in `dev/fixtures/real/` when present — local only, gitignored, never committed).
 Replay a real take through the app's own take recorder: `node dev/replay-take.ts <wav> [--kind synth] [--smooth x]`.
 
+## Round 3 (2026-10-18): setup wizard — taught drums, voice profile
+
+Check: `node dev/check-setup.ts` (after `node dev/make-fixtures.ts`; exit 1 on failure).
+
+**Drum templates** (src/analysis/drum-templates.ts): `hitFeatures(samples from the onset, sr)` → 11 level-independent
+numbers from **80 ms after the onset** (`HIT_FEATURE_SEC`; 3840 samples at 48 kHz): 7 octave-band shares 100 Hz–12.8 kHz
+(log10), centroid (log2 kHz), flatness 200 Hz–8 kHz, zero-crossing rate, decay (first 25 ms vs last 40 ms).
+`classifyByTemplates`: nearest template, each feature scaled by the templates' pooled within-kind spread (floor 0.15);
+null when farther than 4 (RMS z) from every template. Detector options: `captureFeatures` fills `RawHit.features`
+(the wizard stores those as templates); `templates` → the template kind, unless no template is near or the rules' kind
+was not taught (then the rules). **With either option a hit is final ≤ 92 ms after its onset** (80 ms + a block; without,
+≤ 82 ms as before).
+
+Teach-and-test fixtures (`drums-voiceN-teach-{kick,snare,hat}` 3 hits each, `drums-voiceN-test` 9 other examples):
+voice1 = a textbook beatboxer on a phone; voice2 = a sung "u-uh boom" into earbuds with EC (high-pass 300 Hz,
+compressor); voice3 = a hissy "psh" snare next to a dull "ts" hat. **Rules 24/27 (89%; voice3's snares all → hat),
+templates 27/27 (100%), also 27/27 with the test played 12 dB quieter than the teaching.**
+
+**The "boom" misses were detection, not classification.** `drums-phone-boom`: 8 hummed booms (35 ms swell, weak lip burst,
+earbud high-pass, −4 … −20 dB) between hats. Before: 5/8 detected, all of them as kick; the 3 softest were found by the
+flux but rejected by the attack test, because a swell's flux peaks 30–50 ms into it, so the pre-onset window already
+held the swell. Now the onset walks back from the flux peak to the start of the swell (`swellStart`: causal 3-frame
+power within 9 dB of the hit's peak above the room noise, ≤ 12 frames; still loud at the limit = a slow rise, kept as
+is), and a moved-back onset must rise ≥ 10 dB (booms measured 14–40 dB, breaths 5–7 dB): **7/8 detected, 7/8 kick**
+(the last, −20 dB, has no flux peak above the threshold), hats 8/8, silence-noise still 0 hits, gated drum fixtures
+unchanged (16/16, 16/16). The owner's real singing take through the drum detector shows the same picture: syllables
+are classified kick, half of the soft onsets are not detected. A real beatbox export would settle it.
+
+**Voice profile** (src/analysis/voice-profile.ts): `pitchOffset(frames, target)`: voiced frames from 0.3 s after the
+first, deviation folded by octaves into −6..6, offset = median, spread = IQR, ok with ≥ 1 s voiced. `heldNote(frames)`:
+longest run within ±0.6 st of its running median (50 ms gaps bridged, ≥ 0.3 s), rounded median. `sing-along-flat`
+(A3 at −0.33 st, scoop in, drift, vibrato): offset −0.317 (error 0.013), the same against the octave, held note 57.
+
 ## Round 2 (2026-10-18): the owner's first real take
 
 Take `dev/fixtures/real/take-20261018-092348.wav` (local): iPhone, EC on, −24.7 dBFS mean, gaps at −65..−75 dBFS (EC gates
