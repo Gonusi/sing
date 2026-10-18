@@ -67,6 +67,8 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
     toast(accepted ? describeCommand(c) : `can’t ${describeCommand(c)} now`, accepted ? 'ok' : 'err');
   };
 
+  // the wizard is created after the controls below exist; the ⋯ Setup row calls it through this late binding
+  let openSetupLate = () => {};
   const stage = document.createElement('div');
   stage.className = 'stage';
   root.append(stage);
@@ -106,6 +108,7 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
       await controller.setDevice({ micId: id });
       return id === null || mic.inputId() === id;
     },
+    openSetup: () => openSetupLate(),
     probe: () => startProbe(engine, mic),
     exportTake: () => controller.lastTakeWav(),
     clearSession: () => controller.clearSession(),
@@ -177,6 +180,7 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
       },
     });
   };
+  openSetupLate = openSetup;
   if ((!TEST && !controller.device.setupDone) || params.has('setup')) openSetup();
 
   if (TEST) {
