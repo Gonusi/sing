@@ -36,7 +36,8 @@ import type { AudioEngine } from '../audio/context.ts';
 import type { Mic } from '../audio/mic.ts';
 import { wavBlob } from '../audio/wav-encode.ts';
 import { createScheduler, type LoopScheduler } from '../loop/clock.ts';
-import { FIRST_TAKE_DISPLAY_MIN_SEC, createTakeRecorder, type Analysis, type TakeRecorder } from '../loop/take.ts';
+import { FIRST_TAKE_DISPLAY_MIN_SEC, createTakeRecorder, deriveNotes, type Analysis, type TakeRecorder } from '../loop/take.ts';
+import { DEFAULT_SMOOTHING } from '../analysis/clean.ts';
 import { createAudioStore, referencedAudio } from '../audio/audio-store.ts';
 import { createVocalVoice } from '../audio/vocal-voice.ts';
 import { createSessionStore, emptySession, loadSession, saveDevice, type SessionStore } from './session.ts';
@@ -168,6 +169,22 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
   const gcAudio = () => void audio.gc(referencedAudio(store.sessions()));
   gcAudio();
   const echoOf = (sess: Session) => sess.fx?.echo ?? (deps.test ? 0 : DEFAULT_ECHO);
+  const smoothOf = (sess: Session) => sess.fx?.smooth ?? DEFAULT_SMOOTHING;
+  /** Session.fx with both settings filled in (echo and smooth always travel together) */
+  const withFx = (sess: Session, patch: Partial<NonNullable<Session['fx']>>): Session =>
+    ({ ...sess, fx: { echo: echoOf(sess), smooth: smoothOf(sess), ...patch } });
+  /** re-derive every melodic take's notes from its raw detections (old takes without raw keep their notes) */
+  const rederive = (sess: Session, smoothing: number): Session => {
+    const L = sess.loopLength;
+    if (L === null) return sess;
+    let changedAny = false;
+    const tracks = sess.tracks.map((t) => {
+      if (t.kind === 'drums' || t.kind === 'vocals' || !t.take?.raw) return t;
+      changedAny = true;
+      return { ...t, take: { ...t.take, notes: deriveNotes(t.take.raw, smoothing, L, t.kind, t.take.id, deps.analysis) } };
+    });
+    return changedAny ? { ...sess, tracks } : sess;
+  };
   engine.setEcho(echoOf(store.current));
   let state: AppState = store.current.loopLength !== null ? 'stopped' : 'idle';
   const history: { t: Sec; state: AppState }[] = [{ t: -Infinity, state }];
@@ -209,7 +226,7 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     const key = store.current.tracks.find((t) => t.id === trackId)?.take?.audio?.key;
     return key ? audio.buffer(key) : null;
   };
-  const syncVoices = () => {
+  const syncVoices = (catchUp = true) => {
     const ids = new Set(store.current.tracks.map((t) => t.id));
     for (const t of store.current.tracks) {
       if (voices.has(t.id)) continue;
@@ -222,7 +239,7 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       }
       voices.set(t.id, v);
     }
-    pushTracks();
+    pushTracks(catchUp);
     for (const [id, v] of [...voices]) {
       if (ids.has(id)) continue;
       voices.delete(id);
@@ -234,7 +251,7 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       }
     }
   };
-  const pushTracks = () => {
+  const pushTracks = (catchUp = true) => {
     const list: ScheduledTrack[] = [];
     for (const t of store.current.tracks) {
       const voice = voices.get(t.id);
@@ -242,7 +259,7 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       const pending = take?.mode === 'overdub' && take.trackId === t.id ? take.rec.pendingTake() : null;
       list.push({ track: pending ? { ...t, take: pending } : t, voice, activeFrom: activeFrom.get(t.id) });
     }
-    scheduler.setTracks(list);
+    scheduler.setTracks(list, { catchUp });
   };
   const commitSession = (next: Session, undoPoint?: Session) => {
     store.set(next, undoPoint);
@@ -281,7 +298,10 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
 
   // ---- takes ----
   const newTake = (lane: Track, window: Parameters<typeof createTakeRecorder>[0]['window'], createdLane: boolean, prevSelected: string | null, tDown: Sec): ActiveTake => {
-    const rec = createTakeRecorder({ mic, kind: lane.kind, takeId: newId('k'), inLat: device.inLat, window, analysis: deps.analysis });
+    const rec = createTakeRecorder({
+      mic, kind: lane.kind, takeId: newId('k'), inLat: device.inLat, window, analysis: deps.analysis,
+      smoothing: () => smoothOf(store.current),
+    });
     const t: ActiveTake = {
       rec, trackId: lane.id, mode: window.type, start: window.type === 'first' ? window.t0 : window.ts,
       createdLane, prevSelected, holdExclusions: new Set(), off: () => {},
@@ -433,8 +453,8 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       log('undo', { empty: true });
       return false;
     }
-    // echo is not an undo step: keep the current setting on the restored snapshot
-    const prev = fx ? { ...popped, fx } : popped;
+    // echo and smoothing are not undo steps: keep the current settings on the restored snapshot (its notes re-derived)
+    const prev = fx ? rederive({ ...popped, fx }, smoothOf({ ...popped, fx })) : popped;
     if (prev !== popped) store.set(prev);
     gcAudio();
     syncVoices();
@@ -576,15 +596,22 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       return device;
     },
     scheduler,
-    setSmoothing() {
-      // placeholder (engine)
+    setSmoothing(amount) {
+      const a = Math.min(1, Math.max(0, Number.isFinite(amount) ? amount : DEFAULT_SMOOTHING));
+      const cur = store.current;
+      if (cur.fx?.smooth === a) return;
+      store.set(rederive(withFx(cur, { smooth: a }), a)); // no undo point
+      // notes already sounding are not started again; the window already scheduled may play old notes once
+      syncVoices(false);
+      log('smoothing', { amount: a });
+      changed();
     },
     setEcho(amount) {
       const a = Math.min(1, Math.max(0, Number.isFinite(amount) ? amount : 0));
       engine.setEcho(a);
       const cur = store.current;
       if (cur.fx?.echo === a) return;
-      store.set({ ...cur, fx: { echo: a } }); // no undo point
+      store.set(withFx(cur, { echo: a })); // no undo point
       log('echo', { amount: a });
       changed();
     },

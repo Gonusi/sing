@@ -85,6 +85,8 @@ export interface LoopScheduler extends Scheduler {
   resync(): void;
   /** the per-track gain (voice.output → this → master) */
   trackOutput(trackId: string): GainNode | null;
+  /** setTracks; catchUp false = events new to a track are not caught up in the range already passed */
+  setTracks(tracks: ScheduledTrack[], opts?: { catchUp?: boolean }): void;
   dispose(): void;
 }
 
@@ -160,8 +162,9 @@ export function createScheduler(engine: AudioEngine, opts: SchedulerOptions = {}
     lastHi = Math.max(lastHi, hi);
   };
 
-  /** events not seen before: schedule their occurrences in the range this track already passed */
-  const catchUpNewEvents = (s: Strip) => {
+  /** events not seen before: schedule their occurrences in the range this track already passed (catchUp false:
+   *  only remember them — a re-derivation of notes that are already sounding must not start them twice) */
+  const catchUpNewEvents = (s: Strip, catchUp = true) => {
     const fresh = new Set<LoopEvent>();
     for (const ev of trackEvents(s.st, L)) {
       const key = eventKey(ev);
@@ -169,7 +172,7 @@ export function createScheduler(engine: AudioEngine, opts: SchedulerOptions = {}
       s.known.add(key);
       fresh.add(ev);
     }
-    if (!running || !(L >= MIN_LOOP_SEC) || fresh.size === 0 || !eligible(s.st)) return;
+    if (!catchUp || !running || !(L >= MIN_LOOP_SEC) || fresh.size === 0 || !eligible(s.st)) return;
     scheduleRange(s, from - EDGE_EPS_SEC, s.scheduledUntil, ctx.currentTime, engine.outLat(), fresh);
   };
 
@@ -248,7 +251,7 @@ export function createScheduler(engine: AudioEngine, opts: SchedulerOptions = {}
       if (!running || L <= 0) return null;
       return mod(Math.max(at, from) - origin, L);
     },
-    setTracks(list) {
+    setTracks(list, setOpts = {}) {
       const seen = new Set<string>();
       for (const st of list) {
         const id = st.track.id;
@@ -263,7 +266,7 @@ export function createScheduler(engine: AudioEngine, opts: SchedulerOptions = {}
         s.st = st;
         if (wasOn !== st.track.on) applyGain(s, RAMP_ONOFF_SEC);
         // keys only grow until the next start(): forgetting one could schedule an occurrence twice
-        catchUpNewEvents(s);
+        catchUpNewEvents(s, setOpts.catchUp ?? true);
       }
       for (const s of [...strips.values()]) if (!seen.has(s.st.track.id)) removeStrip(s);
       tick();

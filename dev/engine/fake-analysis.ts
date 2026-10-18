@@ -16,6 +16,8 @@ const SPLIT_SEMITONES = 0.7;
 const HIT_PEAK = 0.05;
 const HIT_QUIET_SEC = 0.05;
 const HIT_CLASSIFY_SEC = 0.03;
+/** fake cleanNotes: at the default smoothing 0.5 only notes < 0.15 s go */
+export const FAKE_CLEAN_MIN_SEC = 0.3;
 
 export function fakeAnalysis(): Partial<Analysis> {
   return {
@@ -23,6 +25,8 @@ export function fakeAnalysis(): Partial<Analysis> {
     createSegmenter: fakeSegmenter,
     createOnsetDetector: fakeOnsets,
     registerShift: () => 0,
+    // observable stand-in for dsp's smoothing: drops notes shorter than smoothing × FAKE_CLEAN_MIN_SEC
+    cleanNotes: (raw, smoothing) => raw.filter((n) => n.dur >= smoothing * FAKE_CLEAN_MIN_SEC).sort((a, b) => a.pos - b.pos),
   };
 }
 

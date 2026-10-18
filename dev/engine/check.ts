@@ -854,6 +854,49 @@ async function checkEcho(page: Page): Promise<void> {
     `ok ${c.result.ok} inLat ${ms(c.result.inLat)} expected ${ms(expected)} spread ${ms(c.result.spread)}`);
 }
 
+// ---------- s: note smoothing (take.raw → notes; setSmoothing re-derives, no undo point) ----------
+
+async function checkSmoothing(page: Page): Promise<void> {
+  const d = await page.evaluate(async () => {
+    const e = (window as unknown as W).__eng;
+    await e.c.clearSession();
+    await e.c.setDevice({ inLat: 0.01 });
+    e.c.setEcho(0.25);
+    e.c.setSmoothing(0.5);
+    const t0 = e.now();
+    e.gesture({ type: 'tap', tDown: t0 });
+    // 0.12 s note (dropped by the fake cleanNotes at 0.5: < 0.15 s), 0.25 s (dropped at 1: < 0.3 s), 0.45 s (kept)
+    e.tone(t0 + 0.3 + 0.01, 60, 0.12);
+    e.tone(t0 + 0.8 + 0.01, 64, 0.25);
+    e.tone(t0 + 1.4 + 0.01, 67, 0.45);
+    await e.waitUntil(t0 + 2.2);
+    e.gesture({ type: 'tap', tDown: t0 + 2.1 });
+    const take = () => e.c.session.tracks[0].take!;
+    const at05 = { notes: take().notes.map((n) => n.midi), raw: take().raw?.map((n) => n.midi) ?? null, fx: e.c.session.fx };
+    const t = e.now();
+    e.c.setSmoothing(0);
+    const at0 = take().notes.map((n) => n.midi);
+    e.c.setSmoothing(1);
+    const at1 = take().notes.map((n) => n.midi);
+    e.c.setSmoothing(7);
+    const clamped = e.c.session.fx?.smooth;
+    e.c.setSmoothing(0);
+    await e.sleep(2.5);
+    const fxBeforeUndo = e.c.session.fx;
+    const undo = e.command({ type: 'undo' }); // pops the first take → idle; the settings survive
+    const fxAfterUndo = e.c.session.fx;
+    const sched = e.events.filter((x) => x.t >= t && x.type === 'sched').map((x) => x.data as { pos: number; cycle: number; trackId: string });
+    const keys = sched.map((x) => `${x.trackId}|${x.pos.toFixed(5)}|${x.cycle}`);
+    return { at05, at0, at1, clamped, fxBeforeUndo, fxAfterUndo, undo, dup: keys.length - new Set(keys).size, n: keys.length };
+  });
+  const rawOk = !!d.at05.raw && d.at05.raw.length === 3 && d.at05.raw.every((m) => Math.abs(m - Math.round(m)) < 0.2);
+  check('s1 melodic take stores raw (fractional midi); notes = derived at the current smoothing', rawOk && JSON.stringify(d.at05.notes) === '[64,67]',
+    `raw ${d.at05.raw?.map((m) => m.toFixed(2)).join(',')}; notes at 0.5: ${d.at05.notes.join(',')}`);
+  check('s2 setSmoothing re-derives from raw, clamps, keeps echo; no undo point; no duplicate events', JSON.stringify(d.at0) === '[60,64,67]' && JSON.stringify(d.at1) === '[67]' &&
+    d.clamped === 1 && d.fxBeforeUndo?.echo === 0.25 && d.fxBeforeUndo?.smooth === 0 && d.undo && JSON.stringify(d.fxAfterUndo) === JSON.stringify(d.fxBeforeUndo) && d.dup === 0 && d.n > 0,
+    `at 0: ${d.at0.join(',')}; at 1: ${d.at1.join(',')}; clamp ${d.clamped}; fx ${JSON.stringify(d.fxBeforeUndo)} → after undo ${JSON.stringify(d.fxAfterUndo)}; ${d.n} sched, dup ${d.dup}`);
+}
+
 // ---------- h, i: probe and capture ----------
 
 async function checkProbeCapture(page: Page): Promise<void> {
@@ -896,6 +939,7 @@ async function runEngine(engine: Engine, url: string): Promise<void> {
       ['v', () => checkVocals(page, url)],
       ['echo', () => checkEcho(page)],
       ['v8', () => checkLateVocalStart(page)],
+      ['s', () => checkSmoothing(page)],
     ];
     for (const [name, fn] of steps) {
       if (ONLY && !ONLY.includes(name)) continue;
