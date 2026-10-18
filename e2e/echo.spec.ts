@@ -66,7 +66,7 @@ test('echo 0 → dry; echo 1 → a repeat 0.33 s later', async ({ page }) => {
 
 test('slider sets session.fx.echo, survives reload; undo keeps it', async ({ page }) => {
   const errors = await boot(page);
-  const slider = page.locator('input.echo-slider[type="range"]');
+  const slider = page.locator('.topbar input.echo-slider[type="range"]');
   await expect(slider).toBeVisible();
   expect(Number(await slider.inputValue())).toBe(0);
   expect(await page.evaluate(() => window.__sing!.command({ type: 'create', kind: 'synth' }))).toBe(true);
@@ -84,8 +84,8 @@ test('slider sets session.fx.echo, survives reload; undo keeps it', async ({ pag
   await page.reload();
   await boot(page, { navigate: false });
   expect((await getSession(page)).fx?.echo).toBeCloseTo(0.6, 6);
-  expect(Number(await page.locator('input.echo-slider').inputValue())).toBeCloseTo(0.6, 6);
-  await page.locator('input.echo-slider').fill('0');
+  expect(Number(await page.locator('.topbar input.echo-slider').inputValue())).toBeCloseTo(0.6, 6);
+  await page.locator('.topbar input.echo-slider').fill('0');
   await expect.poll(async () => (await getSession(page)).fx?.echo).toBe(0);
   expect(errors, errors.join('\n')).toEqual([]);
 });

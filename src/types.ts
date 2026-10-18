@@ -270,6 +270,8 @@ export interface Controller {
   setEcho(amount: number): void;
   /** note smoothing 0..1 (Session.fx.smooth, not an undo point); re-derives every melodic take's notes from its raw */
   setSmoothing(amount: number): void;
+  /** remove a lane (an undo point); false if the id is unknown */
+  deleteTrack(trackId: string): boolean;
   setDevice(patch: Partial<DeviceSettings>): Promise<void>;
   clearSession(): Promise<void>;
   /** WAV of the raw mic audio of the last take (for exporting real fixtures) */

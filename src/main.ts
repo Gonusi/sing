@@ -73,6 +73,9 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
     view,
     onSelect: (id) => controller.select(id),
     onToggle: (id) => controller.toggleTrack(id),
+    onDelete: (id) => {
+      if (controller.deleteTrack(id)) toast('track deleted · say “undo” to bring it back');
+    },
   });
   mountStatus(stage, { view });
   mountSheets(stage, {
@@ -91,9 +94,9 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
         controller.command({ type: 'stop' }, ctx.currentTime);
       }
       const r = await calibrate(engine, mic, { onClick });
-      if (!r.ok) return 'not clear — try again, clap on every click';
+      if (!r.ok) return `not clear (heard ${r.heard}/${r.measured}) — clap or say “ta” on each low click`;
       await controller.setDevice({ inLat: r.inLat, calibrated: true });
-      return `latency ${Math.round(r.inLat * 1000)} ms (±${Math.round(r.spread * 1000)})`;
+      return `latency ${Math.round(r.inLat * 1000)} ms · heard ${r.heard}/${r.measured}`;
     },
     probe: () => startProbe(engine, mic),
     exportTake: () => controller.lastTakeWav(),
