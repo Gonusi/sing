@@ -120,21 +120,34 @@ async function checkGestures(page: Page, url: string, cdp: CDPSession): Promise<
 }
 
 async function checkEcho(page: Page): Promise<void> {
-  const initial = await page.locator('.echo-slider').inputValue();
+  const initial = await page.locator('.topbar .echo-slider').inputValue();
   check('echo: slider starts at getEcho()', initial === '0.4', `value=${initial}`);
   await resetLogs(page);
-  const box = await page.locator('.echo-slider').boundingBox();
+  const box = await page.locator('.topbar .echo-slider').boundingBox();
   if (!box) throw new Error('no echo slider');
   await page.touchscreen.tap(box.x + box.width * 0.75, box.y + box.height / 2);
   const acts = (await actions(page)).filter((a) => a.startsWith('setEcho:'));
-  const value = await page.locator('.echo-slider').inputValue();
+  const value = await page.locator('.topbar .echo-slider').inputValue();
   check('echo: tapping the slider calls setEcho, no gesture', acts.length > 0 && Math.abs(Number(value) - 0.75) < 0.1 && (await gestureTypes(page)).length === 0, `acts=${acts.join()} value=${value} gestures=${(await gestureTypes(page)).join()}`);
   await page.evaluate(() => {
-    const s = document.querySelector<HTMLInputElement>('.echo-slider')!;
+    const s = document.querySelector<HTMLInputElement>('.topbar .echo-slider')!;
     s.value = '0.2';
     s.dispatchEvent(new Event('input', { bubbles: true }));
   });
   check('echo: input event calls setEcho with the value', (await actions(page)).includes('setEcho:0.2'));
+}
+
+async function checkSmoothing(page: Page): Promise<void> {
+  const slider = page.locator('.smooth-slider');
+  const initial = await slider.inputValue();
+  check('smoothing: slider starts at getSmoothing()', initial === '0.5', `value=${initial}`);
+  await resetLogs(page);
+  const box = await slider.boundingBox();
+  if (!box) throw new Error('no smoothing slider');
+  await page.touchscreen.tap(box.x + box.width * 0.9, box.y + box.height / 2);
+  const acts = (await actions(page)).filter((a) => a.startsWith('setSmoothing:'));
+  const value = await slider.inputValue();
+  check('smoothing: moving the slider calls setSmoothing, no gesture', acts.length > 0 && Math.abs(Number(value) - 0.9) < 0.1 && (await gestureTypes(page)).length === 0, `acts=${acts.join()} value=${value} gestures=${(await gestureTypes(page)).join()}`);
 }
 
 async function checkSheets(page: Page, url: string): Promise<void> {
@@ -158,6 +171,7 @@ async function checkSheets(page: Page, url: string): Promise<void> {
 
   await tap(page, '[data-action="settings"]');
   await page.waitForTimeout(350);
+  await checkSmoothing(page);
   const download = page.waitForEvent('download', { timeout: 3000 });
   await page.getByText('Export last take (WAV)').tap();
   const file = (await download).suggestedFilename();
