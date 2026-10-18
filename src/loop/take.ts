@@ -25,7 +25,7 @@ import type {
 import { createPitchTracker } from '../analysis/pitch.ts';
 import { createSegmenter } from '../analysis/segment.ts';
 import { createOnsetDetector } from '../analysis/drums.ts';
-import { registerShift, snapMidi } from '../analysis/autotune.ts';
+import { estimateKey, registerShift, snapMidi, snapToKey, type MusicalKey } from '../analysis/autotune.ts';
 import { assignPhrases, type PlainNote } from '../analysis/phrases.ts';
 import { DEFAULT_SMOOTHING, cleanNotes } from '../analysis/clean.ts';
 import { audioKey } from '../audio/audio-store.ts';
@@ -69,19 +69,28 @@ export interface Analysis {
   registerShift(midis: number[], kind: InstrumentKind): number;
   assignPhrases(notes: PlainNote[], loopLength: Sec, takeId: string): Note[];
   cleanNotes(raw: RawLoopNote[], smoothing: number, loopLength: Sec): RawLoopNote[];
+  estimateKey(notes: { midi: number; dur: number }[]): MusicalKey | null;
+  snapToKey(midi: number, key: MusicalKey): number;
 }
 
+/** key snap needs this many (cleaned) notes; fewer → nearest semitone */
+export const KEY_SNAP_MIN_NOTES = 6;
+
 export const REAL_ANALYSIS: Analysis = {
-  createPitchTracker, createSegmenter, createOnsetDetector, snapMidi, registerShift, assignPhrases, cleanNotes,
+  createPitchTracker, createSegmenter, createOnsetDetector, snapMidi, registerShift, assignPhrases, cleanNotes, estimateKey, snapToKey,
 };
 
-/** take.notes from take.raw: cleanNotes(smoothing) → snap → register fit (per take) → phrases */
+/**
+ * take.notes from take.raw: cleanNotes(smoothing) → snap (≥ KEY_SNAP_MIN_NOTES notes: to the estimated key, after
+ * removing the singer's tuning offset; else nearest semitone) → register fit (per take) → phrases
+ */
 export function deriveNotes(
   raw: RawLoopNote[], smoothing: number, L: Sec, kind: InstrumentKind, takeId: string, analysis: Partial<Analysis> = {},
 ): Note[] {
   const A: Analysis = { ...REAL_ANALYSIS, ...analysis };
   const cleaned = A.cleanNotes(raw, smoothing, L);
-  const snapped = cleaned.map((n) => ({ ...n, midi: A.snapMidi(n.midi) }));
+  const key = cleaned.length >= KEY_SNAP_MIN_NOTES ? A.estimateKey(cleaned) : null;
+  const snapped = cleaned.map((n) => ({ ...n, midi: key ? A.snapToKey(n.midi, key) : A.snapMidi(n.midi) }));
   const shift = snapped.length ? A.registerShift(snapped.map((n) => n.midi), kind) : 0;
   const plain: PlainNote[] = snapped.map((n) => ({ pos: n.pos, dur: n.dur, midi: n.midi + shift, vel: n.vel }));
   return A.assignPhrases(plain, L, takeId);
@@ -281,7 +290,8 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
       .filter((h): h is DrumHit => h !== null)
       .sort((a, b) => a.pos - b.pos);
   };
-  const toRaw = (placed: PlacedNote[]): RawLoopNote[] => placed.map((p) => ({ pos: p.pos, dur: p.dur, midi: p.midi, vel: p.vel }));
+  const toRaw = (placed: PlacedNote[]): RawLoopNote[] =>
+    placed.map((p) => ({ pos: p.pos, dur: p.dur, midi: p.midi, vel: p.vel, ...(p.attack ? { attack: true } : {}) }));
   const buildNotes = (raw: RawLoopNote[], L: Sec): Note[] =>
     deriveNotes(raw, opts.smoothing?.() ?? DEFAULT_SMOOTHING, L, kind, takeId, A);
 
@@ -465,6 +475,8 @@ export interface PlacedNote {
   vel: number;
   /** corrected start (after clipping) */
   tc: Sec;
+  /** RawNote.attack: a new articulation (cleanNotes never merges across it) */
+  attack?: boolean;
 }
 
 function windowOf(c: PlaceContext): { start: Sec; end: Sec; earliest: Sec } {
@@ -492,7 +504,7 @@ export function placeNote(raw: RawNote, c: PlaceContext): PlacedNote | null {
   start = Math.max(start, w.start);
   end = Math.min(end, w.end);
   if (end - start < MIN_NOTE_SEC) return null;
-  return { pos: loopPos(c, start), dur: end - start, midi: raw.midi, vel: raw.vel, tc: start };
+  return { pos: loopPos(c, start), dur: end - start, midi: raw.midi, vel: raw.vel, tc: start, ...(raw.attack ? { attack: true } : {}) };
 }
 
 export function placeHit(raw: RawHit, c: PlaceContext): DrumHit | null {
