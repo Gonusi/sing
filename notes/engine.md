@@ -173,6 +173,33 @@ Risk: a glitch that read AHEAD (never observed) would make all later stamps 2.7 
   "iPhone Microphone" — does output stay on the AirPods and full-range?; (3) calibration in both cases (heard n/12, latency).
 - **deleteTrack(id)** (EngineController): see its doc comment; check t1.
 
+## Round 3 (2026-10-18): setup wizard API + learned settings
+- **src/app/setup.ts** `createSetupApi(deps) → EngineSetupApi` (= SetupApi + `tryingCommand()`). Deps: engine, mic, controller,
+  recognizer, optional `voiceProgress()` (main.ts should pass `() => ui.voiceProgress` — else "downloading 0%").
+  - guessOutput: `ctx.outputLatency > 0.1 s` → bluetooth, else speaker (wired can't be told from the speaker in a browser;
+    speaker = ec on is the safe default). applyOutput: speaker → ec on; wired/bluetooth → ec off; bluetooth → micId = an input
+    whose label matches /iphone|ipad|built-?in|internal/ (else null = default); wired/speaker → micId null. Saves output.
+  - playTone: sine, 10 ms fades, −12 dBFS into master (never the echo bus). level(): smoothed linear RMS of the mic (UI draws
+    √level, "good" ≥ 0.05). noiseFloor(sec): median block RMS. calibrate: calibrate() + the same texts as main.ts, saves inLat.
+  - teachDrum: onset detector with captureFeatures on the live mic, the first `count` hits → templates (kind = the asked one).
+    testDrums: detector with {templates}, onHit(kind) until stop. singAlong: reference tone (quiet, first 1 s, not measured:
+    on a speaker the mic hears it) → pitch tracker → pitchOffset; captureRange → heldNote.
+  - tryCommand: begin(now)/end() like a hold, collects the last partial + the command, `tryingCommand()` true meanwhile.
+    **main.ts must** create the setup API before registering `recognizer.onCommand` and start that handler with
+    `if (setup.tryingCommand()) return;` (else the try RUNS the command).
+- **Learned settings in takes:** drum takes give `{templates: device.drums}` to the onset detector (captured at take start).
+  `deriveNotes(..., profile)`: the learned `tuningOffset` is subtracted from the raw midi first — a short take (no key estimate)
+  snaps with it, a long take re-estimates its own residual offset (the circular mean is shift-equivariant, so the result equals
+  the take's own estimate). Synth with `range`: the register shift brings the range centre (not the take median) into G3–E4, so
+  a take sung high for this singer plays high. setDevice with a new tuningOffset/range re-derives the takes.
+- Worklet clock: a second glitch shape seen (currentFrame read 2 quanta behind → my ≥ 256 "jump" rule followed it backwards
+  once, v1 lag 128). The clock now ignores every backward read (the real clock never runs backwards); only forward
+  differences correct (< 256) or jump (≥ 256).
+- Checks u1–u11 (setup API on injected audio: level/floor, tone bypasses echo, teachDrum, test pad, singAlong +0.300 st,
+  held E3, tryCommand heard-not-run, applyOutput, derivation with profile, templates reach the detector, taught
+  kick/snare/hat classify the whole beatbox fixture exactly). Wizard UI flow (?test&setup) driven through all 6 steps against
+  the real API in both engines: no errors.
+
 ## Known risks
 - **Vocal first replay** misses ≈ 0.13 s after an overdub window (commit latency); a provisional commit before the window end could
   close it, not built. **Beep exclusion** zeroes 80 ms of a vocal take right after the record tap (on speakers the mic hears the beep).

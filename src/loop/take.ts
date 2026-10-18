@@ -20,7 +20,7 @@
 // (first take: pos 0; overdub: pos of ts) is crossfaded over the tail length with the audio recorded just after the
 // window end; the tail is a copy of the loop's first samples, so the voice's cycle crossfade is click-free.
 import type {
-  DrumHit, InstrumentKind, MicBlock, RawLoopNote, MicFeed, Note, NoteSegmenter, OnsetDetector, PitchTracker, RawHit, RawNote, Sec, Take,
+  DrumHit, DrumTemplate, InstrumentKind, MicBlock, OnsetDetectorOptions, RawLoopNote, MicFeed, Note, NoteSegmenter, OnsetDetector, PitchTracker, RawHit, RawNote, Sec, Take,
 } from '../types.ts';
 import { createPitchTracker } from '../analysis/pitch.ts';
 import { createSegmenter } from '../analysis/segment.ts';
@@ -64,7 +64,7 @@ const FEED_BLOCK = 512;
 export interface Analysis {
   createPitchTracker(): PitchTracker;
   createSegmenter(): NoteSegmenter;
-  createOnsetDetector(): OnsetDetector;
+  createOnsetDetector(opts?: OnsetDetectorOptions): OnsetDetector;
   snapMidi(midi: number): number;
   registerShift(midis: number[], kind: InstrumentKind): number;
   assignPhrases(notes: PlainNote[], loopLength: Sec, takeId: string): Note[];
@@ -80,18 +80,32 @@ export const REAL_ANALYSIS: Analysis = {
   createPitchTracker, createSegmenter, createOnsetDetector, snapMidi, registerShift, assignPhrases, cleanNotes, estimateKey, snapToKey,
 };
 
+/** what the setup wizard learned about the singer (DeviceSettings.tuningOffset / range) */
+export interface VoiceProfile {
+  tuningOffset?: number;
+  range?: { lo: number; hi: number };
+}
+
 /**
- * take.notes from take.raw: cleanNotes(smoothing) → snap (≥ KEY_SNAP_MIN_NOTES notes: to the estimated key, after
- * removing the singer's tuning offset; else nearest semitone) → register fit (per take) → phrases
+ * take.notes from take.raw: −profile.tuningOffset → cleanNotes(smoothing) → snap (≥ KEY_SNAP_MIN_NOTES notes: to the
+ * estimated key, which removes any residual offset of this take; else nearest semitone) → register fit → phrases.
+ * The learned offset is subtracted first in both cases: estimateKey's circular-mean offset is shift-equivariant, so a
+ * long take still ends up on its own offset (same result), while a short take gets the singer's learned offset.
+ * Register fit: synth with profile.range → the shift that brings the range's centre into the sweet range (a take sung
+ * high for this singer stays high); otherwise the take's median, as before.
  */
 export function deriveNotes(
   raw: RawLoopNote[], smoothing: number, L: Sec, kind: InstrumentKind, takeId: string, analysis: Partial<Analysis> = {},
+  profile: VoiceProfile = {},
 ): Note[] {
   const A: Analysis = { ...REAL_ANALYSIS, ...analysis };
-  const cleaned = A.cleanNotes(raw, smoothing, L);
+  const off = profile.tuningOffset ?? 0;
+  const tuned = off ? raw.map((n) => ({ ...n, midi: n.midi - off })) : raw;
+  const cleaned = A.cleanNotes(tuned, smoothing, L);
   const key = cleaned.length >= KEY_SNAP_MIN_NOTES ? A.estimateKey(cleaned) : null;
   const snapped = cleaned.map((n) => ({ ...n, midi: key ? A.snapToKey(n.midi, key) : A.snapMidi(n.midi) }));
-  const shift = snapped.length ? A.registerShift(snapped.map((n) => n.midi), kind) : 0;
+  const byRange = kind === 'synth' && profile.range ? [(profile.range.lo + profile.range.hi) / 2] : null;
+  const shift = snapped.length ? A.registerShift(byRange ?? snapped.map((n) => n.midi), kind) : 0;
   const plain: PlainNote[] = snapped.map((n) => ({ pos: n.pos, dur: n.dur, midi: n.midi + shift, vel: n.vel }));
   return A.assignPhrases(plain, L, takeId);
 }
@@ -110,6 +124,10 @@ export interface TakeOptions {
   analysis?: Partial<Analysis>;
   /** note smoothing (Session.fx.smooth), read when the notes are derived */
   smoothing?: () => number;
+  /** the singer's learned profile (DeviceSettings), read when the notes are derived */
+  profile?: () => VoiceProfile;
+  /** drum takes: the user's taught sounds (DeviceSettings.drums) */
+  drumTemplates?: DrumTemplate[];
 }
 
 /** corrected-time span [from, to) */
@@ -156,7 +174,7 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
   const melodic = !drums && !vocals;
   const tracker = melodic ? A.createPitchTracker() : null;
   const segmenter = melodic ? A.createSegmenter() : null;
-  const onsets = drums ? A.createOnsetDetector() : null;
+  const onsets = drums ? A.createOnsetDetector(opts.drumTemplates?.length ? { templates: opts.drumTemplates } : {}) : null;
   const chunkPeaks: number[] = []; // vocals: peak per LIVE_PEAK_CHUNK raw samples from firstFrame
   let loopPcm: Float32Array | null = null;
 
@@ -293,7 +311,7 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
   const toRaw = (placed: PlacedNote[]): RawLoopNote[] =>
     placed.map((p) => ({ pos: p.pos, dur: p.dur, midi: p.midi, vel: p.vel, ...(p.attack ? { attack: true } : {}) }));
   const buildNotes = (raw: RawLoopNote[], L: Sec): Note[] =>
-    deriveNotes(raw, opts.smoothing?.() ?? DEFAULT_SMOOTHING, L, kind, takeId, A);
+    deriveNotes(raw, opts.smoothing?.() ?? DEFAULT_SMOOTHING, L, kind, takeId, A, opts.profile?.() ?? {});
 
   return {
     takeId,
