@@ -18,6 +18,8 @@ import { mountInput } from './ui/input.ts';
 import { mountLanes } from './ui/lanes.ts';
 import { mountStatus } from './ui/status.ts';
 import { mountSheets } from './ui/sheet.ts';
+import { mountWizard } from './ui/wizard.ts';
+import { createSetupApi } from './app/setup.ts';
 
 const params = new URLSearchParams(location.search);
 /** ?test: no getUserMedia (mic audio only via window.__sing.mic.play), window.__sing installed */
@@ -165,6 +167,18 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
   if (VOICE) {
     recognizer.load((f) => (ui.voiceProgress = f)).catch((e: unknown) => console.warn('voice failed to load', e));
   }
+  // setup wizard: on first launch (until completed or skipped); never in ?test unless ?setup is given
+  const setup = createSetupApi({ engine, mic, controller, recognizer });
+  const openSetup = () => {
+    const close = mountWizard(root, setup, {
+      onDone: () => {
+        close();
+        void controller.setDevice({ setupDone: true });
+      },
+    });
+  };
+  if ((!TEST && !controller.device.setupDone) || params.has('setup')) openSetup();
+
   if (TEST) {
     const { installTestHooks } = await import('./app/test-hooks.ts');
     installTestHooks({ engine, mic, controller, recognizer, run });

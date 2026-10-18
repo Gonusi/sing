@@ -93,6 +93,25 @@ export interface DeviceSettings {
   calibrated: boolean;
   /** chosen audio input deviceId (null/missing = browser default, e.g. a Bluetooth headset's mic) */
   micId?: string | null;
+  // ---- learned in the setup wizard (all optional: missing = not set up) ----
+  /** what the user listens on (sets ec + mic choice) */
+  output?: OutputKind;
+  /** the singer's habitual pitch offset in semitones (−0.33 = sings a third of a semitone flat); removed before snapping */
+  tuningOffset?: number;
+  /** comfortable sung range (integer midi), for register fit */
+  range?: { lo: number; hi: number };
+  /** the user's own drum sounds; drum hits are classified by nearest template when present */
+  drums?: DrumTemplate[];
+  /** the setup wizard was completed or skipped (it shows on first launch until then) */
+  setupDone?: boolean;
+}
+
+export type OutputKind = 'wired' | 'bluetooth' | 'speaker';
+
+/** one taught drum sound: its kind and the feature vector of one example hit (dsp's hitFeatures) */
+export interface DrumTemplate {
+  kind: DrumKind;
+  features: number[];
 }
 
 // ---------- raw detections (analysis output, context time, not yet snapped) ----------
@@ -112,6 +131,8 @@ export interface RawHit {
   t: Sec;
   kind: DrumKind;
   vel: number;
+  /** feature vector of the hit (hitFeatures), filled when the detector is created with captureFeatures */
+  features?: number[];
 }
 
 /** A block of mic samples. `frame` = AudioContext frame index of samples[0]; time = frame / sampleRate. */
@@ -146,6 +167,13 @@ export interface NoteSegmenter {
   /** force-finish at context time `at`; returns the notes finalised by it (notes returned earlier are NOT clipped — callers clip to their window; a truncated note < 80 ms is dropped) */
   close(at: Sec): RawNote[];
   reset(): void;
+}
+
+export interface OnsetDetectorOptions {
+  /** classify by nearest template instead of the fixed rules (falls back to rules for kinds without templates) */
+  templates?: DrumTemplate[];
+  /** attach RawHit.features (the setup wizard collects templates this way) */
+  captureFeatures?: boolean;
 }
 
 export interface OnsetDetector {
@@ -320,4 +348,42 @@ export interface SingTestApi {
     /** pretend the recognizer heard `text` during a hold that started at `tDown` */
     inject(text: string, tDown?: Sec): void;
   };
+}
+
+// ---------- setup wizard ----------
+
+export type SetupStepId = 'listening' | 'mic' | 'latency' | 'drums' | 'voice' | 'commands';
+
+/**
+ * What the wizard's steps can ask of the app (implemented by the engine, wired in main.ts). Every step is independent
+ * so a later version can launch any one of them alone. Nothing here changes the song.
+ */
+export interface SetupApi {
+  /** best guess of the output from outputLatency etc. */
+  guessOutput(): OutputKind;
+  /** set ec (speaker → on, headphones → off) and, for bluetooth, prefer the built-in mic; saves DeviceSettings.output */
+  applyOutput(kind: OutputKind): Promise<void>;
+  /** play a sine tone now (through the master bus, no echo) */
+  playTone(midi: number, sec: Sec): void;
+  /** live mic level 0..1 (RMS, smoothed) */
+  level(): number;
+  /** measure the room's noise floor (RMS) over `sec` seconds of silence */
+  noiseFloor(sec: Sec): Promise<number>;
+  /** the clap-along calibration (same as settings), saves inLat */
+  calibrate(onClick: (i: number, n: number, phase: 'listen' | 'measure') => void): Promise<{ ok: boolean; text: string }>;
+  /** record `count` hits of one drum sound; onHit per detected hit; resolves the templates (≤ count) after the last hit or `timeoutSec` */
+  teachDrum(kind: DrumKind, count: number, onHit: (i: number) => void, timeoutSec: Sec): Promise<DrumTemplate[]>;
+  /** live test pad with the given templates: onHit per classified hit; returns stop */
+  testDrums(templates: DrumTemplate[], onHit: (kind: DrumKind) => void): () => void;
+  /** the user hums along with a played reference note for `sec`; onPitch gives live fractional midi (null = unvoiced) */
+  singAlong(midi: number, sec: Sec, onPitch: (midi: number | null) => void): Promise<{ ok: boolean; offset: number; spread: number }>;
+  /** hum the lowest / highest comfortable note for `sec`; resolves the held note (integer midi) or null */
+  captureRange(which: 'low' | 'high', sec: Sec, onPitch: (midi: number | null) => void): Promise<number | null>;
+  /** try one voice command without running it: listening starts now, `stop()` ends it and resolves what was heard */
+  tryCommand(): { stop(): Promise<{ text: string; command: Command | null }> };
+  /** current recogniser state (the model may still be downloading) */
+  voiceStatus(): { status: VoiceStatus; progress: number };
+  /** save learned settings (merged into DeviceSettings) */
+  save(patch: Partial<DeviceSettings>): Promise<void>;
+  device(): DeviceSettings;
 }

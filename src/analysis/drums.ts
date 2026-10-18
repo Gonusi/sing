@@ -20,7 +20,7 @@
 // close(at) (end of a drum take) force-finishes onsets still waiting, on the audio before `at` (later samples count as
 // silence), returns those hits and resets; hits before `at` are never returned after it.
 import FFT from 'fft.js';
-import type { DrumKind, MicBlock, OnsetDetector, RawHit, Sec } from '../types.ts';
+import type { DrumKind, MicBlock, OnsetDetector, RawHit, Sec, OnsetDetectorOptions } from '../types.ts';
 
 // ---------- constants ----------
 export const ONSET_FFT_SIZE = 512;
@@ -327,7 +327,7 @@ export interface ClosableOnsetDetector extends OnsetDetector {
   close(at: Sec): RawHit[];
 }
 
-export function createOnsetDetector(): ClosableOnsetDetector {
+export function createOnsetDetector(_opts: OnsetDetectorOptions = {}): ClosableOnsetDetector {
   const fa = createFrameAnalyser();
   const ring = new Float32Array(RING_SAMPLES);
   const frameBuf = new Float64Array(ONSET_FFT_SIZE);
