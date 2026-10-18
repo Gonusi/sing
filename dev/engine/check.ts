@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { startDev } from '../lib/serve.ts';
 import { launch, type Engine } from '../lib/browser.ts';
 import { encodeWav16 } from '../../src/audio/wav-encode.ts';
+import { CLICK_PERIOD_SEC, MEASURE_CLICKS, evaluate, phasesOf } from '../../src/audio/latency.ts';
 
 interface Row {
   engine: Engine;
@@ -374,6 +375,44 @@ async function checkCalibration(page: Page): Promise<void> {
     `ok ${d.result.ok} matched ${d.result.matched} inLat ${ms(d.result.inLat)} expected ${ms(expected)} spread ${ms(d.result.spread)}`);
 }
 
+/** Bluetooth-like round trip near the phase limit (period − 0.05 = 0.6 s) */
+async function checkCalibrationBluetooth(page: Page): Promise<void> {
+  const d = await page.evaluate(() => (window as unknown as W).__eng.calibrateLoopback(0.45));
+  const expected = 0.45 - d.outLat + d.limiterDelay;
+  check('e2 calibration, 450 ms loopback (Bluetooth-like): ok, inLat within ±5 ms', d.result.ok && Math.abs(d.result.inLat - expected) < 0.005,
+    `ok ${d.result.ok} heard ${d.result.heard}/${d.result.measured} inLat ${ms(d.result.inLat)} expected ${ms(expected)}`);
+}
+
+/**
+ * pure: human-like claps (±30 ms uniform jitter, 3 missed, 3 spurious onsets) over 200 seeds. The median of 9 such
+ * claps alone has σ ≈ 9 ms (measured: 11/200 beyond ±15 ms with no spurious onsets), so the bound is ±20 ms in ≥ 97%.
+ */
+function checkCalibrationHuman(): void {
+  let okRuns = 0;
+  let within = 0;
+  let worst = 0;
+  const N = 200;
+  for (let s0 = 1; s0 <= N; s0++) {
+    let seed = s0;
+    const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+    const grid = Array.from({ length: MEASURE_CLICKS }, (_, k) => 10 + k * CLICK_PERIOD_SEC);
+    const onsets: number[] = [];
+    grid.forEach((h, k) => {
+      if (k === 2 || k === 7 || k === 9) return; // missed
+      onsets.push(h + 0.3 + (rnd() * 2 - 1) * 0.03);
+    });
+    for (let i = 0; i < 3; i++) onsets.push(10 + rnd() * MEASURE_CLICKS * CLICK_PERIOD_SEC); // a cough, a chair
+    onsets.sort((a, b) => a - b);
+    const r = evaluate(phasesOf(grid, onsets, CLICK_PERIOD_SEC));
+    const err = Math.abs(r.inLat - 0.3);
+    if (r.ok) okRuns++;
+    if (err <= 0.02) within++;
+    worst = Math.max(worst, err);
+  }
+  check('e3 calibration, human claps (±30 ms, 3 missed, 3 spurious) × 200: all ok, ±20 ms in ≥ 97%, worst ≤ 30 ms', okRuns === N && within >= 0.97 * N && worst <= 0.03,
+    `ok ${okRuns}/${N}, within ±20 ms ${within}/${N}, worst ${ms(worst)}`);
+}
+
 // ---------- f: 15 s with 4 tracks, every event exactly once ----------
 
 function fourTrackSession(): Session {
@@ -539,12 +578,26 @@ async function checkRealMic(url: string): Promise<void> {
     }, null, { timeout: 20000 });
     const d = await page.evaluate(async () => {
       const e = (window as unknown as W).__eng;
-      if (e.error) return { error: e.error, rms: 0, real: false, latency: null as number | null };
+      if (e.error) return { error: e.error, rms: 0, real: false, latency: null as number | null, inputs: undefined, okChosen: undefined, rmsChosen: undefined, okBogus: undefined, rmsBogus: undefined };
       await e.sleep(0.8);
-      return { error: null, rms: e.ringRms(0.5), real: e.realMic, latency: e.mic.reportedLatency() };
+      const base = { error: null, rms: e.ringRms(0.5), real: e.realMic, latency: e.mic.reportedLatency() };
+      const inputs = await e.mic.listInputs();
+      const okChosen = inputs.length ? await e.mic.setInput(inputs[0].id) : false;
+      await e.sleep(0.5);
+      const rmsChosen = e.ringRms(0.3);
+      const okBogus = await e.mic.setInput('no-such-device');
+      await e.sleep(0.5);
+      const rmsBogus = e.ringRms(0.3);
+      await e.mic.setInput(null);
+      return { ...base, inputs, okChosen, rmsChosen, okBogus, rmsBogus };
     });
     check('k1 real getUserMedia → worklet → ring (fake-capture WAV, 0.5 sine)', !d.error && d.real && d.rms > 0.2,
       d.error ? d.error.split('\n')[0] : `ring RMS ${d.rms.toFixed(3)} (sine 0.5 → 0.354), reported latency ${d.latency}`);
+    if (!d.error) {
+      check('k2 mic choice: listInputs, setInput(id) opens it, an unknown id falls back to the default', (d.inputs?.length ?? 0) >= 1 &&
+        d.okChosen === true && (d.rmsChosen ?? 0) > 0.2 && d.okBogus === false && (d.rmsBogus ?? 0) > 0.2,
+        `${d.inputs?.length} inputs (${d.inputs?.map((i) => i.label).join(', ')}); chosen ok ${d.okChosen} rms ${d.rmsChosen?.toFixed(3)}; bogus ok ${d.okBogus} rms ${d.rmsBogus?.toFixed(3)}`);
+    }
   } finally {
     await browser.close();
   }
@@ -897,6 +950,47 @@ async function checkSmoothing(page: Page): Promise<void> {
     `at 0: ${d.at0.join(',')}; at 1: ${d.at1.join(',')}; clamp ${d.clamped}; fx ${JSON.stringify(d.fxBeforeUndo)} → after undo ${JSON.stringify(d.fxAfterUndo)}; ${d.n} sched, dup ${d.dup}`);
 }
 
+// ---------- t: deleteTrack ----------
+
+async function checkDeleteTrack(page: Page): Promise<void> {
+  const d = await page.evaluate(async () => {
+    const e = (window as unknown as W).__eng;
+    await e.c.clearSession();
+    await e.c.setDevice({ inLat: 0.01 });
+    const ids = () => e.c.session.tracks.map((t) => t.id);
+    const t0 = e.now();
+    e.gesture({ type: 'tap', tDown: t0 });
+    e.tone(t0 + 0.2 + 0.01, 60, 0.4);
+    await e.waitUntil(t0 + 1.3);
+    e.gesture({ type: 'tap', tDown: t0 + 1.2 }); // playing, 1 synth lane
+    e.command({ type: 'create', kind: 'bass' });
+    e.command({ type: 'create', kind: 'violin' });
+    const [a, b, c] = ids();
+    e.c.select(b);
+    const unknown = e.c.deleteTrack('nope');
+    const del1 = e.c.deleteTrack(b); // selected middle lane → selection moves to the next (c)
+    const afterDel1 = { ids: ids(), sel: e.c.session.selectedId, loop: e.c.session.loopLength, state: e.c.state };
+    e.c.select(c);
+    e.gesture({ type: 'tap', tDown: e.now() }); // overdub into the empty violin lane c
+    const stateOd = e.c.state;
+    const del2 = e.c.deleteTrack(c); // the lane being recorded: take discarded, back to playing
+    const afterDel2 = { ids: ids(), state: e.c.state, rec: e.c.view().recordingTrackId };
+    const del3 = e.c.deleteTrack(a); // last lane → empty session: idle, no loop
+    const afterDel3 = { ids: ids(), state: e.c.state, loop: e.c.session.loopLength, running: e.c.scheduler.running };
+    const undo = e.command({ type: 'undo' });
+    const afterUndo = { ids: ids(), state: e.c.state, loop: e.c.session.loopLength };
+    const logged = e.events.filter((x) => x.type === 'delete').length;
+    return { a, b, c, unknown, del1, afterDel1, stateOd, del2, afterDel2, del3, afterDel3, undo, afterUndo, logged };
+  });
+  const ok = !d.unknown && d.del1 && JSON.stringify(d.afterDel1.ids) === JSON.stringify([d.a, d.c]) && d.afterDel1.sel === d.c && d.afterDel1.loop !== null &&
+    d.afterDel1.state === 'playing' && d.stateOd === 'overdubbing' && d.del2 && d.afterDel2.state === 'playing' && d.afterDel2.rec === null &&
+    JSON.stringify(d.afterDel2.ids) === JSON.stringify([d.a]) && d.del3 && d.afterDel3.ids.length === 0 && d.afterDel3.state === 'idle' &&
+    d.afterDel3.loop === null && !d.afterDel3.running && d.undo && JSON.stringify(d.afterUndo.ids) === JSON.stringify([d.a]) &&
+    d.afterUndo.state === 'stopped' && d.afterUndo.loop !== null && d.logged === 3;
+  check('t1 deleteTrack: unknown → false; selection moves; recording lane → take discarded; last lane → idle, no loop; undo restores', ok,
+    JSON.stringify({ d1: d.afterDel1, d2: d.afterDel2, d3: d.afterDel3, undo: d.afterUndo, logged: d.logged }));
+}
+
 // ---------- h, i: probe and capture ----------
 
 async function checkProbeCapture(page: Page): Promise<void> {
@@ -931,6 +1025,8 @@ async function runEngine(engine: Engine, url: string): Promise<void> {
       ['g', () => checkHolds(page)],
       ['d', () => checkPersistence(page, url)],
       ['e', () => checkCalibration(page)],
+      ['e2', () => checkCalibrationBluetooth(page)],
+      ['e3', async () => checkCalibrationHuman()],
       ['h', () => checkProbeCapture(page)],
       ['f', () => checkLongRun(page, url)],
       ['j', () => checkToggle(page)],
@@ -940,6 +1036,7 @@ async function runEngine(engine: Engine, url: string): Promise<void> {
       ['echo', () => checkEcho(page)],
       ['v8', () => checkLateVocalStart(page)],
       ['s', () => checkSmoothing(page)],
+      ['t', () => checkDeleteTrack(page)],
     ];
     for (const [name, fn] of steps) {
       if (ONLY && !ONLY.includes(name)) continue;

@@ -69,6 +69,12 @@ export interface EngineController extends Controller {
   /** write the pending session save now */
   flush(): Promise<void>;
   readonly scheduler: LoopScheduler;
+  /**
+   * remove a lane (undo point, like create): its voice is disposed; a take in progress on it is discarded first
+   * (state as for undo of that take); selection moves to the next lane (or the previous, or null); the loop length
+   * stays while any lane remains, an emptied session is idle with no loop (undoable). false = unknown id.
+   */
+  deleteTrack(trackId: string): boolean;
   /** decoded loop audio of a vocal track (null when none / not loaded) */
   vocalAudio(trackId: string): AudioBuffer | null;
   dispose(): void;
@@ -168,6 +174,11 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
   await audio.loadAll(referencedAudio(store.sessions()));
   const gcAudio = () => void audio.gc(referencedAudio(store.sessions()));
   gcAudio();
+  // the stored mic choice (main.ts opens the default mic before the controller exists)
+  if (!deps.test && device.micId && mic.inputId() !== device.micId) {
+    const opened = await mic.setInput(device.micId);
+    if (!opened) console.warn('stored mic not available, default in use');
+  }
   const echoOf = (sess: Session) => sess.fx?.echo ?? (deps.test ? 0 : DEFAULT_ECHO);
   const smoothOf = (sess: Session) => sess.fx?.smooth ?? DEFAULT_SMOOTHING;
   /** Session.fx with both settings filled in (echo and smooth always travel together) */
@@ -615,6 +626,34 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       log('echo', { amount: a });
       changed();
     },
+    deleteTrack(trackId) {
+      if (!store.current.tracks.some((t) => t.id === trackId)) return false;
+      const at = ctx.currentTime;
+      if (take?.trackId === trackId) {
+        const mode = take.mode;
+        discardTake(); // a lane created for the take goes with it
+        if (mode === 'first') setState('idle', at);
+        else if (state === 'overdubbing') setState('playing', at);
+      }
+      const cur = store.current;
+      const idx = cur.tracks.findIndex((t) => t.id === trackId);
+      if (idx < 0) {
+        log('delete', { trackId, withTake: true });
+        return true;
+      }
+      const tracks = cur.tracks.filter((t) => t.id !== trackId);
+      const neighbour = tracks[idx] ?? tracks[idx - 1] ?? null;
+      const selectedId = cur.selectedId === trackId ? (neighbour?.id ?? null) : cur.selectedId;
+      if (tracks.length === 0) {
+        if (scheduler.running) stopPlayback();
+        commitSession({ ...cur, tracks: [], selectedId: null, loopLength: null }, cur);
+        setState('idle', at);
+      } else {
+        commitSession({ ...cur, tracks, selectedId }, cur);
+      }
+      log('delete', { trackId, left: tracks.length });
+      return true;
+    },
     vocalAudio(trackId) {
       return vocalBufferOf(trackId)();
     },
@@ -678,6 +717,11 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       log('toggle', { trackId });
     },
     async setDevice(patch) {
+      // a mic choice is applied here (main.ts createMic doesn't know it); a failed choice falls back to the default
+      if ('micId' in patch && (patch.micId ?? null) !== mic.inputId()) {
+        const opened = await mic.setInput(patch.micId ?? null);
+        if (!opened) log('error', { message: 'chosen mic failed, default in use', micId: patch.micId });
+      }
       device = { ...device, ...patch };
       log('device', { ...device });
       await saveDevice(device);

@@ -18,6 +18,15 @@ export interface Mic extends MicFeed {
   loopback(delaySec: Sec): () => void;
   /** context time just after the newest sample received (0 before the first block) */
   latest(): Sec;
+  /** audio inputs (labels need mic permission, which the app has after start); [] in test mode */
+  listInputs(): Promise<{ id: string; label: string }[]>;
+  /**
+   * re-open getUserMedia on input `id` (deviceId exact), or the default input for null. Resolves true when that input
+   * opened, false when it failed and the default input was opened instead.
+   */
+  setInput(id: string | null): Promise<boolean>;
+  /** the input currently asked for (null = default) */
+  inputId(): string | null;
   /** diagnostics: blocks received, discontinuities (block.frame ≠ previous end) and frames missing in them */
   stats(): { blocks: number; gaps: number; gapFrames: number; recent: [number, number, number][] };
 }
@@ -26,6 +35,8 @@ export interface MicOptions {
   /** true: never call getUserMedia; audio only comes from inject() */
   test: boolean;
   ec: boolean;
+  /** DeviceSettings.micId: input to open (null/undefined = default) */
+  micId?: string | null;
 }
 
 /** ring buffer length */
@@ -64,14 +75,15 @@ export async function createMic(engine: AudioEngine, opts: MicOptions): Promise<
   };
 
   const device = createDevice(ctx, tap, opts.ec);
-  if (!opts.test) await device.open();
+  device.micId = opts.micId ?? null;
+  if (!opts.test) await device.openOrDefault();
   // re-acquire a mic track that ended (iOS background, device lost) once audio is back / the page is visible
   let lastReopen = 0;
   const reopenIfEnded = () => {
     if (opts.test || !device.ended() || document.visibilityState !== 'visible') return;
     if (performance.now() - lastReopen < REOPEN_MIN_INTERVAL_MS) return;
     lastReopen = performance.now();
-    void device.open().catch((e) => console.error('mic reopen failed', e));
+    void device.openOrDefault().catch((e) => console.error('mic reopen failed', e));
   };
   device.onEnded = reopenIfEnded;
   const offLifecycle = engine.onLifecycle((ev) => {
@@ -97,8 +109,25 @@ export async function createMic(engine: AudioEngine, opts: MicOptions): Promise<
     },
     async setEc(ec) {
       device.ec = ec;
-      if (!opts.test) await device.open();
+      if (!opts.test) await device.openOrDefault();
     },
+    async listInputs() {
+      if (opts.test || !navigator.mediaDevices?.enumerateDevices) return [];
+      try {
+        const all = await navigator.mediaDevices.enumerateDevices();
+        return all
+          .filter((d) => d.kind === 'audioinput' && d.deviceId)
+          .map((d, i) => ({ id: d.deviceId, label: d.label || `microphone ${i + 1}` }));
+      } catch {
+        return [];
+      }
+    },
+    async setInput(id) {
+      device.micId = id;
+      if (opts.test) return true;
+      return device.openOrDefault();
+    },
+    inputId: () => device.micId,
     reportedLatency: () => device.latency(),
     dispose() {
       offLifecycle();
@@ -127,6 +156,10 @@ export async function createMic(engine: AudioEngine, opts: MicOptions): Promise<
 
 interface Device {
   ec: boolean;
+  /** input asked for (null = default) */
+  micId: string | null;
+  /** open micId; if that fails, the default input. true = micId (or the default when null) opened */
+  openOrDefault(): Promise<boolean>;
   /** called when the live track ends on its own */
   onEnded: () => void;
   open(): Promise<void>;
@@ -140,11 +173,35 @@ function createDevice(ctx: AudioContext, tap: AudioNode, ec: boolean): Device {
   let source: MediaStreamAudioSourceNode | null = null;
   const dev: Device = {
     ec,
+    micId: null,
     onEnded: () => {},
+    async openOrDefault() {
+      if (dev.micId === null) {
+        await dev.open();
+        return true;
+      }
+      try {
+        await dev.open();
+        return true;
+      } catch (e) {
+        console.warn('chosen mic failed, using the default', e);
+        const wanted = dev.micId;
+        dev.micId = null;
+        try {
+          await dev.open();
+        } finally {
+          dev.micId = wanted; // keep asking for it next time (it may be unplugged now)
+        }
+        return false;
+      }
+    },
     async open() {
       dev.close();
       const s = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: dev.ec, noiseSuppression: false, autoGainControl: false, channelCount: 1 },
+        audio: {
+          echoCancellation: dev.ec, noiseSuppression: false, autoGainControl: false, channelCount: 1,
+          ...(dev.micId ? { deviceId: { exact: dev.micId } } : {}),
+        },
       });
       stream = s;
       s.getAudioTracks().forEach((t) => t.addEventListener('ended', () => stream === s && dev.onEnded()));

@@ -46,6 +46,7 @@ function validDevice(d: Partial<DeviceSettings> | undefined): Partial<DeviceSett
   if (typeof d.inLat === 'number' && Number.isFinite(d.inLat)) out.inLat = d.inLat;
   if (typeof d.ec === 'boolean') out.ec = d.ec;
   if (typeof d.calibrated === 'boolean') out.calibrated = d.calibrated;
+  if (typeof d.micId === 'string' || d.micId === null) out.micId = d.micId;
   return out;
 }
 
