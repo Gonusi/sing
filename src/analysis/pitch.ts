@@ -17,8 +17,9 @@ import type { MicBlock, PitchFrame, PitchTracker } from '../types.ts';
 // ---------- constants ----------
 export const PITCH_WINDOW_SAMPLES = 2048;
 export const PITCH_HOP_SEC = 0.01;
-/** whole-window RMS below this → unvoiced (≈ -42 dBFS; room noise in the fixtures sits at -45 dBFS) */
-export const PITCH_MIN_RMS = 0.008;
+/** whole-window RMS below this → unvoiced (≈ -54 dBFS). Was 0.008 (-42 dBFS): the owner's iPhone take played 22 dB
+ *  quieter (-47 dBFS mean) kept 4 of 27 notes; at 0.002 all are kept down to -51 dBFS. Clarity >= 0.85 rejects room noise. */
+export const PITCH_MIN_RMS = 0.002;
 /** pitchy clarity below this → unvoiced (pitchy's own clarityThreshold only steers peak picking) */
 export const PITCH_MIN_CLARITY = 0.85;
 export const PITCH_MIN_HZ = 70;
