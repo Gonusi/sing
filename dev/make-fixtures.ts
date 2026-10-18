@@ -68,6 +68,24 @@ interface VoiceStyle {
   aspirationRelDb: number;
   /** cycled per note */
   vowels: Formant[][];
+  /** amateur habits, drawn per note (absent in the spec's fixtures, which stay bit-identical) */
+  amateur?: AmateurHabits;
+}
+
+/** per-note habits of an untrained singer; ranges are [lo, hi] */
+interface AmateurHabits {
+  /** detune replaces DETUNE_MAX_CENTS */
+  detuneCents: number;
+  /** slow wander inside a note (two sines, 0.8 and 1.7 Hz), peak cents */
+  driftCents: number;
+  /** late reach: the note starts this many semitones flat and arrives after scoopSec (any join kind) */
+  scoopProb: number;
+  scoopSemis: [number, number];
+  scoopSec: [number, number];
+  /** fall-off at the end of a note followed by a gap */
+  tailProb: number;
+  tailSemis: [number, number];
+  tailSec: [number, number];
 }
 
 const DEFAULT_VOICE: VoiceStyle = {
@@ -109,6 +127,27 @@ export interface FixtureTruth {
   durationSec: number;
   notes: { t: number; dur: number; midi: number }[];
   hits: { t: number; kind: DrumKindName }[];
+  /** which note stages the gated thresholds apply to: the live segmenter output and/or cleanNotes (default both) */
+  gateStages?: NoteStage[];
+  /** 'contour': approximate truth for a real take (syllables with melody steps), scored by count and contour */
+  mode?: 'exact' | 'contour';
+  syllables?: ContourSyllable[];
+  toleranceSec?: number;
+  intervalToleranceSt?: number;
+}
+
+export type NoteStage = 'live' | 'clean';
+
+/** one sung syllable of an approximate (contour) truth */
+export interface ContourSyllable {
+  /** onset by eye, seconds from the file start */
+  t: number;
+  text: string;
+  phrase: number;
+  /** expected semitone step from the previous syllable (null for the first) */
+  step: number | null;
+  /** may be absent or present (fast, quiet syllables): neither a miss nor an extra */
+  optional?: boolean;
 }
 
 /** How a sung note joins the previous one. */
@@ -229,26 +268,41 @@ interface PlacedNote extends SungNote {
   vibRateHz: number;
   style: VoiceStyle;
   formants: Formant[];
+  /** amateur habits drawn for this note (0 = none) */
+  lateScoopSemis: number;
+  lateScoopSec: number;
+  tailSemis: number;
+  tailSec: number;
+  driftPhase: [number, number];
 }
 
 function placeNotes(notes: SungNote[], rng: () => number, baseDbfs: number, style: VoiceStyle): PlacedNote[] {
   const placed: PlacedNote[] = [];
   let cursor = 0;
+  const am = style.amateur;
+  const arng = am ? createRng(Math.floor(rng() * 2 ** 31)) : null;
   for (const [i, n] of notes.entries()) {
     const start = n.join.kind === 'gap' ? cursor + n.join.sec : cursor;
     placed.push({
       ...n,
       start,
       end: start + n.dur,
-      detuneSemis: uniform(rng, -DETUNE_MAX_CENTS, DETUNE_MAX_CENTS) / 100,
+      detuneSemis: uniform(rng, -(am?.detuneCents ?? DETUNE_MAX_CENTS), am?.detuneCents ?? DETUNE_MAX_CENTS) / 100,
       levelRms: dbToGain(baseDbfs + uniform(rng, -3, 3)),
       vibPhase: uniform(rng, 0, 2 * Math.PI),
       vibRateHz: style.vibratoHz * uniform(rng, 0.95, 1.05),
       style,
       formants: style.vowels[i % style.vowels.length],
+      lateScoopSemis: am && arng && arng() < am.scoopProb ? uniform(arng, ...am.scoopSemis) : 0,
+      lateScoopSec: am && arng ? uniform(arng, ...am.scoopSec) : 0,
+      tailSemis: am && arng && arng() < am.tailProb ? uniform(arng, ...am.tailSemis) : 0,
+      tailSec: am && arng ? uniform(arng, ...am.tailSec) : 0,
+      driftPhase: am && arng ? [uniform(arng, 0, 2 * Math.PI), uniform(arng, 0, 2 * Math.PI)] : [0, 0],
     });
     cursor = start + n.dur;
   }
+  // a tail only falls off before a gap (a slurred note's end is the next note's glide)
+  for (let i = 0; i + 1 < placed.length; i++) if (placed[i + 1].join.kind !== 'gap') placed[i].tailSemis = 0;
   return placed;
 }
 
@@ -257,7 +311,12 @@ function notePitch(n: PlacedNote, t: number): number {
   const age = t - n.start;
   const st = n.style;
   const vibDepth = (st.vibratoCents / 100) * raisedCos((age - st.vibratoDelaySec) / VIBRATO_FADE_IN_SEC);
-  const scoop = n.join.kind === 'gap' && st.scoopCents > 0 ? (-st.scoopCents / 100) * (1 - smoothstep(age / st.scoopSec)) : 0;
+  let scoop = n.join.kind === 'gap' && st.scoopCents > 0 ? (-st.scoopCents / 100) * (1 - smoothstep(age / st.scoopSec)) : 0;
+  if (n.lateScoopSemis > 0 && n.join.kind !== 'slur') scoop -= n.lateScoopSemis * (1 - smoothstep(age / n.lateScoopSec));
+  if (n.tailSemis > 0) scoop -= n.tailSemis * smoothstep((t - (n.end - n.tailSec)) / n.tailSec);
+  if (st.amateur) {
+    scoop += (st.amateur.driftCents / 100) * (0.6 * Math.sin(n.driftPhase[0] + 2 * Math.PI * 0.8 * age) + 0.4 * Math.sin(n.driftPhase[1] + 2 * Math.PI * 1.7 * age));
+  }
   return n.midi + n.detuneSemis + scoop + vibDepth * Math.sin(n.vibPhase + 2 * Math.PI * n.vibRateHz * age);
 }
 
@@ -456,16 +515,23 @@ interface FixtureDef {
   description: string;
   /** stress fixtures probe robustness beyond the spec; default true */
   gated?: boolean;
+  gateStages?: NoteStage[];
   sampleRate?: number;
   build(sampleRate: number, rng: () => number): { audio: Float64Array; notes: FixtureTruth['notes']; hits: FixtureTruth['hits'] };
 }
 
 /** a melody with random durations in [durLo, durHi]; each join after the first is a gap (prob pGap) or a slur */
-function melody(midis: number[], rng: () => number, durLo: number, durHi: number, pGap: number, gapLo: number, gapHi: number): SungNote[] {
+/** `joined` = how notes without a gap join: slurred (no articulation) or with an amplitude dip (a sung syllable) */
+function melody(midis: number[], rng: () => number, durLo: number, durHi: number, pGap: number, gapLo: number, gapHi: number, joined: 'slur' | 'dip' = 'slur'): SungNote[] {
   return midis.map((midi, i): SungNote => ({
     midi,
     dur: uniform(rng, durLo, durHi),
-    join: i === 0 || rng() < pGap ? { kind: 'gap', sec: i === 0 ? LEAD_IN_SEC : uniform(rng, gapLo, gapHi) } : { kind: 'slur' },
+    join:
+      i === 0 || rng() < pGap
+        ? { kind: 'gap', sec: i === 0 ? LEAD_IN_SEC : uniform(rng, gapLo, gapHi) }
+        : joined === 'slur'
+          ? { kind: 'slur' }
+          : { kind: 'dip', depthDb: uniform(rng, 10, 16), sec: uniform(rng, 0.04, 0.06) },
   }));
 }
 
@@ -486,6 +552,10 @@ const BEATBOX_BAR: DrumKindName[] = ['kick', 'hat', 'snare', 'hat'];
 /** 16ths at 100 bpm (150 ms apart), the densest pattern we expect */
 const BEATBOX_FAST_BAR: DrumKindName[] = ['kick', 'hat', 'hat', 'kick', 'snare', 'hat', 'kick', 'hat'];
 const FAST_LINE = [64, 66, 67, 69, 71, 69, 67, 66, 64, 62, 64, 67];
+/** Jingle Bells verse in E (low male voice): dash-ing through the snow / in a one horse o-pen sleigh */
+const AMATEUR_LINE_A = [40, 49, 47, 45, 40, 40, 49, 47, 45, 42];
+/** o'er the fields we go / laugh-ing all the way (repeated syllables split by short gaps) */
+const AMATEUR_LINE_B = [42, 50, 49, 47, 44, 52, 52, 50, 47, 49];
 
 function beatboxHits(rng: () => number, bars: number, jitterSec: number, baseDb: number, levelVarDb: number, pattern = BEATBOX_BAR, stepSec = 60 / BPM_BEATBOX / 2): PlacedHit[] {
   const hits: PlacedHit[] = [];
@@ -580,6 +650,28 @@ export const FIXTURES: FixtureDef[] = [
     description: 'beatbox-basic through a phone-like mic (high-pass 120 Hz, low-pass 8 kHz), ±6 dB level and ±12 ms timing variation',
     build: (sr, rng) => beatboxFixture(sr, rng, beatboxHits(rng, 4, PHONE_TIMING_JITTER_SEC, PHONE_BASE_GAIN_DB, PHONE_LEVEL_VARIATION_DB), true),
   },
+  // ----- round 2: amateur habits, gated on the cleaned notes only (the live segmenter splits scoops by design) -----
+  {
+    name: 'sing-scoops',
+    gateStages: ['clean'],
+    description: 'late-reach scoops (70% of syllables start 2–4 st flat and arrive after 100–200 ms) and fall-off tails before gaps (50%, 2–3 st over 80–150 ms); C major line twice, syllables split by gaps or 10–16 dB dips',
+    build: (sr, rng) =>
+      sungFixture(sr, rng, [...melody(C_MAJOR_LINE, rng, 0.35, 0.8, 0.5, 0.12, 0.25, 'dip'), ...melody(C_MAJOR_LINE, rng, 0.35, 0.8, 0.5, 0.12, 0.25, 'dip')], -18, {
+        ...DEFAULT_VOICE,
+        amateur: { detuneCents: 30, driftCents: 0, scoopProb: 0.7, scoopSemis: [2, 4], scoopSec: [0.1, 0.2], tailProb: 0.5, tailSemis: [2, 3], tailSec: [0.08, 0.15] },
+      }),
+  },
+  {
+    name: 'sing-amateur',
+    gateStages: ['clean'],
+    description: 'a hummed amateur line: ±20 c detune, ±40 c slow drift inside notes, 40% scoops (1–3 st, 60–150 ms), 30% tails, low register; Jingle-Bells-like verse contour',
+    build: (sr, rng) =>
+      sungFixture(sr, rng, [...melody(AMATEUR_LINE_A, rng, 0.3, 0.7, 0.4, 0.12, 0.3, 'dip'), ...melody(AMATEUR_LINE_B, rng, 0.3, 0.7, 0.4, 0.12, 0.3, 'dip')], -24, {
+        ...DEFAULT_VOICE,
+        vibratoCents: 15,
+        amateur: { detuneCents: 20, driftCents: 40, scoopProb: 0.4, scoopSemis: [1, 3], scoopSec: [0.06, 0.15], tailProb: 0.3, tailSemis: [1.5, 3], tailSec: [0.08, 0.15] },
+      }),
+  },
   // ----- stress fixtures (not gated): harder than the spec, to see where the settings break -----
   {
     name: 'stress-sing-quiet',
@@ -668,6 +760,7 @@ export function makeFixtures(outDir = FIXTURE_OUT_DIR, names?: string[]): string
       name: def.name,
       description: def.description,
       gated: def.gated ?? true,
+      ...(def.gateStages ? { gateStages: def.gateStages } : {}),
       sampleRate,
       durationSec: round4(audio.length / sampleRate),
       notes,

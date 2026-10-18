@@ -24,6 +24,7 @@
 //                 and late for low ones).
 // A note is emitted from push() as soon as nothing can change it any more (see notes/dsp.md for the delays).
 // Times: the same clock as PitchFrame.t (mic-stamp context time). RawNote.midi is the fractional median (unsnapped).
+// Every returned note is a SegmentedNote (RawNote + `attack`, see below).
 import type { NoteSegmenter, PitchFrame, RawNote, Sec } from '../types.ts';
 import { hzToMidi } from './autotune.ts';
 
@@ -45,11 +46,11 @@ export const MERGE_GAP_SEC = 0.05;
 export const LEGATO_DROPOUT_MAX_SEC = 0.12;
 /** voiced frames a note needs after a short gap before it is compared with the held note */
 export const MERGE_DECIDE_FRAMES = 3;
-export const DIP_DROP_DB = 6;
+export const DIP_DROP_DB = 5;
 export const DIP_RECOVER_DB = 4;
 /** a dip that has not recovered within this long is a level change, not an articulation */
 export const DIP_MAX_SEC = 0.3;
-export const ONSET_LOOKBACK_FRAMES = 5;
+export const ONSET_LOOKBACK_FRAMES = 10;
 export const ONSET_LOOKAHEAD_FRAMES = 4;
 export const ONSET_RMS_FRACTION = 0.15;
 /** the energy refinement only runs when the note level is this far above the floor before it (a real attack) */
@@ -64,6 +65,14 @@ const DIP_RECOVER_RATIO = 10 ** (DIP_RECOVER_DB / 20);
 const ONSET_MIN_RISE_RATIO = 10 ** (ONSET_MIN_RISE_DB / 20);
 /** raw frames kept for smoothing and onset refinement (power of two) */
 const RAW_RING = 64;
+
+/**
+ * RawNote plus `attack`: true when the note starts a new articulation (after silence, or after an energy dip = a
+ * repeated note), false when the voice runs into it from the previous note through a pitch change (a glide, or a
+ * legato voicing dropout). cleanNotes merges only across non-attack boundaries. Proposed for RawNote/RawLoopNote in
+ * src/types.ts (optional field); until then it rides along as an extra property.
+ */
+export type SegmentedNote = RawNote & { attack: boolean };
 
 // ---------- small helpers ----------
 /** growable Float64Array */
@@ -299,7 +308,8 @@ export function createSegmenter(): NoteSegmenter {
     refineOnset(n);
     const dur = end - n.onset;
     if (dur < MIN_NOTE_SEC || n.sorted.length === 0) return;
-    out.push({ t: n.onset, dur, midi: noteMedian(n), vel: velocityFromRms(noteRms(n, end)) });
+    const note: SegmentedNote = { t: n.onset, dur, midi: noteMedian(n), vel: velocityFromRms(noteRms(n, end)), attack: n.start !== 'pitch' };
+    out.push(note);
   }
 
   // ----- onset refinement (energy) -----
@@ -358,6 +368,7 @@ export function createSegmenter(): NoteSegmenter {
       heldEnd = mid;
       cur.onset = mid;
       cur.refineIdx = -1;
+      cur.start = 'pitch';
     }
     finaliseHeld();
   }
@@ -369,6 +380,7 @@ export function createSegmenter(): NoteSegmenter {
     if (Math.round(noteMedian(cur)) === Math.round(lastMidi)) return;
     cur.onset = 0.5 * (lastEnd + cur.t.data[0] - hopSec / 2);
     cur.refineIdx = -1;
+    cur.start = 'pitch';
   }
 
   function closeCurToHeld(): void {
