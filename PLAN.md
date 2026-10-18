@@ -272,7 +272,9 @@ Gate costs: Node DSP checks, `tsc` and the build are nearly free → always. E2E
 Design rule from the owner: users are super-amateurs humming roughly in tune → robustness over fidelity.
 - [x] iPhone: echo cancellation ON makes playback loud (EC off = earpiece mode); vocals pump with EC on over the speaker (canceller) → headphones + EC off for clean vocals
 - [x] contract: Take.raw (RawLoopNote), Session.fx.smooth, Controller.setSmoothing, analysis/clean.ts stub (coordinator)
-- [ ] dsp: cleanNotes (scoop/tail absorption, hysteresis, stable onsets), scoop fixtures, real-take replay through loop/take.ts, key snap proposal
+- [x] dsp: cleanNotes (scoop/tail absorption, hysteresis, stable onsets), scoop fixtures, real-take replay through loop/take.ts, key snap proposal — real take 27→20 notes (20 syllables), intervals 19/19 within ±1 st; DEFAULT_SMOOTHING 0.55; volume gate 0.008→0.002
+- [x] synth register fit G3–E4 (hummed E2–E3 was inaudible on the phone speaker); attack flag in the contract
+- [ ] engine: copy `attack` in placeNote; key snap (estimateKey + snapToKey, takes with ≥ 6 notes) in the note derivation
 - [ ] engine: store raw, derive notes via cleanNotes, re-derive on setSmoothing, EC default on
 - [x] shell: smoothing slider in ⋯, EC sub-line text
 

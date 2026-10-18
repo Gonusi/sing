@@ -50,6 +50,8 @@ export interface RawLoopNote {
   dur: Sec;
   midi: number;
   vel: number;
+  /** see RawNote.attack */
+  attack?: boolean;
 }
 
 /** One recorded take. Drum tracks use `hits`, vocal tracks use `audio` + `peaks`, all others use `notes`. */
@@ -102,6 +104,8 @@ export interface RawNote {
   /** fractional MIDI (median over the note), not snapped */
   midi: number;
   vel: number;
+  /** true when the note starts a new articulation (after silence or an energy dip); smoothing never merges across it */
+  attack?: boolean;
 }
 
 export interface RawHit {
