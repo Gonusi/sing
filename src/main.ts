@@ -98,6 +98,12 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
       await controller.setDevice({ inLat: r.inLat, calibrated: true });
       return `latency ${Math.round(r.inLat * 1000)} ms · heard ${r.heard}/${r.measured}`;
     },
+    listMics: () => mic.listInputs(),
+    getMic: () => controller.device.micId ?? null,
+    setMic: async (id) => {
+      await controller.setDevice({ micId: id });
+      return id === null || mic.inputId() === id;
+    },
     probe: () => startProbe(engine, mic),
     exportTake: () => controller.lastTakeWav(),
     clearSession: () => controller.clearSession(),
