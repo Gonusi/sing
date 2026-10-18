@@ -268,6 +268,14 @@ Gate costs: Node DSP checks, `tsc` and the build are nearly free → always. E2E
 3. Drum thresholds on phone mics → retune on real takes.
 4. Headless timing jitter in e2e → assertions use the scheduler log, and audio re-detection gets a 40 ms tolerance.
 
+## Round 2 — real takes (2026-10-18)
+Design rule from the owner: users are super-amateurs humming roughly in tune → robustness over fidelity.
+- [x] iPhone: echo cancellation ON makes playback loud (EC off = earpiece mode); vocals pump with EC on over the speaker (canceller) → headphones + EC off for clean vocals
+- [ ] contract: Take.raw (RawLoopNote), Session.fx.smooth, Controller.setSmoothing, analysis/clean.ts stub (coordinator)
+- [ ] dsp: cleanNotes (scoop/tail absorption, hysteresis, stable onsets), scoop fixtures, real-take replay through loop/take.ts, key snap proposal
+- [ ] engine: store raw, derive notes via cleanNotes, re-derive on setSmoothing, EC default on
+- [ ] shell: smoothing slider in ⋯, EC sub-line text
+
 ## Known issues
 - (fixed locally 2026-10-17, not yet deployed) WebKit advances currentTime mid-task: vocal starts lost a render quantum (2.7 ms late) → 10 ms start margin; the states.spec failure was a two-clock-reads test artefact.
 

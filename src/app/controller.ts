@@ -576,6 +576,9 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       return device;
     },
     scheduler,
+    setSmoothing() {
+      // placeholder (engine)
+    },
     setEcho(amount) {
       const a = Math.min(1, Math.max(0, Number.isFinite(amount) ? amount : 0));
       engine.setEcho(a);

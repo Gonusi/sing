@@ -44,10 +44,21 @@ export interface TakeAudio {
   length: number;
 }
 
+/** A detected note in loop position, before smoothing and snapping (fractional midi). */
+export interface RawLoopNote {
+  pos: Sec;
+  dur: Sec;
+  midi: number;
+  vel: number;
+}
+
 /** One recorded take. Drum tracks use `hits`, vocal tracks use `audio` + `peaks`, all others use `notes`. */
 export interface Take {
   id: string;
+  /** what the take plays: derived from `raw` by cleanNotes(smoothing) + snap + register fit + phrases */
   notes: Note[];
+  /** the detections the notes were derived from, kept so a smoothing change can re-derive them (melodic takes) */
+  raw?: RawLoopNote[];
   hits: DrumHit[];
   audio?: TakeAudio;
   /** ~256 peak levels 0..1 across the loop, for drawing a vocal take */
@@ -67,8 +78,8 @@ export interface Session {
   loopLength: Sec | null;
   tracks: Track[];
   selectedId: string | null;
-  /** song-wide effects; missing in sessions saved before MVP+ (treat as defaults) */
-  fx?: { echo: number };
+  /** song-wide settings; missing in older saved sessions (treat as defaults). smooth = note smoothing 0..1 */
+  fx?: { echo: number; smooth?: number };
 }
 
 /** Per device, stored apart from the session (undo never touches it). */
@@ -251,6 +262,8 @@ export interface Controller {
   toggleTrack(trackId: string): void;
   /** global echo/space amount 0..1 (saved in Session.fx, not an undo point) */
   setEcho(amount: number): void;
+  /** note smoothing 0..1 (Session.fx.smooth, not an undo point); re-derives every melodic take's notes from its raw */
+  setSmoothing(amount: number): void;
   setDevice(patch: Partial<DeviceSettings>): Promise<void>;
   clearSession(): Promise<void>;
   /** WAV of the raw mic audio of the last take (for exporting real fixtures) */
