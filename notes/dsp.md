@@ -3,7 +3,59 @@
 Owner: dsp agent. Files: `src/analysis/{pitch,segment,autotune,phrases,drums}.ts`, `dev/{wav,make-fixtures,analyze}.ts`,
 `dev/fixtures/out/` (generated, gitignored), this file.
 
-Run: `node dev/make-fixtures.ts` (≈1 s, 18 fixtures) then `node dev/analyze.ts` (≈3 s; exit 1 when a gated threshold fails).
+Run: `node dev/make-fixtures.ts` (≈1.5 s, 20 fixtures) then `node dev/analyze.ts` (≈4 s; exit 1 when a gated threshold fails;
+also reports the owner's real takes in `dev/fixtures/real/` when present — local only, gitignored, never committed).
+Replay a real take through the app's own take recorder: `node dev/replay-take.ts <wav> [--kind synth] [--smooth x]`.
+
+## Round 2 (2026-10-18): the owner's first real take
+
+Take `dev/fixtures/real/take-20261018-092348.wav` (local): iPhone, EC on, −24.7 dBFS mean, gaps at −65..−75 dBFS (EC gates
+the room), Jingle Bells verse, low male voice E2–E3. Approximate truth `…092348.json` (local): `"mode": "contour"`, one
+entry per syllable (onset by eye, melody step from the previous syllable, `optional` for the unsingable "a one" in
+"in a one-horse"); `dev/analyze.ts` scores syllables found / extra notes / intervals within ±1 st.
+
+**"Almost no notes" — what the replay shows.** `dev/replay-take.ts` feeds the WAV through the real `createTakeRecorder`
+(src/loop/take.ts, first take, fake MicFeed) → 27 raw notes, **27 committed**: take.ts loses nothing on this take
+(placeNote/finish keep every note). Two causes remain that fit the report:
+1. **Level.** With the old volume gate (whole-window RMS 0.008 = −42 dBFS) the same take played 22 dB quieter (−47 dBFS mean)
+   committed 4 of 27 notes, 26 dB quieter none. An EC-off take (no voice processing gain) can sit there. Gate lowered
+   to 0.002 (−54 dBFS): all notes kept down to −51 dBFS; fixtures unchanged (clarity ≥ 0.85 still rejects room noise).
+   Needs one EC-off export to confirm the level.
+2. **Hearing them.** A synth track plays as sung (registerShift synth = 0): E2–E3 (82–165 Hz) on an iPhone speaker is
+   nearly inaudible — "committed but silent". Proposal for the coordinator: give synth a sweet range too (e.g. C3–C5).
+
+**Before / after on the real take** (20 required syllables, 19 intervals):
+
+| stage | notes | syllables found | extra | intervals ±1 st |
+|---|---|---|---|---|
+| live segmenter (what take.ts commits today) | 27 | 20/20 | 7 (scoops, splits) | 16/19 |
+| cleanNotes(0.55) (round 2) | **20** | 20/20 | **0** | **19/19** |
+
+**cleanNotes** (src/analysis/clean.ts, header has the rules): scoops into the next note (keeping the scoop's onset, taking
+the target's pitch), tails onto the previous, duration-limited hysteresis, drop what is still too short. `smoothing` s
+scales STABLE 60→240 ms, MERGE 1→4 st, HYST 0.3→1.2 st (only when one note is shorter than 80→280 ms), JOIN GAP 20→70 ms,
+MIN 80→140 ms. **DEFAULT_SMOOTHING = 0.55**: the real take is perfect for 0.5–1.0 (0.45: 1 extra, 0.4: 3), the gated
+synthetic fixtures stay 100% for 0–0.6 (0.65+ merges detuned semitone steps in sing-legato) → 0.55 is mid-window.
+New gated fixtures (gated on the clean stage only; the live segmenter splits scoops by design): `sing-scoops` (70% late
+scoops 2–4 st over 100–200 ms, tails 2–3 st), `sing-amateur` (±20 c detune, ±40 c drift, scoops, tails, low register).
+
+**Contract change needed (minimal): `attack?: boolean` on RawNote and RawLoopNote** — true when the note starts a new
+articulation (after silence or an energy dip), false when the voice glides into it from the previous note. The segmenter
+returns it now (`SegmentedNote`); cleanNotes never merges into an attack, so repeated syllables on one pitch ("jin-gle
+bells", "laugh-ing") stay separate while drift splits merge. Engine: `placeNote` must copy it into `Take.raw`. Without
+it cleanNotes infers attacks (joined + same semitone = dip split): the real take then keeps one drift split (21 notes).
+
+**Segmenter changes (replay-driven):** volume gate 0.008 → 0.002; repeated-note dip 6 → 5 dB (short articulation dips
+measured only 4.6–5 dB through the 20 ms RMS); energy-onset lookback 5 → 10 frames (a scoop after a gap has clarity
+0.75–0.82 for 70 ms, so the first voiced frame is late). Synthetic live results unchanged (86/86, 4.2 ms mean).
+
+**Key snap proposal (not wired):** `estimateTuningOffset`, `estimateKey`, `snapToKey` in autotune.ts; `dev/analyze.ts --key`.
+Key alone does NOT fix the flip: it picks B major, and A#2 and B2 are both in it. The take is sung a third of a
+semitone off (circular mean −0.33 st); removing that first, the key is A major / F# minor and the same sung degree
+(through / o / we / the: 46.11, 46.76, 46.54, 46.58) snaps to B2 every time. Exact intervals: nearest semitone 13/19,
+key only 9/19, offset + nearest 15/19, **offset + key 17/19**. Synthetic gated fixtures stay 100% with it; a take that
+changes key (stress-sing-vibrato: C major then A major lines) loses 2 of 16. Recommendation: wire offset + key snap for
+melodic takes with ≥ 6 notes, behind the smoothing slider (e.g. on when smoothing ≥ 0.5).
 `node dev/analyze.ts take.wav` on a WAV without a `.json` next to it just prints the detections (for real phone takes);
 `--drums` / `--notes` force a pipeline, `--verbose` lists every match.
 
@@ -36,6 +88,8 @@ Run: `node dev/make-fixtures.ts` (≈1 s, 18 fixtures) then `node dev/analyze.ts
 
 ## Proposed contract changes (for the coordinator)
 
+0. (round 2) `attack?: boolean` on `RawNote` and `RawLoopNote` — see Round 2 above.
+
 1. `OnsetDetector.close(at: Sec): RawHit[]` — implemented (see above).
 2. Document in `types.ts`: `PitchFrame.rms` is the RMS of the central 20 ms of the window (not the whole 43 ms window; the
    segmenter needs the finer time resolution for onsets and repeated-note dips). The volume gate uses the whole window.
@@ -43,7 +97,7 @@ Run: `node dev/make-fixtures.ts` (≈1 s, 18 fixtures) then `node dev/analyze.ts
 ## What each module does (final parameters)
 
 ### pitch.ts
-pitchy `findPitch` on a 2048-sample window, hop `round(0.010·sr)` (480 / 441). Voiced iff whole-window RMS ≥ 0.008, clarity ≥
+pitchy `findPitch` on a 2048-sample window, hop `round(0.010·sr)` (480 / 441). Voiced iff whole-window RMS ≥ 0.002 (round 2; was 0.008), clarity ≥
 0.85, 70 ≤ hz ≤ 1100. **Lag-limited fallback:** pitchy searches every lag, and in fast glides the NSDF at a very long lag
 (few overlapping samples) beats the real period (seen: 26 Hz at clarity 0.96 in a G3→E3 slur). When pitchy's answer is out
 of range, the McLeod peak picking is redone on lags for 70–1100 Hz only, on pitchy's own `Autocorrelator`. In real glides
@@ -58,10 +112,11 @@ Per 10 ms frame, frame i processed when i+2 arrives:
   Shorter runs are folded back (±12 / ±24 octave errors moved back first) = the octave fold.
 - **gaps:** 2 unvoiced frames end a note; a gap < 50 ms re-joins it if it rounds to the same semitone and no dip happened;
   a pitch change across an unvoiced gap < 120 ms with no energy dip is a **legato dropout** → the new note starts mid-gap.
-- **repeated notes:** frame RMS ≥ 6 dB below the note's peak, then ≥ 4 dB back up within 300 ms → split at the dip minimum.
+- **repeated notes:** frame RMS ≥ 5 dB below the note's peak (round 2; was 6), then ≥ 4 dB back up within 300 ms → split at the dip minimum.
 - min note 80 ms; a too-short note that runs straight into the next one is absorbed into it (onset moves back: scoops).
 - **onset after a gap:** energy refinement — where frame RMS crosses floor + 15% of the way to the note level, searched
-  5 frames before to 4 after the first voiced frame; only when the level rises ≥ 6 dB (a real attack).
+  10 frames before (round 2; was 5) to 4 after the first voiced frame; only when the level rises ≥ 6 dB (a real attack).
+- every returned note carries `attack` (SegmentedNote): false for a pitch-split or legato-dropout start.
 - note midi = median of the accepted values (fractional, unsnapped); vel from the note RMS.
 
 ### drums.ts
@@ -145,9 +200,9 @@ Gated: `sing-cmaj`, `sing-cmaj-44k`, `sing-low`, `sing-high`, `sing-legato`, `si
   vibrato with amplitude modulation. First thing to do with the owner's exported takes: `node dev/analyze.ts take.wav`.
 - **Operatic vibrato (±1 semitone)** still splits notes at vibrato peaks (stress-sing-wide-vibrato: 9 extra notes). ±60 c is
   fine. Fix if needed: a vibrato-aware reference (mean over one vibrato period) before the departure test.
-- **Volume gate 0.008 (−42 dBFS)**: a quiet phone take (singer far from the mic, AGC off) may sit below it. If real takes show
-  missing soft notes, try 0.004; clarity ≥ 0.85 still rejects noise.
-- **Dip split (repeated notes)** will also split a sustained note with ≥ 6 dB tremolo or a fast swell (6 dB down, 4 dB up
+- **Volume gate** (round 2: 0.002 = −54 dBFS, was 0.008): a quiet phone take (singer far from the mic, AGC off) may sit below it. If real takes show
+  missing soft notes, lower it further; clarity ≥ 0.85 still rejects noise.
+- **Dip split (repeated notes)** will also split a sustained note with ≥ 5 dB tremolo or a fast swell (5 dB down, 4 dB up
   within 300 ms).
 - **Hats near the room noise** are missed (stress-beatbox-noisy: hats at −41 dBFS in −32 dBFS room noise; 3 of the weakest
   hats in stress-beatbox-fast / -44k). The fixture hat is noise > 7 kHz and the phone variant low-passes at 8 kHz, which is
@@ -156,6 +211,10 @@ Gated: `sing-cmaj`, `sing-cmaj-44k`, `sing-low`, `sing-high`, `sing-legato`, `si
 - **Kick/snare/hat thresholds** are tuned on one synthetic kit. Real beatbox kicks through a phone may have centroids of
   300–800 Hz (still kick by the centroid rule); "pf"/"psh" snares may reach 3–5 kHz centroids (close to the hat rule).
   Retune `KICK_*`/`HAT_*` on real takes; `dev/analyze.ts --verbose` prints the confusions.
+- **cleanNotes is tuned on one real take** (one singer, one song). Fast runs (100–200 ms slurred notes) merge at the default
+  (stress-sing-fast 7–9/12): fine for hummers, wrong for trained singers — the slider goes to 0.
+- A late-reach scoop that starts at the previous note's pitch with no articulation is indistinguishable from holding the
+  previous note longer: the new note's onset is then late by the scoop length (the synthetic scoops are articulated).
 - `close()` of the segmenter drops a truncated note shorter than 80 ms (a note begun < 80 ms before the overdub window end).
 
 ## Ideas for the next run

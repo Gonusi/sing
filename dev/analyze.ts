@@ -5,6 +5,7 @@
 //   no files  → every WAV in dev/fixtures/out/ (generated first with dev/make-fixtures.ts if missing) plus the owner's
 //               real takes in dev/fixtures/real/ (local only, gitignored; reported, never gated)
 //   --smooth  → cleanNotes smoothing for the "clean" stage (default DEFAULT_SMOOTHING)
+//   --key     → snap with snapToKey(estimateKey(stage notes)) instead of the nearest semitone (key-snap proposal)
 //   --drums   → run the onset detector on every file (default: only beatbox* files and files whose truth has hits)
 //   --notes   → run the note pipeline on every file (default: every file that is not a drum fixture)
 //   --verbose → list every detection next to the truth
@@ -22,7 +23,7 @@ import { basename, join } from 'node:path';
 import { createOnsetDetector } from '../src/analysis/drums.ts';
 import { createPitchTracker } from '../src/analysis/pitch.ts';
 import { createSegmenter } from '../src/analysis/segment.ts';
-import { snapMidi } from '../src/analysis/autotune.ts';
+import { estimateKey, snapMidi, snapToKey } from '../src/analysis/autotune.ts';
 import { cleanNotes, DEFAULT_SMOOTHING } from '../src/analysis/clean.ts';
 import type { RawHit, RawNote } from '../src/types.ts';
 import { FIXTURE_OUT_DIR, makeFixtures, type ContourSyllable, type FixtureTruth, type NoteStage } from './make-fixtures.ts';
@@ -154,7 +155,15 @@ function matchByTime(truthT: number[], detT: number[], tol: number): number[] {
   });
 }
 
-function scoreNotes(truth: FixtureTruth['notes'], notes: TimedNote[], verbose: boolean): NoteScore {
+type Snap = (midi: number) => number;
+
+/** the snap used for scoring: nearest semitone, or (--key) the take's estimated key */
+function snapperFor(notes: TimedNote[], useKey: boolean): { snap: Snap; key: string } {
+  const key = useKey ? estimateKey(notes) : null;
+  return key ? { snap: (m) => snapToKey(m, key), key: key.name } : { snap: snapMidi, key: '' };
+}
+
+function scoreNotes(truth: FixtureTruth['notes'], notes: TimedNote[], verbose: boolean, snap: Snap = snapMidi): NoteScore {
   const match = matchByTime(truth.map((n) => n.t), notes.map((n) => n.t), NOTE_ONSET_TOLERANCE_SEC);
   const score: NoteScore = { gt: truth.length, det: notes.length, correct: 0, wrongPitch: 0, missed: 0, extra: 0, onsetErrors: [], finalDelays: [] };
   const matched = new Set<number>();
@@ -168,7 +177,7 @@ function scoreNotes(truth: FixtureTruth['notes'], notes: TimedNote[], verbose: b
     matched.add(j);
     const d = notes[j];
     score.onsetErrors.push(Math.abs(d.t - gt.t));
-    const ok = snapMidi(d.midi) === gt.midi;
+    const ok = snap(d.midi) === gt.midi;
     if (ok) score.correct++;
     else score.wrongPitch++;
     if (verbose || !ok) {
@@ -195,7 +204,7 @@ export interface ContourScore {
   intervalsOk: number;
 }
 
-export function scoreContour(truth: FixtureTruth, notes: TimedNote[], verbose: boolean): ContourScore {
+export function scoreContour(truth: FixtureTruth, notes: TimedNote[], verbose: boolean, snap: Snap = snapMidi): ContourScore {
   const syl: ContourSyllable[] = truth.syllables ?? [];
   const tol = truth.toleranceSec ?? DEFAULT_CONTOUR_TOLERANCE_SEC;
   const itol = truth.intervalToleranceSt ?? DEFAULT_INTERVAL_TOLERANCE_ST;
@@ -229,10 +238,10 @@ export function scoreContour(truth: FixtureTruth, notes: TimedNote[], verbose: b
     if (j >= 0) {
       if (x.optional) s.optionalFound++;
       else s.found++;
-      note = `${notes[j].t.toFixed(3)} ${noteName(notes[j].midi).padEnd(4)} ${notes[j].midi.toFixed(2)}`;
+      note = `${notes[j].t.toFixed(3)} ${noteName(snap(notes[j].midi)).padEnd(4)} ${notes[j].midi.toFixed(2)}`;
       let mark = '';
       if (prev >= 0) {
-        const got = snapMidi(notes[j].midi) - snapMidi(notes[match[prev]].midi);
+        const got = snap(notes[j].midi) - snap(notes[match[prev]].midi);
         const ok = Math.abs(got - stepSum) <= itol;
         s.intervals++;
         if (ok) s.intervalsOk++;
@@ -301,6 +310,7 @@ function main(): number {
   const verbose = args.includes('--verbose');
   const smoothIdx = args.indexOf('--smooth');
   const smoothing = smoothIdx >= 0 ? Number(args[smoothIdx + 1]) : DEFAULT_SMOOTHING;
+  const useKey = args.includes('--key');
   const files = args.filter((a, i) => !a.startsWith('--') && !(i > 0 && args[i - 1] === '--smooth'));
   const paths = files.length ? files : listDefaultFiles();
 
@@ -343,17 +353,19 @@ function main(): number {
         }
       } else if (truth.mode === 'contour') {
         for (const stage of ['live', 'clean'] as const) {
-          console.log(`  ${stage}${stage === 'clean' ? ` (smoothing ${smoothing})` : ''}:`);
-          const c = scoreContour(truth, stages[stage], verbose);
+          const sn = snapperFor(stages[stage], useKey);
+          console.log(`  ${stage}${stage === 'clean' ? ` (smoothing ${smoothing})` : ''}${sn.key ? ` key ${sn.key}` : ''}:`);
+          const c = scoreContour(truth, stages[stage], verbose, sn.snap);
           contourRows.push(
-            `${(label + ' ' + stage).padEnd(NAME_COL + 6)} syllables ${c.found}/${c.syllables} (+${c.optionalFound} optional)  extra ${c.extra}  notes ${stages[stage].length}  intervals ${c.intervalsOk}/${c.intervals}`,
+            `${(label + ' ' + stage).padEnd(NAME_COL + 6)} syllables ${c.found}/${c.syllables} (+${c.optionalFound} optional)  extra ${c.extra}  notes ${stages[stage].length}  intervals ${c.intervalsOk}/${c.intervals}${sn.key ? `  (key ${sn.key})` : ''}`,
           );
         }
       } else {
         const gateStages = truth.gateStages ?? ['live', 'clean'];
         for (const stage of ['live', 'clean'] as const) {
-          if (verbose) console.log(`  ${stage}:`);
-          const s = scoreNotes(truth.notes, stages[stage], verbose);
+          const sn = snapperFor(stages[stage], useKey);
+          if (verbose) console.log(`  ${stage}${sn.key ? ` key ${sn.key}` : ''}:`);
+          const s = scoreNotes(truth.notes, stages[stage], verbose, sn.snap);
           const bucket = truth.notes.length > 0 && gated && gateStages.includes(stage) ? sung[stage] : truth.notes.length > 0 ? stress[stage] : null;
           if (bucket) {
             bucket.gt += s.gt;
