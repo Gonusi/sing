@@ -584,6 +584,203 @@ function beatboxFixture(sampleRate: number, rng: () => number, hits: PlacedHit[]
   return { audio, notes: [], hits: truth };
 }
 
+
+// ---------- round 3: mouth drums (beatbox by different people) through phone mics ----------
+/** how one person beatboxes, and the mic they do it into */
+export interface MouthVoice {
+  name: string;
+  /** "boom": a voiced low hum (harmonics of f0, sliding 10% down) after a lip burst */
+  kickF0Hz: number;
+  kickDecaySec: number;
+  kickBurstDb: number;
+  /** vowel resonance of the hum ("oo" ≈ 400, "u-uh" ≈ 600); harmonics near it dominate once the mic cuts the lows */
+  kickFormantHz: number;
+  /** hum attack (a hummed "mm-boom" swells in; a plosive "b" is near-instant) */
+  kickAttackSec: number;
+  /** pf = lip burst + air, k = tongue click + short noise, psh = slow broad hiss */
+  snare: 'pf' | 'k' | 'psh';
+  snareBandHz: [number, number];
+  snareDecaySec: number;
+  hatBandHz: [number, number];
+  hatDecaySec: number;
+  /** phone / earbud mic: 4th-order high-pass */
+  micHighpassHz: number;
+  /** iOS voice processing: room gated to ~-62 dBFS and a fast compressor; off = plain room noise at -50 dBFS */
+  ec: boolean;
+}
+
+export const MOUTH_VOICES: MouthVoice[] = [
+  // a textbook beatboxer on a phone: the rules handle it
+  { name: 'voice1', kickF0Hz: 95, kickDecaySec: 0.07, kickBurstDb: -14, kickFormantHz: 400, kickAttackSec: 0.006, snare: 'pf', snareBandHz: [900, 4000], snareDecaySec: 0.06, hatBandHz: [5000, 11000], hatDecaySec: 0.025, micHighpassHz: 150, ec: true },
+  // the owner's case: a sung "boom" (u-uh vowel, strong lip burst) into earbuds with EC; lows gone below 300 Hz
+  { name: 'voice2', kickF0Hz: 110, kickDecaySec: 0.09, kickBurstDb: -4, kickFormantHz: 650, kickAttackSec: 0.02, snare: 'k', snareBandHz: [1500, 3500], snareDecaySec: 0.035, hatBandHz: [6000, 12000], hatDecaySec: 0.04, micHighpassHz: 300, ec: true },
+  // a hissy snare ("psh", up to 9 kHz) and a dull hat ("ts", 4–8 kHz): the two sit close for fixed rules
+  { name: 'voice3', kickF0Hz: 120, kickDecaySec: 0.05, kickBurstDb: -18, kickFormantHz: 400, kickAttackSec: 0.006, snare: 'psh', snareBandHz: [3000, 9000], snareDecaySec: 0.09, hatBandHz: [4000, 8000], hatDecaySec: 0.05, micHighpassHz: 120, ec: false },
+];
+
+/** one example's random variation */
+interface MouthVariation {
+  gainDb: number;
+  pitch: number;
+  decay: number;
+  band: number;
+}
+
+function mouthVariation(rng: () => number): MouthVariation {
+  return { gainDb: uniform(rng, -4, 4), pitch: uniform(rng, 0.92, 1.08), decay: uniform(rng, 0.8, 1.2), band: uniform(rng, 0.9, 1.1) };
+}
+
+function bandNoise(len: number, sampleRate: number, lo: number, hi: number, rng: () => number): Float64Array {
+  const x = whiteNoise(len, rng);
+  applyBiquad(x, biquad('highpass', lo, 0.707, sampleRate));
+  applyBiquad(x, biquad('lowpass', Math.min(hi, sampleRate * 0.45), 0.707, sampleRate));
+  const g = 1 / (rmsOf(x) || 1);
+  for (let i = 0; i < len; i++) x[i] *= g;
+  return x;
+}
+
+/** add one mouth-drum sound at sample s0 (peak level about -12 dBFS before the mic chain) */
+function addMouthHit(out: Float64Array, s0: number, sampleRate: number, kind: DrumKindName, v: MouthVoice, va: MouthVariation, rng: () => number): void {
+  const g = dbToGain(-12 + va.gainDb);
+  if (kind === 'kick') {
+    const decay = v.kickDecaySec * va.decay;
+    const len = Math.round((decay * 4 + 0.02) * sampleRate);
+    const burst = bandNoise(Math.round(0.02 * sampleRate), sampleRate, 200, 2500, rng);
+    let phase = 0;
+    const f0 = v.kickF0Hz * va.pitch;
+    for (let i = 0; i < len && s0 + i < out.length; i++) {
+      const t = i / sampleRate;
+      const f = f0 * (1 - 0.1 * Math.min(1, t / (decay * 3)));
+      phase += (2 * Math.PI * f) / sampleRate;
+      let tone = 0;
+      for (let k = 1; k <= 24; k++) tone += Math.sin(k * phase) / (k ** 0.8 * (1 + ((k * f - v.kickFormantHz) / 250) ** 2));
+      const env = raisedCos(t / v.kickAttackSec) * Math.exp(-Math.max(0, t - v.kickAttackSec) / decay);
+      const b = i < burst.length ? burst[i] * dbToGain(v.kickBurstDb) * Math.exp(-t / 0.005) : 0;
+      out[s0 + i] += g * (0.5 * env * tone + b);
+    }
+    return;
+  }
+  if (kind === 'snare') {
+    const decay = v.snareDecaySec * va.decay;
+    const len = Math.round((decay * 4 + 0.01) * sampleRate);
+    const noise = bandNoise(len, sampleRate, v.snareBandHz[0] * va.band, v.snareBandHz[1] * va.band, rng);
+    const attack = v.snare === 'psh' ? 0.008 : 0.002;
+    for (let i = 0; i < len && s0 + i < out.length; i++) {
+      const t = i / sampleRate;
+      const env = raisedCos(t / attack) * Math.exp(-t / decay);
+      let x = 0.35 * noise[i] * env;
+      if (v.snare === 'pf') x += 0.15 * Math.sin(2 * Math.PI * 160 * t) * Math.exp(-t / 0.02);
+      if (v.snare === 'k' && i < Math.round(0.001 * sampleRate)) x += 0.6 * (rng() * 2 - 1);
+      out[s0 + i] += g * x;
+    }
+    return;
+  }
+  const decay = v.hatDecaySec * va.decay;
+  const len = Math.round((decay * 4 + 0.005) * sampleRate);
+  const noise = bandNoise(len, sampleRate, v.hatBandHz[0] * va.band, v.hatBandHz[1] * va.band, rng);
+  for (let i = 0; i < len && s0 + i < out.length; i++) {
+    const t = i / sampleRate;
+    out[s0 + i] += g * 0.3 * noise[i] * raisedCos(t / 0.001) * Math.exp(-t / decay);
+  }
+}
+
+/** the phone mic: 4th-order high-pass, 8 kHz low-pass, and for EC voice processing a noise gate + fast compressor */
+function mouthMicChain(x: Float64Array, sampleRate: number, v: MouthVoice): void {
+  applyBiquad(x, biquad('highpass', v.micHighpassHz, 0.541, sampleRate));
+  applyBiquad(x, biquad('highpass', v.micHighpassHz, 1.307, sampleRate));
+  applyBiquad(x, biquad('lowpass', PHONE_LOWPASS_HZ, 0.707, sampleRate));
+  if (!v.ec) return;
+  // compressor: threshold -30 dBFS, ratio 3, attack 3 ms, release 80 ms, +6 dB makeup
+  const att = Math.exp(-1 / (0.003 * sampleRate));
+  const rel = Math.exp(-1 / (0.08 * sampleRate));
+  let env = 0;
+  for (let i = 0; i < x.length; i++) {
+    const a = Math.abs(x[i]);
+    env = a > env ? att * env + (1 - att) * a : rel * env + (1 - rel) * a;
+    const db = 20 * Math.log10(env + 1e-9);
+    const gainDb = (db > -30 ? (db + 30) * (1 / 3 - 1) : 0) + 6;
+    x[i] *= dbToGain(gainDb);
+  }
+}
+
+/** a recording of `kinds` (one hit each, `stepSec` apart) by voice `v`; each example gets its own variation */
+function mouthFixture(sampleRate: number, rng: () => number, v: MouthVoice, kinds: DrumKindName[], stepSec: number) {
+  const t0s = kinds.map((_, i) => LEAD_IN_SEC + i * stepSec);
+  const durationSec = t0s[t0s.length - 1] + TAIL_SEC;
+  const n = Math.round(durationSec * sampleRate);
+  const audio = new Float64Array(n);
+  kinds.forEach((kind, i) => addMouthHit(audio, Math.round(t0s[i] * sampleRate), sampleRate, kind, v, mouthVariation(rng), rng));
+  mouthMicChain(audio, sampleRate, v);
+  const room = backgroundNoise(n, sampleRate, rng, v.ec ? -62 : -50);
+  for (let i = 0; i < n; i++) audio[i] += room[i];
+  return { audio, notes: [], hits: kinds.map((kind, i) => ({ t: round4(Math.round(t0s[i] * sampleRate) / sampleRate), kind })) };
+}
+
+const MOUTH_KINDS: DrumKindName[] = ['kick', 'snare', 'hat'];
+/** the test take: 3 of each kind in a groove order (examples differ from the taught ones) */
+const MOUTH_TEST_ORDER: DrumKindName[] = ['kick', 'hat', 'snare', 'hat', 'kick', 'snare', 'kick', 'hat', 'snare'];
+
+function mouthFixtures(): FixtureDef[] {
+  const defs: FixtureDef[] = [];
+  for (const v of MOUTH_VOICES) {
+    for (const kind of MOUTH_KINDS) {
+      defs.push({
+        name: `drums-${v.name}-teach-${kind}`,
+        gated: false,
+        description: `${v.name} teaches ${kind}: 3 examples 0.6 s apart (mic high-pass ${v.micHighpassHz} Hz, ${v.ec ? 'EC voice processing' : 'no EC'})`,
+        build: (sr, rng) => mouthFixture(sr, rng, v, [kind, kind, kind], 0.6),
+      });
+    }
+    defs.push({
+      name: `drums-${v.name}-test`,
+      gated: false,
+      description: `${v.name} plays a groove: 3 × kick/snare/hat, 0.35 s apart, other examples than the taught ones`,
+      build: (sr, rng) => mouthFixture(sr, rng, v, MOUTH_TEST_ORDER, 0.35),
+    });
+  }
+  defs.push({
+    name: 'drums-phone-boom',
+    gated: false,
+    description: 'soft hummed "boom" kicks (35 ms swell, weak lip burst) through an earbud mic (high-pass 300 Hz), levels -4..-20 dB, between hats',
+    build: (sr, rng) => {
+      const v: MouthVoice = { ...MOUTH_VOICES[1], name: 'boom', kickAttackSec: 0.035, kickBurstDb: -24 };
+      const kinds: DrumKindName[] = [];
+      for (let i = 0; i < 8; i++) kinds.push('kick', 'hat');
+      const t0s = kinds.map((_, i) => LEAD_IN_SEC + i * 0.3);
+      const n = Math.round((t0s[t0s.length - 1] + TAIL_SEC) * sr);
+      const audio = new Float64Array(n);
+      kinds.forEach((kind, i) => {
+        const va = mouthVariation(rng);
+        if (kind === 'kick') va.gainDb = -4 - (i / 2) * (16 / 7); // 8 booms from -4 down to -20 dB
+        addMouthHit(audio, Math.round(t0s[i] * sr), sr, kind, v, va, rng);
+      });
+      mouthMicChain(audio, sr, { ...v, ec: false }); // filters only: the compressor would level the booms out again
+      const room = backgroundNoise(n, sr, rng, -62);
+      for (let i = 0; i < n; i++) audio[i] += room[i];
+      return { audio, notes: [], hits: kinds.map((kind, i) => ({ t: round4(Math.round(t0s[i] * sr) / sr), kind })) };
+    },
+  });
+  return defs;
+}
+
+// ---------- round 3: sing along with a reference note ----------
+/** the wizard's "your voice" step: hum the played A3 for 4 s, a third of a semitone flat (truth: tuningOffset) */
+export const SING_ALONG_TARGET_MIDI = 57;
+export const SING_ALONG_OFFSET_ST = -0.33;
+
+function singAlongFixture(sampleRate: number, rng: () => number) {
+  const line: SungNote[] = [{ midi: SING_ALONG_TARGET_MIDI, dur: 4, join: { kind: 'gap', sec: LEAD_IN_SEC } }];
+  const style: VoiceStyle = {
+    ...DEFAULT_VOICE,
+    amateur: { detuneCents: 0, driftCents: 15, scoopProb: 1, scoopSemis: [2, 2], scoopSec: [0.15, 0.15], tailProb: 0, tailSemis: [0, 0], tailSec: [0.1, 0.1] },
+  };
+  const placed = placeNotes(line, rng, -22, style).map((n) => ({ ...n, detuneSemis: SING_ALONG_OFFSET_ST }));
+  const durationSec = placed[0].end + TAIL_SEC;
+  const audio = backgroundNoise(Math.round(durationSec * sampleRate), sampleRate, rng);
+  const notes = renderVoice(audio, sampleRate, placed, rng);
+  return { audio, notes, hits: [] };
+}
+
 export const FIXTURES: FixtureDef[] = [
   {
     name: 'sing-cmaj',
@@ -742,6 +939,14 @@ export const FIXTURES: FixtureDef[] = [
     gated: false,
     description: 'beatbox-phone in a loud room (-32 dBFS room noise)',
     build: (sr, rng) => beatboxFixture(sr, rng, beatboxHits(rng, 4, PHONE_TIMING_JITTER_SEC, PHONE_BASE_GAIN_DB, PHONE_LEVEL_VARIATION_DB), true, -32),
+  },
+  // ----- round 3 (setup wizard): appended so earlier fixtures keep their seeds -----
+  ...mouthFixtures(),
+  {
+    name: 'sing-along-flat',
+    gated: false,
+    description: `the wizard's sing-along: A3 hummed for 4 s at ${SING_ALONG_OFFSET_ST} st (scoop in, ±15 c drift, vibrato) — pitchOffset must find ${SING_ALONG_OFFSET_ST} ±0.05`,
+    build: (sr, rng) => singAlongFixture(sr, rng),
   },
 ];
 
