@@ -348,6 +348,8 @@ button:focus-visible { outline: 2px solid var(--cmd); outline-offset: 2px; }
 .row-sub { font-size: 12px; color: var(--dim); }
 .row-end { display: flex; align-items: center; flex: none; gap: 8px; font-size: 14px; color: var(--dim); }
 .row.danger { color: var(--rec); }
+.row-slider { flex-direction: column; align-items: stretch; justify-content: center; gap: 0; }
+.row-slider .smooth-slider { width: 100%; }
 
 .switch { position: relative; flex: none; width: 51px; height: 31px; border-radius: 16px; background: var(--line); transition: background 150ms ease; }
 .switch::after {

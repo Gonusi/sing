@@ -196,12 +196,18 @@ mountLanes(stage, {
 mountStatus(stage, { view });
 let ec = false;
 let echo = 0.4;
+let smoothing = 0.5;
 mountSheets(stage, {
   create: (kind) => log(`create:${kind}`),
   getEcho: () => echo,
   setEcho: (amount) => {
     echo = amount;
     log(`setEcho:${amount}`);
+  },
+  getSmoothing: () => smoothing,
+  setSmoothing: (amount) => {
+    smoothing = amount;
+    log(`setSmoothing:${amount}`);
   },
   getEc: () => ec,
   setEc: async (next) => {

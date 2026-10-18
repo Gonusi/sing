@@ -1,6 +1,6 @@
 // [shell] Top bar (title, ＋ instrument picker, ⋯ settings) and the two bottom sheets they open.
 // Everything here is data-no-gesture: taps never reach the record/stop gesture layer.
-// The top bar also holds the echo slider (0..1, live). Settings rows: echo cancellation, calibrate latency, audio probe, export last take, clear session, info, credits.
+// The top bar also holds the echo slider (0..1, live). Settings rows: echo cancellation, note smoothing slider, calibrate latency, audio probe, export last take, clear session, info, credits.
 import { INSTRUMENTS } from '../types.ts';
 import type { InstrumentKind } from '../types.ts';
 
@@ -9,6 +9,9 @@ export interface SheetActions {
   /** global echo amount 0..1 (Controller.setEcho / Session.fx.echo) */
   getEcho(): number;
   setEcho(amount: number): void;
+  /** note smoothing 0..1 (Controller.setSmoothing / Session.fx.smooth; 0 = every wobble, 1 = steady notes) */
+  getSmoothing(): number;
+  setSmoothing(amount: number): void;
   getEc(): boolean;
   setEc(ec: boolean): Promise<void>;
   /** runs the clap-along; onClick fires per click so the sheet can pulse; resolves with a short result text */
@@ -152,7 +155,7 @@ function makeRow(titleText: string, subText?: string): RowParts {
 }
 
 function createEcRow(actions: SheetActions): SettingsRow {
-  const { root, end } = makeRow('Echo cancellation', 'on for speaker · off for headphones (better)');
+  const { root, end } = makeRow('Echo cancellation', 'on: phone speaker · off: headphones (cleanest vocals)');
   root.setAttribute('role', 'switch');
   end.append(el('span', 'switch'));
   let busy = false;
@@ -171,6 +174,31 @@ function createEcRow(actions: SheetActions): SettingsRow {
     }
   });
   return { root, reset: () => render(actions.getEc()) };
+}
+
+function createSmoothingRow(actions: SheetActions): SettingsRow {
+  const root = noGesture(el('div', 'row row-slider'));
+  const main = el('div', 'row-main');
+  main.append(el('div', 'row-title', 'Note smoothing'), el('div', 'row-sub', 'left: every wobble · right: steady notes'));
+  const slider = noGesture(el('input', 'echo-slider smooth-slider'));
+  slider.type = 'range';
+  slider.min = '0';
+  slider.max = '1';
+  slider.step = '0.05';
+  slider.setAttribute('aria-label', 'note smoothing');
+  const paint = (): void => slider.style.setProperty('--fill', `${Number(slider.value) * ECHO_PERCENT}%`);
+  slider.addEventListener('input', () => {
+    paint();
+    actions.setSmoothing(Number(slider.value));
+  });
+  root.append(main, slider);
+  return {
+    root,
+    reset: () => {
+      slider.value = String(actions.getSmoothing());
+      paint();
+    },
+  };
 }
 
 function createCalibrateRow(actions: SheetActions): SettingsRow {
@@ -373,6 +401,7 @@ export function mountSheets(root: HTMLElement, actions: SheetActions): () => voi
   });
   rows.push(
     createEcRow(actions),
+    createSmoothingRow(actions),
     createCalibrateRow(actions),
     probe,
     createExportRow(actions, root),
