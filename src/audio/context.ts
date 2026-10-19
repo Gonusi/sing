@@ -7,7 +7,10 @@
 // - Our worklet is loaded with ctx.audioWorklet.addModule directly (Tone's helper remembers only one URL).
 // - Lifecycle: iOS suspends/interrupts the context in the background; we resume on visibility/statechange,
 //   kick a frozen clock with suspend()+resume(), and emit 'interrupted' / 'resumed'.
-// - Output path: voices → master (MASTER_GAIN, ≈ 6 dB headroom: four tracks can exceed 0 dBFS) → limiter → destination.
+// - Output path: voices → master (MASTER_GAIN, ≈ 6 dB headroom: four tracks can exceed 0 dBFS) → limiter → output →
+//   destination. `output` is the ONLY node connected to ctx.destination (the zero-gain sink goes through it too); its gain
+//   is 0 under ?test / ?mute / globalThis.__SING_MUTE__ (test runs stay silent on the speakers — WebKit can't be muted by
+//   Playwright) and 1 otherwise. Every tap point (capture taps, mic.loopback's speaker feed) sits before it.
 //   The limiter delays everything by its fixed look-ahead; outLat() includes that delay so `heard` stays exact.
 // - Echo bus: track strips (loop/clock.ts) also connect to `fxSend`; fxSend → feedback delay + reverb → fxWet → master.
 //   setEcho(a): send = a, feedback 0.2 + 0.3·a, wet on/off; a = 0 is fully dry (no tail). Clicks, blips and the probe
@@ -27,8 +30,12 @@ export interface AudioEngine {
   // ---- engine extensions (not in the shared contract) ----
   /** zero-gain node → destination: worklet taps connect their output here so they keep being pulled */
   readonly sink: GainNode;
-  /** master → limiter → destination (tests capture it to see what reaches the speakers) */
+  /** master → limiter → output (tests capture it to see what reaches the speakers) */
   readonly limiter: DynamicsCompressorNode;
+  /** the last node before ctx.destination (gain 0 when muted for tests) */
+  readonly output: GainNode;
+  /** true when the output is muted (?test, ?mute, globalThis.__SING_MUTE__) */
+  readonly muted: boolean;
   /** echo send: track strips connect here (besides master); its gain is the echo amount */
   readonly fxSend: GainNode;
   /** echo/space amount 0..1, ramped */
@@ -71,16 +78,31 @@ export function createAudioEngine(): Promise<AudioEngine> {
   setPlayAndRecordSession();
   const ctx = new AudioContext({ latencyHint: 'interactive' });
   const resumed = ctx.resume().catch(() => {});
+  const muted = isMuted();
+  const output = ctx.createGain();
+  output.gain.value = muted ? 0 : 1;
+  output.connect(ctx.destination); // the only connection to the destination
   const master = ctx.createGain();
   master.gain.value = MASTER_GAIN / LIMITER_MAKEUP;
   const limiter = createLimiter(ctx);
-  master.connect(limiter).connect(ctx.destination);
+  master.connect(limiter).connect(output);
   const sink = ctx.createGain();
   sink.gain.value = 0;
-  sink.connect(ctx.destination);
+  sink.connect(output);
   const fx = createFxBus(ctx, master);
   // ---- asynchronous part ----
-  return finishEngine(ctx, master, limiter, sink, fx, resumed);
+  return finishEngine(ctx, master, limiter, output, muted, sink, fx, resumed);
+}
+
+/** tests and dev pages: no sound on the speakers (?test, ?mute, or globalThis.__SING_MUTE__ === true) */
+function isMuted(): boolean {
+  if ((globalThis as { __SING_MUTE__?: boolean }).__SING_MUTE__ === true) return true;
+  try {
+    const q = new URLSearchParams(globalThis.location?.search ?? '');
+    return q.has('test') || q.has('mute');
+  } catch {
+    return false;
+  }
 }
 
 interface FxBus {
@@ -153,7 +175,8 @@ function createLimiter(ctx: AudioContext): DynamicsCompressorNode {
 }
 
 async function finishEngine(
-  ctx: AudioContext, master: GainNode, limiter: DynamicsCompressorNode, sink: GainNode, fx: FxBus, resumed: Promise<void>,
+  ctx: AudioContext, master: GainNode, limiter: DynamicsCompressorNode, output: GainNode, muted: boolean, sink: GainNode, fx: FxBus,
+  resumed: Promise<void>,
 ): Promise<AudioEngine> {
   installToneContext(ctx);
   await ctx.audioWorklet.addModule(micWorkletUrl);
@@ -165,6 +188,8 @@ async function finishEngine(
     master,
     sink,
     limiter,
+    output,
+    muted,
     fxSend: fx.send,
     setEcho: fx.setEcho,
     outLat: () => (ctx.baseLatency || 0) + (ctx.outputLatency || 0) + LIMITER_DELAY_SEC,

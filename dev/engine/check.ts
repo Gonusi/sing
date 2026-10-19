@@ -1272,6 +1272,23 @@ async function checkTransport(page: Page): Promise<void> {
     `while recording ${d.tempoWhileRec}; editable ${d.editable}; with vocals ${d.tempoLocked}`);
 }
 
+// ---------- m: tests are silent on the speakers ----------
+
+async function checkMuted(page: Page): Promise<void> {
+  const d = await page.evaluate(async () => {
+    const e = (window as unknown as W).__eng;
+    const lim = e.captureNode(e.engine.limiter, 0.5);
+    const out = e.captureNode(e.engine.output, 0.5);
+    await e.sleep(0.1);
+    e.setup.playTone(69, 0.2);
+    const [a, b] = await Promise.all([lim, out]);
+    const rms = (x: Float32Array) => Math.sqrt(x.reduce((s, v) => s + v * v, 0) / Math.max(1, x.length));
+    return { muted: e.engine.muted, gain: e.engine.output.gain.value, limiterRms: rms(a.pcm), outputRms: rms(b.pcm) };
+  });
+  check('m1 dev page muted: output gain 0 (audio still at the limiter tap, none after the output)', d.muted && d.gain === 0 && d.limiterRms > 0.01 && d.outputRms === 0,
+    `muted ${d.muted}, gain ${d.gain}, limiter RMS ${d.limiterRms.toFixed(4)}, output RMS ${d.outputRms}`);
+}
+
 // ---------- h, i: probe and capture ----------
 
 async function checkProbeCapture(page: Page): Promise<void> {
@@ -1300,6 +1317,7 @@ async function runEngine(engine: Engine, url: string): Promise<void> {
     await page.evaluate(() => (window as unknown as W).__eng.clearStore());
     await boot(page, url);
     const steps: [string, () => Promise<void>][] = [
+      ['m', () => checkMuted(page)],
       ['a', () => checkFirstTake(page)],
       ['b', () => checkOverdub(page)],
       ['c', () => checkStateTable(page)],
