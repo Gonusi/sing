@@ -1,184 +1,187 @@
-// [tester] State-table walk (PLAN.md "State machine", notes/engine.md "State table as implemented"), real dsp + voices.
-// Each step asserts state, `accepted`, the session shape and the take/error log events it must produce.
+// [tester] Round 4 state-table walk (src/app/controller.ts header: transport table). Real dsp + voices.
+// Each step asserts state, `accepted`, the session shape and the take / error / countIn log events it must produce.
+// Voice commands map onto the transport: record = record, stop = pause, play = play (from the playhead).
 import { expect, test, type Page } from '@playwright/test';
-import type { Command, LogEvent } from '../src/types.ts';
+import type { Command, LogEvent, TransportAction } from '../src/types.ts';
 import { boot, getLog, getSession, getState, groundTruth, matchNotes, maxAbs, ms, putFixtures, scheds } from './helpers.ts';
 
 const cmd = (page: Page, c: Command): Promise<boolean | null> => page.evaluate((c) => window.__sing!.command(c), c);
-/** a 100 ms tap: tDown = now, delivered on release */
-const tap = (page: Page): Promise<number> =>
-  page.evaluate(async () => {
-    const s = window.__sing!;
-    const t = s.now();
-    await s.waitUntil(t + 0.1);
-    s.gesture({ type: 'tap', tDown: t });
-    return t;
-  });
+const tp = (page: Page, a: TransportAction): Promise<boolean> => page.evaluate((a) => window.__sing!.transport(a), a);
 const since = (page: Page, t: number): Promise<LogEvent[]> => page.evaluate((t) => window.__sing!.logSince(t), t);
+const now = (page: Page): Promise<number> => page.evaluate(() => window.__sing!.now());
 const takeEvents = (log: LogEvent[]) => log.filter((e) => e.type === 'take').map((e) => `${e.data?.phase}${e.data?.reason ? `:${e.data.reason}` : ''}`);
 const errorsIn = (log: LogEvent[]) => log.filter((e) => e.type === 'error').map((e) => String(e.data?.message));
+/** record → count-in; returns the downbeat D (the take's start) */
+const recordD = (page: Page): Promise<number> =>
+  page.evaluate(() => {
+    const s = window.__sing!;
+    const t = s.now();
+    if (!s.transport('record', t)) throw new Error(`record refused in ${s.state()}`);
+    return Number(s.logSince(t).find((e) => e.type === 'countIn')!.data!.D);
+  });
 
-test('state table walk', async ({ page }) => {
+/** 80 bpm 4/4: one bar = 3.0 s */
+const BPM = 80;
+const BAR = 3.0;
+
+test('state table walk (round 4 transport)', async ({ page }) => {
   test.slow();
   const errors = await boot(page);
   await putFixtures(page, ['sing-cmaj', 'sing-high']);
+  expect(await page.evaluate((b) => window.__sing!.setTempo(b), BPM)).toBe(true);
   const inLat = await page.evaluate(() => window.__sing!.device().inLat);
 
-  await test.step('idle: play / stop ignored, undo with nothing to undo', async () => {
-    expect(await cmd(page, { type: 'play' })).toBe(false);
-    expect(await cmd(page, { type: 'stop' })).toBe(false);
+  await test.step('idle: play / pause / toStart / undo / seek refused; a tap does nothing', async () => {
+    expect(await tp(page, 'play')).toBe(false);
+    expect(await tp(page, 'pause')).toBe(false);
+    expect(await tp(page, 'toStart')).toBe(false);
     expect(await cmd(page, { type: 'undo' })).toBe(false);
+    expect(await page.evaluate(() => window.__sing!.seek(1))).toBe(false);
+    await page.evaluate(() => window.__sing!.gesture({ type: 'tap', tDown: window.__sing!.now() }));
     expect(await getState(page)).toBe('idle');
+    expect((await getSession(page)).tracks).toEqual([]);
   });
 
-  await test.step('idle → tap → recordingFirst (new synth lane); record / play ignored; undo → idle, lane gone', async () => {
-    const t = await tap(page);
+  await test.step('idle → record → countIn (lane exists); record again cancels → idle, lane gone', async () => {
+    const t = await now(page);
+    const D = await recordD(page);
+    expect(await getState(page)).toBe('countIn');
+    const ci = (await since(page, t)).find((e) => e.type === 'countIn')!.data!;
+    expect(D - Number(ci.c0)).toBeCloseTo(BAR, 6);
+    expect((await getSession(page)).tracks.map((x) => x.kind)).toEqual(['synth']);
+    expect(await page.evaluate(() => window.__sing!.view().countIn)).toBe(4);
+    expect(await tp(page, 'record')).toBe(true);
+    expect(await getState(page)).toBe('idle');
+    expect((await getSession(page)).tracks).toEqual([]);
+    expect(takeEvents(await since(page, t))).toEqual(['start', 'discard:count-in cancelled']);
+  });
+
+  await test.step('countIn: undo / pause cancel too; recordingFirst: undo discards → idle', async () => {
+    await recordD(page);
+    expect(await cmd(page, { type: 'undo' })).toBe(true);
+    expect(await getState(page)).toBe('idle');
+    await recordD(page);
+    expect(await tp(page, 'pause')).toBe(true);
+    expect(await getState(page)).toBe('idle');
+    const D = await recordD(page);
+    await page.evaluate((t) => window.__sing!.waitUntil(t), D + 0.2);
     expect(await getState(page)).toBe('recordingFirst');
-    const s = await getSession(page);
-    expect(s.tracks.map((x) => x.kind)).toEqual(['synth']);
-    expect(s.selectedId).toBe(s.tracks[0].id);
-    expect(await cmd(page, { type: 'record' })).toBe(false);
+    expect(await page.evaluate(() => window.__sing!.view().countIn)).toBeNull();
     expect(await cmd(page, { type: 'play' })).toBe(false);
     expect(await cmd(page, { type: 'undo' })).toBe(true);
     expect(await getState(page)).toBe('idle');
     expect((await getSession(page)).tracks).toEqual([]);
-    expect(takeEvents(await since(page, t))).toEqual(['start', 'discard:discarded']);
   });
 
-  await test.step('first take shorter than 1 s → discarded → idle', async () => {
-    const t = await tap(page);
-    await page.evaluate((t) => window.__sing!.waitUntil(t + 0.5), t);
-    await tap(page);
-    expect(await getState(page)).toBe('idle');
-    expect((await getSession(page)).tracks).toEqual([]);
-    // the controller logs the discard twice ('too-short' from finishFirstTake, then 'discarded' from discardTake):
-    // cosmetic, noted in notes/tester.md
-    expect(takeEvents(await since(page, t)).slice(0, 2)).toEqual(['start', 'discard:too-short']);
-  });
-
-  let L = 0;
   let violinId = '';
-  await test.step('create violin → selected empty lane; tap records into it; stop command → playing', async () => {
+  await test.step('create violin; record → count-in → sing → record at 1.2 bars → L = 1 bar, notes after L clipped', async () => {
     expect(await cmd(page, { type: 'create', kind: 'violin' })).toBe(true);
-    let s = await getSession(page);
-    expect(s.tracks.map((x) => x.kind)).toEqual(['violin']);
-    violinId = s.tracks[0].id;
-    expect(s.selectedId).toBe(violinId);
-    const r = await page.evaluate(async () => {
+    violinId = (await getSession(page)).tracks[0].id;
+    const r = await page.evaluate(async (BAR) => {
       const s = window.__sing!;
-      const t0 = s.now();
-      const at = await s.mic.play('/__fixtures/sing-cmaj.wav', t0 + 0.1, { dur: 2.6 });
-      await s.waitUntil(t0 + 0.1);
-      s.gesture({ type: 'tap', tDown: t0 });
-      await s.waitUntil(t0 + 3.0);
-      const ok = s.command({ type: 'stop' }, t0 + 3.0);
-      return { t0, at, ok };
-    });
+      const t = s.now();
+      s.transport('record', t);
+      const D = Number(s.logSince(t).find((e) => e.type === 'countIn')!.data!.D);
+      const at = await s.mic.play('/__fixtures/sing-cmaj.wav', D + 0.1, { dur: 4.0 });
+      await s.waitUntil(D + 1.2 * BAR + 0.1);
+      const ok = s.transport('record', D + 1.2 * BAR);
+      return { D, at, ok };
+    }, BAR);
     expect(r.ok).toBe(true);
     expect(await getState(page)).toBe('playing');
-    s = await getSession(page);
-    expect(s.tracks).toHaveLength(1);
-    L = s.loopLength!;
-    expect(L).toBeCloseTo(3.0, 3);
-    const gt = groundTruth('sing-cmaj').notes.filter((n) => n.t + n.dur <= 2.6);
-    const m = matchNotes(s.tracks[0].take!.notes.map((n) => ({ t: n.pos, midi: n.midi })), gt.map((n) => ({ t: r.at - r.t0 + n.t - inLat, midi: n.midi + 12 })), 0.03);
+    const s = await getSession(page);
+    expect(s.tracks.map((x) => x.id)).toEqual([violinId]);
+    expect(s.loopLength).toBeCloseTo(BAR, 6);
+    // sing-cmaj notes that start inside the first bar (pos < L); the one open at L is cut there
+    const gt = groundTruth('sing-cmaj').notes.filter((n) => r.at - r.D + n.t - inLat < BAR - 0.08);
+    const notes = s.tracks[0].take!.notes;
+    const m = matchNotes(notes.map((n) => ({ t: n.pos, midi: n.midi })), gt.map((n) => ({ t: r.at - r.D + n.t - inLat, midi: n.midi + 12 })), 0.03);
     console.log(`[states] violin first take: ${m.matched}/${m.expected} (register +12), max err ${ms(maxAbs(m.errors))} ${m.missed.join(' ')} ${m.wrongPitch.join(' ')}`);
     expect(m.matched).toBe(m.expected);
+    expect(notes.every((n) => n.pos + n.dur <= BAR + 1e-6)).toBe(true);
   });
 
-  await test.step('playing: play ignored; stop → stopped; stop ignored', async () => {
-    expect(await cmd(page, { type: 'play' })).toBe(false);
-    expect(await cmd(page, { type: 'stop' })).toBe(true);
+  await test.step('playing: play refused; pause → stopped at the heard position; pause refused; play resumes there', async () => {
+    expect(await tp(page, 'play')).toBe(false);
+    const t = await now(page);
+    expect(await tp(page, 'pause')).toBe(true);
     expect(await getState(page)).toBe('stopped');
-    expect(await cmd(page, { type: 'stop' })).toBe(false);
-    expect(await cmd(page, { type: 'record' }).then(() => getState(page))).toBe('overdubbing');
-    // record in stopped = playing + overdubbing from origin (now + outLat + 0.03); undo after origin discards it
-    // (an undo with tDown before origin is the bug in bugs.spec.ts)
-    await page.evaluate(() => window.__sing!.waitUntil(window.__sing!.now() + 0.15));
-    expect(await cmd(page, { type: 'undo' })).toBe(true);
+    expect(await tp(page, 'pause')).toBe(false);
+    const P = await page.evaluate(() => window.__sing!.view().playhead!);
+    expect(P).toBeGreaterThanOrEqual(0);
+    await page.evaluate(() => window.__sing!.waitUntil(window.__sing!.now() + 0.5));
+    expect(await page.evaluate(() => window.__sing!.view().playhead)).toBeCloseTo(P, 9);
+    expect(await cmd(page, { type: 'play' })).toBe(true); // voice play = transport play
     expect(await getState(page)).toBe('playing');
-    expect(await cmd(page, { type: 'stop' })).toBe(true);
+    const start = (await since(page, t)).filter((e) => e.type === 'transport' && e.data?.action === 'start').pop()!.data!;
+    const resumedAt = ((Number(start.from) - Number(start.origin)) % BAR + BAR) % BAR;
+    console.log(`[states] paused at ${P.toFixed(4)}, resumed from ${resumedAt.toFixed(4)}`);
+    expect(resumedAt).toBeCloseTo(P, 3);
   });
 
-  await test.step('stopped → tap → playing, origin = now + outLat + 0.03, pos 0 never late', async () => {
-    const t = await tap(page);
-    expect(await getState(page)).toBe('playing');
-    // the engine's own 'play' event: origin and the `now`/outLat it was computed from (a log entry's t is a separate
-    // currentTime read, which can be a quantum later within the same task — measured: 192/200 tasks on WebKit)
-    const ev = (await since(page, t)).find((e) => e.type === 'play')!;
-    expect(Number(ev.data!.origin) - Number(ev.data!.now) - Number(ev.data!.outLat)).toBeCloseTo(0.03, 9);
-    await page.evaluate((t) => window.__sing!.waitUntil(t + 1), t);
-    const late = (await since(page, t)).filter((e) => e.type === 'drop' || (e.type === 'sched' && Number(e.data?.offset) > 0));
-    expect(late).toEqual([]);
-  });
-
-  await test.step('overdubbing: create / record refused with error log; undo discards → playing', async () => {
-    const t = await tap(page);
+  await test.step('overdubbing: create refused (error log); undo discards → playing', async () => {
+    const t = await now(page);
+    expect(await tp(page, 'record')).toBe(true); // punch in now
     expect(await getState(page)).toBe('overdubbing');
-    // the selected lane has a take → a NEW violin lane is recorded
-    let s = await getSession(page);
-    expect(s.tracks.map((x) => x.kind)).toEqual(['violin', 'violin']);
+    expect((await getSession(page)).tracks.map((x) => x.kind)).toEqual(['violin', 'violin']);
     expect(await cmd(page, { type: 'create', kind: 'synth' })).toBe(false);
-    expect(await cmd(page, { type: 'record' })).toBe(false);
-    expect(errorsIn(await since(page, t))).toEqual(['create while overdubbing', 'record while overdubbing']);
+    expect(errorsIn(await since(page, t))).toEqual(['create while overdubbing']);
     expect(await cmd(page, { type: 'undo' })).toBe(true);
     expect(await getState(page)).toBe('playing');
-    s = await getSession(page);
-    expect(s.tracks.map((x) => x.id)).toEqual([violinId]);
+    expect((await getSession(page)).tracks.map((x) => x.id)).toEqual([violinId]);
     expect(takeEvents(await since(page, t))).toEqual(['start', 'discard:discarded']);
   });
 
-  await test.step('playing → record → sing → tap commits so far → playing; undo removes that lane', async () => {
+  await test.step('punch in → sing → record again = punch out (commit so far, keep playing); undo removes it', async () => {
     const r = await page.evaluate(async () => {
       const s = window.__sing!;
       const ts = s.now();
       const at = await s.mic.play('/__fixtures/sing-high.wav', ts + 0.1, { dur: 1.4 });
-      s.command({ type: 'record' }, ts);
+      s.transport('record', ts);
       await s.waitUntil(ts + 1.9);
-      const t = s.now();
-      await s.waitUntil(t + 0.1);
-      s.gesture({ type: 'tap', tDown: t });
-      return { ts, at, tap: t };
+      const tOut = s.now();
+      s.transport('record', tOut);
+      return { ts, at, tOut };
     });
     expect(await getState(page)).toBe('playing');
     const s = await getSession(page);
     expect(s.tracks).toHaveLength(2);
-    const lane = s.tracks[1];
-    // sing-high's first 1.4 s hold two whole notes (A4, B4)
-    expect(lane.take!.notes.map((n) => n.midi)).toEqual([69, 71]);
+    expect(s.tracks[1].take!.notes.map((n) => n.midi)).toEqual([69, 71]);
     const ev = (await since(page, r.ts)).filter((e) => e.type === 'take' && e.data?.phase === 'commit');
     expect(ev).toHaveLength(1);
-    expect(Number(ev[0].data!.end)).toBeCloseTo(r.tap, 6);
+    expect(Number(ev[0].data!.end)).toBeCloseTo(r.tOut, 6);
     expect(await cmd(page, { type: 'undo' })).toBe(true);
     expect((await getSession(page)).tracks.map((x) => x.id)).toEqual([violinId]);
     expect(await getState(page)).toBe('playing');
   });
 
-  await test.step('stopped → record = playing + overdub of exactly one cycle from pos 0 → window-end commit', async () => {
-    expect(await cmd(page, { type: 'stop' })).toBe(true);
+  await test.step('stopped at 0 → record → count-in → overdub of exactly one cycle from the playhead → commit', async () => {
+    expect(await cmd(page, { type: 'stop' })).toBe(true); // voice stop = pause
+    expect(await tp(page, 'toStart')).toBe(true);
+    expect(await page.evaluate(() => window.__sing!.view().playhead)).toBe(0);
     const r = await page.evaluate(async () => {
       const s = window.__sing!;
       const t = s.now();
-      s.command({ type: 'record' }, t);
-      const start = s.logSince(t).find((e) => e.type === 'transport' && e.data?.action === 'start')!;
-      const origin = Number(start.data!.origin);
-      const at = await s.mic.play('/__fixtures/sing-high.wav', origin + 0.05, { dur: 2.4 });
-      const L = s.session().loopLength!;
+      s.transport('record', t);
+      const D = Number(s.logSince(t).find((e) => e.type === 'countIn')!.data!.D);
+      const st = s.logSince(t).find((e) => e.type === 'transport' && e.data?.action === 'start')!.data!;
+      const at = await s.mic.play('/__fixtures/sing-high.wav', D + 0.05, { dur: 2.4 });
       for (let i = 0; i < 200; i++) {
         if (s.logSince(t).some((e) => e.type === 'take' && e.data?.phase === 'commit')) break;
         await s.waitUntil(s.now() + 0.05);
       }
-      return { t, origin, at, L, state: s.state() };
+      return { t, D, origin: Number(st.origin), from: Number(st.from), at, L: s.session().loopLength!, state: s.state() };
     });
     expect(r.state).toBe('playing');
+    expect(r.origin).toBeCloseTo(r.D, 9); // playback begins exactly at the downbeat, at pos 0
+    expect(r.from).toBeCloseTo(r.D, 9);
     const log = await since(page, r.t);
-    const start = log.find((e) => e.type === 'take' && e.data?.phase === 'start')!;
-    expect(Number(start.data!.start)).toBeCloseTo(r.origin, 9);
+    expect(Number(log.find((e) => e.type === 'take' && e.data?.phase === 'start')!.data!.start)).toBeCloseTo(r.D, 9);
     const commit = log.find((e) => e.type === 'take' && e.data?.phase === 'commit')!;
-    expect(Number(commit.data!.end)).toBeCloseTo(r.origin + r.L, 6);
+    expect(Number(commit.data!.end)).toBeCloseTo(r.D + r.L, 6);
     const lane = (await getSession(page)).tracks.find((x) => x.id === commit.data!.trackId)!;
     const gt = groundTruth('sing-high').notes.filter((n) => n.t + n.dur <= 2.4);
-    const m = matchNotes(lane.take!.notes.map((n) => ({ t: n.pos, midi: n.midi })), gt.map((n) => ({ t: r.at - r.origin + n.t - inLat, midi: n.midi })), 0.03);
+    const m = matchNotes(lane.take!.notes.map((n) => ({ t: n.pos, midi: n.midi })), gt.map((n) => ({ t: r.at - r.D + n.t - inLat, midi: n.midi })), 0.03);
     console.log(`[states] one-cycle overdub from stopped: ${m.matched}/${m.expected}, max err ${ms(maxAbs(m.errors))} ${m.missed.join(' ')} ${m.wrongPitch.join(' ')}`);
     expect(m.matched).toBe(m.expected);
   });
@@ -188,12 +191,12 @@ test('state table walk', async ({ page }) => {
       const s = window.__sing!;
       const tOff = s.now();
       const off = s.voice.inject('mute violin');
-      const offSession = s.session();
+      const offOn = s.session().tracks.map((t) => t.on);
       await s.waitUntil(tOff + 2.5);
       const tOn = s.now();
       const on = s.voice.inject('violin back');
       await s.waitUntil(tOn + 2 * s.session().loopLength!);
-      return { tOff, tOn, off, on, offOn: offSession.tracks.map((t) => t.on), onOn: s.session().tracks.map((t) => t.on) };
+      return { tOff, tOn, off, on, offOn, onOn: s.session().tracks.map((t) => t.on) };
     });
     expect(r.off).toBe(true);
     expect(r.on).toBe(true);
@@ -201,19 +204,29 @@ test('state table walk', async ({ page }) => {
     expect(r.onOn).toEqual([true, true]);
     const log = await getLog(page);
     const outLat = await page.evaluate(() => window.__sing!.outLat());
-    // nothing newly scheduled while off (beyond what was already inside the look-ahead at the toggle)
-    const whileOff = scheds(log).filter((s) => s.heard >= r.tOff + 0.12 + outLat + 0.02 && s.heard < r.tOn);
-    expect(whileOff).toEqual([]);
-    const afterOn = scheds(log).filter((s) => s.heard >= r.tOn);
-    expect(new Set(afterOn.map((s) => s.trackId)).size).toBe(2);
+    // nothing STARTS while muted (switching back on catches up a note still sounding: heard before tOn, at ≥ tOn)
+    expect(scheds(log).filter((s) => s.heard >= r.tOff + 0.12 + outLat + 0.02 && s.at < r.tOn)).toEqual([]);
+    expect(new Set(scheds(log).filter((s) => s.heard >= r.tOn).map((s) => s.trackId)).size).toBe(2);
+  });
+
+  await test.step('seek: playing → jump to the snapped beat; stopped → new resume position', async () => {
+    const beat = 60 / BPM;
+    const t = await now(page);
+    expect(await page.evaluate((p) => window.__sing!.seek(p), 1.3 * beat)).toBe(true);
+    const sk = (await since(page, t)).find((e) => e.type === 'seek')!.data!;
+    expect(Number(sk.to)).toBeCloseTo(beat, 6);
+    const ph = await page.evaluate(() => window.__sing!.view().playhead!);
+    expect(ph).toBeGreaterThan(beat - 0.05);
+    expect(ph).toBeLessThan(beat + 0.25);
+    expect(await tp(page, 'pause')).toBe(true);
+    expect(await page.evaluate((p) => window.__sing!.seek(p), 2.6 * beat)).toBe(true);
+    expect(await page.evaluate(() => window.__sing!.view().playhead!)).toBeCloseTo(3 * beat, 6);
   });
 
   await test.step('undo in stopped pops back to idle', async () => {
-    expect(await cmd(page, { type: 'stop' })).toBe(true);
     for (let i = 0; i < 10 && (await getState(page)) !== 'idle'; i++) expect(await cmd(page, { type: 'undo' })).toBe(true);
     expect(await getState(page)).toBe('idle');
-    const s = await getSession(page);
-    expect(s.loopLength).toBeNull();
+    expect((await getSession(page)).loopLength).toBeNull();
   });
   expect(errors, errors.join('\n')).toEqual([]);
 });

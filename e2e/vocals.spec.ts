@@ -65,8 +65,8 @@ test('vocals first take: output = the sung audio at lag 0, exact scheduling (sea
   await putFixtures(page, [FIX]);
   expect(await page.evaluate(() => window.__sing!.command({ type: 'create', kind: 'vocals' }))).toBe(true);
   // L puts the loop seam inside the A4 (fixture 3.84–4.59 s): the seam joins a sung note to the room noise at pos 0
-  const L = 4.29;
-  const run = await firstTake(page, { fixture: FIX, L, lead: 0.1, captureKey: 'lane' });
+  const run = await firstTake(page, { fixture: FIX, L: 4.29, bars: 2, lead: 0.1, captureKey: 'lane' });
+  const L = run.L;
   expect(await page.evaluate(() => window.__sing!.state())).toBe('playing');
   const session = await getSession(page);
   const lane = session.tracks.find((t) => t.id === run.trackId)!;
@@ -114,8 +114,7 @@ test('vocals overdub: stored audio aligned to the loop, silent until ts + L, pla
     if (!s.command({ type: 'create', kind: 'vocals' })) throw new Error('create vocals refused');
     const ts = s.now();
     const at = await s.mic.play('/__fixtures/beatbox-basic.wav', ts + 0.1, { dur: 2.4 });
-    await s.waitUntil(ts + 0.1);
-    s.gesture({ type: 'tap', tDown: ts });
+    if (!s.transport('record', ts)) throw new Error(`punch-in refused in ${s.state()}`);
     const start = s.logSince(ts).find((e) => e.type === 'take' && e.data?.phase === 'start')!;
     const trackId = String(start.data!.trackId);
     s.capture.begin('v', trackId);

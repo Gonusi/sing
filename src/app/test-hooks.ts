@@ -10,7 +10,7 @@
 // - analyze() runs the REAL dsp (pitch tracker + segmenter, onset detector) on captured audio; frame = context frame
 //   of pcm[0], so detections come out in context time (the time the app PLAYED them).
 import type {
-  AppState, Command, DeviceSettings, Gesture, LogEvent, PitchFrame, RawHit, RawNote, Recognizer, Sec, Session, SingTestApi, View,
+  AppState, Command, DeviceSettings, TransportAction, Gesture, LogEvent, PitchFrame, RawHit, RawNote, Recognizer, Sec, Session, SingTestApi, View,
   VoiceStatus,
 } from '../types.ts';
 import type { AudioEngine } from '../audio/context.ts';
@@ -154,6 +154,14 @@ export interface SingE2eApi extends SingTestApi {
   loopback(delaySec: Sec): void;
   loopbackOff(): void;
   calibrate(): Promise<CalibrationRun>;
+  /** controller.transport (the bottom bar: play / pause / record / toStart); tDown defaults to now */
+  transport(action: TransportAction, tDown?: Sec): boolean;
+  /** controller.seek (beat-snapped loop position) */
+  seek(pos: Sec): boolean;
+  /** controller.setTempo (bpm, clamped 40–200; rescales note/drum takes; refused with a vocal take) */
+  setTempo(bpm: number): boolean;
+  /** controller.setClick (metronome on/off; the count-in always clicks) */
+  setClick(on: boolean): void;
   /** controller.clearSession (stops, discards, removes stored audio) */
   clearSession(): Promise<void>;
   /** controller.setEcho (global echo 0..1, Session.fx.echo) */
@@ -455,6 +463,10 @@ export function installTestHooks(deps: TestHookDeps): void {
     flush: () => controller.flush(),
     setEcho: (a) => controller.setEcho(a),
     clearSession: () => controller.clearSession(),
+    transport: (a, tDown) => controller.transport(a, tDown ?? ctx.currentTime),
+    seek: (pos) => controller.seek(pos),
+    setTempo: (bpm) => controller.setTempo(bpm),
+    setClick: (on) => controller.setClick(on),
     voice: {
       inject(text, tDown) {
         const t = tDown ?? openHold ?? ctx.currentTime;

@@ -163,27 +163,41 @@ export async function idbGet<T>(page: Page, key: string): Promise<T | undefined>
 // ---------- in-page flows ----------
 
 export interface FirstTakeRun {
+  /** the downbeat after the one-bar count-in = the take's t0 (loop pos 0) */
   t0: number;
+  /** context time the record action was given (count-in start) */
+  tRecord: number;
   /** context time the fixture's first sample entered the mic */
   at: number;
+  /** tDown of the record action that ended the take (t0 + L) */
   stopT: number;
   /** inLat the take used (from its 'take start' log event) */
   inLat: number;
   trackId: string;
   L: number;
+  bpm: number;
 }
 
+/** bars of a loop of `L` seconds near the default 90 bpm 4/4 (so the tempo stays inside 40–200) */
+export const barsFor = (L: number): number => Math.max(1, Math.round(L / (240 / 90)));
+/** the tempo (bpm, 4/4, rounded to setTempo's 0.01 bpm) whose `bars` bars last about L; the real loop is barSec(bpm)·bars */
+export const bpmFor = (L: number, bars = barsFor(L)): number => Math.round((24000 * bars) / L) / 100;
+/** loop length of `bars` bars of 4/4 at `bpm` */
+export const loopFor = (bpm: number, bars: number): number => (240 * bars) / bpm;
+
 /**
- * idle → tap (tDown t0) → fixture injected at t0 + lead → stop tap at t0 + L (released 100 ms later) → playing.
+ * Round 4 first take: setTempo so `bars` bars last ≈ L (0.01 bpm steps; run.L is the real loop) → transport('record') → one-bar count-in → the take
+ * starts at the downbeat t0 = D (from its 'take start' log event) → fixture injected at t0 + lead → transport('record')
+ * at tDown t0 + run.L (whole bars, so the loop is exactly that) → playing.
  * `kind`: create + select an empty lane of that kind first (else the controller picks/creates a synth lane).
  */
 export async function firstTake(
   page: Page,
   o: {
-    fixture: string; L: number; lead?: number; from?: number; dur?: number; kind?: InstrumentKind;
+    fixture: string; L: number; bars?: number; lead?: number; from?: number; dur?: number; kind?: InstrumentKind;
     /** fade (s) at the slice edges (mic.play PlayOptions.fade) */
     fade?: number;
-    /** begin a named capture of the take's lane output right before the stop tap */
+    /** begin a named capture of the take's lane output 0.3 s before the stop */
     captureKey?: string;
   },
 ): Promise<FirstTakeRun> {
@@ -192,24 +206,26 @@ export async function firstTake(
     const s = window.__sing!;
     const url = `/__fixtures/${o.fixture}.wav`;
     await s.mic.load(url);
+    if (!s.setTempo(o.bpm)) throw new Error(`setTempo ${o.bpm} refused`);
     if (o.kind && !s.command({ type: 'create', kind: o.kind })) throw new Error(`create ${o.kind} refused`);
-    const t0 = s.now();
-    const at = await s.mic.play(url, t0 + (o.lead ?? 0.1), { from: o.from, dur: o.dur, fade: o.fade });
-    await s.waitUntil(t0 + 0.1);
-    s.gesture({ type: 'tap', tDown: t0 });
-    const start = s.logSince(t0).find((e) => e.type === 'take' && e.data?.phase === 'start');
+    const tRecord = s.now();
+    if (!s.transport('record', tRecord)) throw new Error(`record refused in ${s.state()}`);
+    const start = s.logSince(tRecord).find((e) => e.type === 'take' && e.data?.phase === 'start');
     if (!start) throw new Error(`no take start (state ${s.state()})`);
-    const stopT = t0 + o.L;
+    const t0 = Number(start.data!.start);
+    const at = await s.mic.play(url, t0 + (o.lead ?? 0.1), { from: o.from, dur: o.dur, fade: o.fade });
+    const stopT = t0 + o.realL;
     if (o.captureKey) {
       await s.waitUntil(stopT - 0.3);
       s.capture.begin(o.captureKey, String(start.data!.trackId));
     }
     await s.waitUntil(stopT + 0.1);
-    s.gesture({ type: 'tap', tDown: stopT });
+    if (!s.transport('record', stopT)) throw new Error(`stop recording refused in ${s.state()}`);
     return {
-      t0, at, stopT, inLat: Number(start.data!.inLat), trackId: String(start.data!.trackId), L: s.session().loopLength ?? 0,
+      t0, tRecord, at, stopT, inLat: Number(start.data!.inLat), trackId: String(start.data!.trackId),
+      L: s.session().loopLength ?? 0, bpm: s.view().tempo.bpm,
     };
-  }, o);
+  }, { ...o, bpm: bpmFor(o.L, o.bars ?? barsFor(o.L)), realL: loopFor(bpmFor(o.L, o.bars ?? barsFor(o.L)), o.bars ?? barsFor(o.L)) });
 }
 
 export interface OverdubRun {
@@ -224,12 +240,12 @@ export interface OverdubRun {
 }
 
 /**
- * playing → (create + select an empty `kind` lane) → tap at ts → fixture at ts + lead → wait for the window-end
- * commit (or discard). Throws if nothing happens within L + 3 s.
+ * Round 4 punch-in: while playing, (create + select an empty `kind` lane) → transport('record') at ts = now →
+ * fixture at ts + lead → wait for the window-end commit (one full cycle) or a discard. Throws after L + 3 s.
  */
 export async function overdub(
   page: Page,
-  o: { kind: InstrumentKind; fixture: string; lead?: number; from?: number; dur?: number; create?: boolean },
+  o: { kind: InstrumentKind; fixture: string; lead?: number; from?: number; dur?: number; create?: boolean; fade?: number },
 ): Promise<OverdubRun> {
   await putFixtures(page, [o.fixture]);
   return page.evaluate(async (o) => {
@@ -238,9 +254,8 @@ export async function overdub(
     await s.mic.load(url);
     if (o.create !== false && !s.command({ type: 'create', kind: o.kind })) throw new Error(`create ${o.kind} refused in ${s.state()}`);
     const ts = s.now();
-    const at = await s.mic.play(url, ts + (o.lead ?? 0.1), { from: o.from, dur: o.dur });
-    await s.waitUntil(ts + 0.1);
-    s.gesture({ type: 'tap', tDown: ts });
+    const at = await s.mic.play(url, ts + (o.lead ?? 0.1), { from: o.from, dur: o.dur, fade: o.fade });
+    if (!s.transport('record', ts)) throw new Error(`punch-in refused in ${s.state()}`);
     const start = s.logSince(ts).find((e) => e.type === 'take' && e.data?.phase === 'start' && e.data?.mode === 'overdub');
     if (!start) throw new Error(`no overdub start (state ${s.state()})`);
     const trackId = String(start.data!.trackId);
@@ -530,3 +545,6 @@ export async function checkSalience(page: Page, key: string, exp: { at: number; 
   }
   return { checked: low.length, offPitch };
 }
+
+/** the transport bar's state word: ready · count-in N · recording · playing · paused */
+export const stateWord = (page: Page) => page.locator('.tp-state');
