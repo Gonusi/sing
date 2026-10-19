@@ -99,6 +99,8 @@ declare global {
   }
 }
 
+// dev page: never make sound on the speakers (the engine's output gain is 0 with this set)
+(globalThis as { __SING_MUTE__?: boolean }).__SING_MUTE__ = true;
 const REAL_MIC = new URLSearchParams(location.search).has('real');
 const REAL_ANALYSIS = new URLSearchParams(location.search).get('analysis') === 'real';
 const eng = { booted: false, error: null, events: [], changes: 0, realMic: REAL_MIC, realAnalysis: REAL_ANALYSIS } as unknown as Eng;

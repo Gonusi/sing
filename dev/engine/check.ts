@@ -1260,7 +1260,7 @@ async function checkTransport(page: Page): Promise<void> {
   check('x1 pause keeps the playhead; seek snaps to the beat; play resumes there; seek while playing jumps; toStart → 0', d.pausedHead !== null &&
     d.seekOk && d.head === 1 && play?.from === 1 && d.jumpOk && jump?.to === 3.5 && d.toStartOk && toStart?.to === 0,
     `paused at ${d.pausedHead?.toFixed(3)}; seek 1.13 → ${d.head}; play from ${play?.from}; jump to ${jump?.to}; toStart ${toStart?.to}`);
-  check('x2 setTempo while playing: L and notes ×2 (120 → 60), bar position kept', d.tempoOk && d.L2 === 8 && JSON.stringify(d.notes2) === JSON.stringify(d.notes1.map((p) => +(p * 2).toFixed(3))) &&
+  check('x2 setTempo while playing: L and notes ×2 (120 → 60), bar position kept', d.tempoOk && d.L2 === 8 && d.notes2.length === d.notes1.length && d.notes2.every((p, i) => Math.abs(p - d.notes1[i] * 2) < 0.002) &&
     d.tempoOf === 60 && Math.abs(d.posAfter - d.posBefore * 2) < 0.1,
     `L ${d.L2}, notes ${d.notes2.join(',')}, pos ${d.posBefore.toFixed(3)} → ${d.posAfter.toFixed(3)}`);
   check('x3 metronome: click off → silent master; on → a click on every beat (±3 ms)', d.offRms < 1e-4 && d.peaks >= 2 && d.beatErr < 0.003,
@@ -1270,6 +1270,23 @@ async function checkTransport(page: Page): Promise<void> {
     `speaker ${d.hitsSpeaker.join(',')}; wired ${d.hitsWired.join(',')}`);
   check('x5 setTempo refused while recording and once a vocal take exists (tempoEditable false)', d.tempoWhileRec === false && d.editable === false && d.tempoLocked === false,
     `while recording ${d.tempoWhileRec}; editable ${d.editable}; with vocals ${d.tempoLocked}`);
+}
+
+// ---------- m: tests are silent on the speakers ----------
+
+async function checkMuted(page: Page): Promise<void> {
+  const d = await page.evaluate(async () => {
+    const e = (window as unknown as W).__eng;
+    const lim = e.captureNode(e.engine.limiter, 0.5);
+    const out = e.captureNode(e.engine.output, 0.5);
+    await e.sleep(0.1);
+    e.setup.playTone(69, 0.2);
+    const [a, b] = await Promise.all([lim, out]);
+    const rms = (x: Float32Array) => Math.sqrt(x.reduce((s, v) => s + v * v, 0) / Math.max(1, x.length));
+    return { muted: e.engine.muted, gain: e.engine.output.gain.value, limiterRms: rms(a.pcm), outputRms: rms(b.pcm) };
+  });
+  check('m1 dev page muted: output gain 0 (audio still at the limiter tap, none after the output)', d.muted && d.gain === 0 && d.limiterRms > 0.01 && d.outputRms === 0,
+    `muted ${d.muted}, gain ${d.gain}, limiter RMS ${d.limiterRms.toFixed(4)}, output RMS ${d.outputRms}`);
 }
 
 // ---------- h, i: probe and capture ----------
@@ -1300,6 +1317,7 @@ async function runEngine(engine: Engine, url: string): Promise<void> {
     await page.evaluate(() => (window as unknown as W).__eng.clearStore());
     await boot(page, url);
     const steps: [string, () => Promise<void>][] = [
+      ['m', () => checkMuted(page)],
       ['a', () => checkFirstTake(page)],
       ['b', () => checkOverdub(page)],
       ['c', () => checkStateTable(page)],
