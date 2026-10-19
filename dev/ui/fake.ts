@@ -1,23 +1,33 @@
 // [shell] Dev page: mounts the real UI modules on a scripted fake UiView. Pick the scene with ?s=<name>:
 //   empty | four | five (four + vocals) | recording | recording-vocals | overdub | command | toast | settings | calibrating (settings + calibration running; ?ci=<ms> click period) | plus | menu (lane menu on violin) | many (12 lanes, scrolls)
-// ?t=<seconds> freezes the loop position (used for stable screenshots). Actions only log.
-// Test hooks: window.__gestures (every Gesture emitted), window.__actions (every action called), window.__ready.
+//   transport-stopped (paused at bar 3 beat 2) | transport-countin | transport-recording (= overdub) | tempo-muted | tempo-locked | tempo-picker (native select shown)
+// ?t=<seconds> freezes the loop position (used for stable screenshots). Tempo is 96 bpm 4/4, the loop 4 bars = 10 s.
+// Actions only log (tempo -/+ and the click toggle also change the fake state).
+// Test hooks: window.__gestures (every Gesture emitted), window.__actions (every action called), window.__lanes (posAt), window.__ready.
 import '../../src/ui/style.css';
 import type { DrumHit, Gesture, InstrumentKind, Note, Take, Track, UiView } from '../../src/types.ts';
 import { mountInput } from '../../src/ui/input.ts';
 import { mountLanes } from '../../src/ui/lanes.ts';
 import { mountSheets } from '../../src/ui/sheet.ts';
 import { mountStatus } from '../../src/ui/status.ts';
+import { mountTempo } from '../../src/ui/tempo.ts';
+import { mountTransport } from '../../src/ui/transport.ts';
+import { TEMPO_MAX_BPM, TEMPO_MIN_BPM } from '../../src/types.ts';
+import type { LanesApi } from '../../src/ui/lanes.ts';
 
 declare global {
   interface Window {
     __gestures: Gesture[];
     __actions: string[];
     __ready: boolean;
+    __lanes: LanesApi;
   }
 }
 
-const LOOP = 4;
+const BPM = 96;
+const BAR = (60 / BPM) * 4;
+const LOOP = 4 * BAR; // 4 bars = 10 s
+const SCALE = LOOP / 4; // the fake takes below are written for a 4 s loop
 const TOAST_AT = performance.now(); // the toast scene shows a toast that was created at page load
 const params = new URLSearchParams(location.search);
 const scene = params.get('s') ?? 'four';
@@ -34,16 +44,16 @@ const log = (action: string): void => {
 // ---------- fake data ----------
 let noteSeq = 0;
 function note(pos: number, dur: number, midi: number, vel = 0.8): Note {
-  return { pos, dur, midi, vel, phrase: `fake:${noteSeq++}`, legatoNext: false };
+  return { pos: pos * SCALE, dur: dur * SCALE, midi, vel, phrase: `fake:${noteSeq++}`, legatoNext: false };
 }
 const take = (id: string, notes: Note[] = [], hits: DrumHit[] = [], peaks?: number[]): Take => ({ id, notes, hits, ...(peaks ? { peaks } : {}) });
 const track = (id: string, kind: InstrumentKind, t: Take | null, on = true): Track => ({ id, kind, take: t, on });
 
 function drumHits(): DrumHit[] {
   const hits: DrumHit[] = [];
-  for (let i = 0; i < 16; i++) hits.push({ pos: i * 0.25, kind: 'hat', vel: i % 2 === 0 ? 0.9 : 0.5 });
-  for (const pos of [0, 1, 2, 2.75]) hits.push({ pos, kind: 'kick', vel: 0.9 });
-  for (const pos of [0.5, 1.5, 2.5, 3.5]) hits.push({ pos, kind: 'snare', vel: 0.75 });
+  for (let i = 0; i < 16; i++) hits.push({ pos: i * 0.25 * SCALE, kind: 'hat', vel: i % 2 === 0 ? 0.9 : 0.5 });
+  for (const pos of [0, 1, 2, 2.75]) hits.push({ pos: pos * SCALE, kind: 'kick', vel: 0.9 });
+  for (const pos of [0.5, 1.5, 2.5, 3.5]) hits.push({ pos: pos * SCALE, kind: 'snare', vel: 0.75 });
   return hits;
 }
 const violinNotes = (): Note[] => [
@@ -80,6 +90,13 @@ function loopPos(): number {
   return frozenT !== null ? Number(frozenT) : (performance.now() / 1000) % LOOP;
 }
 
+/** the beat clock at a position (seconds from bar 1 beat 1) */
+function beatAt(pos: number): NonNullable<UiView['beat']> {
+  const index = pos / (60 / bpm);
+  const whole = Math.floor(index);
+  return { bar: Math.floor(whole / 4) + 1, beat: (whole % 4) + 1, phase: index - whole };
+}
+
 function baseView(): UiView {
   return {
     state: 'idle',
@@ -96,6 +113,11 @@ function baseView(): UiView {
     toast: null,
     voice: 'ready',
     voiceProgress: 1,
+    tempo: { bpm, beatsPerBar: 4 },
+    playhead: null,
+    beat: null,
+    countIn: null,
+    tempoEditable,
   };
 }
 
@@ -105,6 +127,8 @@ function fourView(): UiView {
     state: 'playing',
     session: { v: 1, loopLength: LOOP, tracks: fourTracks(), selectedId: 'violin' },
     loopPos: loopPos(),
+    playhead: loopPos(),
+    beat: beatAt(loopPos()),
   };
 }
 
@@ -120,6 +144,7 @@ function recordingVocalsView(): UiView {
     recordingTrackId: 'm1',
     livePeaks: vocalPeaks(0.6),
     elapsed: 3.2,
+    beat: beatAt(3.2),
   };
 }
 
@@ -132,6 +157,7 @@ function recordingView(): UiView {
     liveNotes: [note(0.3, 0.4, 62), note(0.8, 0.3, 64), note(1.2, 0.5, 66), note(1.9, 0.3, 64), note(2.4, 0.35, 62)],
     openNote: { pos: 2.9, midi: 65.4 },
     elapsed: 3.2,
+    beat: beatAt(3.2),
   };
 }
 
@@ -150,7 +176,26 @@ function overdubView(): UiView {
     liveNotes: [note(0.2, 0.5, 69), note(0.8, 0.3, 71)],
     openNote: { pos: 1.2, midi: 70.3 },
     loopPos: loopPos(),
+    playhead: loopPos(),
+    beat: beatAt(loopPos()),
     elapsed: 2.3,
+  };
+}
+
+/** paused at bar 3 beat 2 of the 4-bar loop */
+function stoppedView(): UiView {
+  return { ...fourView(), state: 'stopped', loopPos: null, playhead: 2 * BAR + 60 / bpm, beat: null };
+}
+
+/** count-in "3" before a first take (one empty violin lane) */
+function countInView(): UiView {
+  return {
+    ...baseView(),
+    state: 'countIn',
+    session: { v: 1, loopLength: null, tracks: [track('v1', 'violin', null)], selectedId: 'v1' },
+    recordingTrackId: 'v1',
+    countIn: 3,
+    beat: { ...beatAt(loopPos()), bar: 1, beat: 2 },
   };
 }
 
@@ -182,8 +227,18 @@ const SCENES: Record<string, () => UiView> = {
   calibrating: fourView,
   plus: fourView,
   menu: fourView,
+  'transport-stopped': stoppedView,
+  'transport-countin': countInView,
+  'transport-recording': overdubView,
+  'tempo-muted': fourView,
+  'tempo-locked': fiveView,
+  'tempo-picker': fourView,
 };
 const baseSceneView = SCENES[scene] ?? fourView;
+/** fake tempo / click state (the real ones live in the controller) */
+let bpm = BPM;
+let clickOn = scene !== 'tempo-muted' && params.get('click') !== '0';
+const tempoEditable = scene !== 'tempo-locked' && params.get('locked') !== '1';
 /** tracks removed by onDelete (the fake session keeps them out of every later view) */
 const deleted = new Set<string>();
 const view = (): UiView => {
@@ -196,7 +251,7 @@ const stage = document.createElement('div');
 stage.className = 'stage';
 document.getElementById('app')!.append(stage);
 
-mountLanes(stage, {
+window.__lanes = mountLanes(stage, {
   view,
   onSelect: (id) => log(`select:${id}`),
   onToggle: (id) => log(`toggle:${id}`),
@@ -206,6 +261,7 @@ mountLanes(stage, {
   },
 });
 mountStatus(stage, { view });
+mountTransport(stage, { view, onAction: (a) => log(`transport:${a}`) });
 let ec = false;
 let echo = 0.4;
 let smoothing = 0.5;
@@ -273,6 +329,27 @@ mountInput(stage, {
   onGesture: (g) => window.__gestures.push(g),
 });
 
+const topbarLeft = document.querySelector<HTMLElement>('.topbar-left')!;
+mountTempo(topbarLeft, {
+  view,
+  clickOn: () => clickOn,
+  onToggleClick: () => {
+    clickOn = !clickOn;
+    log('toggleClick');
+  },
+  onSetTempo: (next) => {
+    log(`setTempo:${next}`);
+    if (tempoEditable) bpm = Math.min(TEMPO_MAX_BPM, Math.max(TEMPO_MIN_BPM, next));
+  },
+});
+
+if (scene === 'tempo-picker') {
+  // no showPicker -> the select is shown in place of the number; a real hold (pointer events) on the number
+  Object.defineProperty(HTMLSelectElement.prototype, 'showPicker', { value: undefined, configurable: true });
+  const num = document.querySelector<HTMLElement>('.tempo-num')!;
+  num.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'touch' }));
+  setTimeout(() => num.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, pointerType: 'touch' })), 600);
+}
 if (scene === 'settings' || scene === 'calibrating') document.querySelector<HTMLElement>('[data-action="settings"]')!.click();
 if (scene === 'calibrating') document.querySelector<HTMLElement>('[data-row="calibrate"]')!.click();
 if (scene === 'plus') document.querySelector<HTMLElement>('[data-action="new-track"]')!.click();

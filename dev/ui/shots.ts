@@ -9,8 +9,8 @@ import { startDev } from '../lib/serve.ts';
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const OUT_DIR = fileURLToPath(new URL('./out/', import.meta.url));
 const VIEWPORT = { width: 390, height: 844 };
-const SCENES = ['empty', 'four', 'five', 'recording', 'recording-vocals', 'overdub', 'command', 'toast', 'settings', 'plus', 'menu', 'many'];
-const FROZEN_T = 1.6; // loop position for stable screenshots
+const SCENES = ['empty', 'four', 'five', 'recording', 'recording-vocals', 'overdub', 'command', 'toast', 'settings', 'plus', 'menu', 'many', 'transport-stopped', 'transport-countin', 'transport-recording', 'tempo-muted', 'tempo-locked', 'tempo-picker'];
+const FROZEN_T = 3.8; // loop position for stable screenshots (fake tempo 96 bpm: bar 2 beat 3, just after the beat -> visible pulse)
 const SETTLE_MS = 1100; // transitions (sheet 200 ms, overlay 120 ms) finished; toast still fully visible
 const HOLD_MS = 500;
 const FREE_SPOT = { x: 195, y: 650 }; // empty part of the lanes area in the `four` scene
@@ -96,6 +96,8 @@ async function checkGestures(page: Page, url: string, cdp: CDPSession): Promise<
 
   await page.touchscreen.tap(x, y);
   check('gesture: quick tap -> tap', (await gestureTypes(page)).join() === 'tap', (await gestureTypes(page)).join());
+  const first = (await page.evaluate(() => window.__gestures))[0];
+  check('gesture: tap carries the pointer x/y', first?.type === 'tap' && first.x === x && first.y === y, JSON.stringify(first));
 
   await resetLogs(page);
   await touch(cdp, 'touchStart', x, y);
@@ -280,6 +282,138 @@ async function checkSheets(page: Page, url: string): Promise<void> {
   check('settings: clear needs two taps, then clears and closes', armed === 'tap again to clear' && (await actions(page)).includes('clear') && (await page.locator('.sheet-layer.open').count()) === 0, `armed=${armed}`);
 }
 
+
+// ---------- transport bar, tempo control, seek mapping ----------
+const BTN = (id: string): string => `.transport [data-button="${id}"]`;
+const text = async (page: Page, selector: string): Promise<string> => (await page.locator(selector).first().textContent()) ?? '';
+const gestureCount = async (page: Page): Promise<number> => (await gestureTypes(page)).length;
+
+async function checkTransport(page: Page, url: string): Promise<void> {
+  await openScene(page, url, 'four');
+  await resetLogs(page);
+  await tap(page, BTN('toStart'));
+  await tap(page, BTN('playPause'));
+  await tap(page, BTN('record'));
+  check('transport: ⏮ / ⏸ (playing) / ● call onAction toStart, pause, record once each', (await actions(page)).join() === 'transport:toStart,transport:pause,transport:record', (await actions(page)).join());
+  check('transport: presses emit no gesture', (await gestureCount(page)) === 0);
+  check('transport (playing): position "bar.beat", state word, loop length', (await text(page, '.tp-pos')) === '2.3' && (await text(page, '.tp-state')) === 'playing' && (await text(page, '.tp-right')) === '4 bars', `${await text(page, '.tp-pos')} | ${await text(page, '.tp-state')} | ${await text(page, '.tp-right')}`);
+
+  await openScene(page, url, 'transport-stopped');
+  await resetLogs(page);
+  await tap(page, BTN('playPause'));
+  check('transport (stopped): ▶ calls play', (await actions(page)).join() === 'transport:play', (await actions(page)).join());
+  check('transport (stopped): bar 3 beat 2, "paused", 4 bars', (await text(page, '.tp-pos')) === '3.2' && (await text(page, '.tp-state')) === 'paused' && (await text(page, '.tp-right')) === '4 bars', `${await text(page, '.tp-pos')} | ${await text(page, '.tp-state')}`);
+
+  await openScene(page, url, 'transport-countin');
+  check('transport (count-in): "count-in 3", ⏮ disabled, ● shows stop', (await text(page, '.tp-state')) === 'count-in 3' && (await page.locator(BTN('toStart')).isDisabled()) && (await page.locator(BTN('record')).getAttribute('aria-label')) === 'stop recording');
+  await resetLogs(page);
+  await page.locator(BTN('toStart')).tap({ force: true, timeout: 1000 }).catch(() => {});
+  check('transport (count-in): disabled ⏮ does nothing', (await actions(page)).length === 0, (await actions(page)).join());
+
+  await openScene(page, url, 'transport-recording');
+  check('transport (overdub): ⏮ disabled, ● is stop, state "recording"', (await page.locator(BTN('toStart')).isDisabled()) && (await page.locator(BTN('record')).getAttribute('aria-label')) === 'stop recording' && (await text(page, '.tp-state')) === 'recording');
+
+  await openScene(page, url, 'empty');
+  check('transport (idle, no loop): ▶ disabled, "—", "ready"', (await page.locator(BTN('playPause')).isDisabled()) && (await text(page, '.tp-pos')) === '—' && (await text(page, '.tp-right')) === '—' && (await text(page, '.tp-state')) === 'ready');
+  check('empty hint text', (await text(page, '.hint')).includes('press ● to record · hold to speak'));
+}
+
+/** mouse press of `ms` on a selector (pointer events, works in chromium and webkit) */
+async function mousePress(page: Page, selector: string, ms: number): Promise<void> {
+  const { x, y } = await center(page, selector);
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.waitForTimeout(ms);
+  await page.mouse.up();
+}
+
+async function checkTempo(page: Page, url: string, engine: string): Promise<void> {
+  const tag = `tempo[${engine}]`;
+  await openScene(page, url, 'four');
+  check(`${tag}: shows 96 bpm`, (await text(page, '.tempo-val')) === '96' && (await text(page, '.tempo-unit')) === 'bpm');
+  await resetLogs(page);
+  await mousePress(page, '.tempo-num', 100);
+  check(`${tag}: short tap on the number toggles the click`, (await actions(page)).join() === 'toggleClick', (await actions(page)).join());
+  await resetLogs(page);
+  await mousePress(page, '[data-tempo="down"]', 80);
+  await mousePress(page, '[data-tempo="up"]', 80);
+  check(`${tag}: − and + call onSetTempo(bpm∓1) once each (the fake applies each step)`, (await actions(page)).join() === 'setTempo:95,setTempo:96', (await actions(page)).join());
+  check(`${tag}: taps on the tempo control emit no gesture`, (await gestureCount(page)) === 0);
+
+  await resetLogs(page);
+  await mousePress(page, '[data-tempo="up"]', 1000);
+  const reps = (await actions(page)).map((a) => Number(a.split(':')[1]));
+  check(`${tag}: holding + repeats (after 400 ms, every 120 ms)`, reps.length >= 4 && reps.length <= 8 && reps.every((v, i) => i === 0 || v === reps[i - 1]! + 1), reps.join());
+
+  // hold >= 450 ms on the number -> native picker (showPicker, else the select is shown in place)
+  await openScene(page, url, 'four');
+  await page.evaluate(() => {
+    const w = window as unknown as { __picks: number };
+    w.__picks = 0;
+    const proto = HTMLSelectElement.prototype as unknown as { showPicker?: () => void };
+    const orig = proto.showPicker;
+    if (orig) proto.showPicker = function (this: HTMLSelectElement) { w.__picks++; return orig.call(this); };
+  });
+  await resetLogs(page);
+  await mousePress(page, '.tempo-num', 600);
+  const opened = await page.evaluate(() => ({
+    picks: (window as unknown as { __picks: number }).__picks,
+    shown: document.querySelector('.tempo-select')!.classList.contains('shown'),
+    picking: document.querySelector('.tempo')!.classList.contains('picking'),
+  }));
+  check(`${tag}: 600 ms hold opens the picker (showPicker or visible select), no toggle`, opened.picking && (opened.picks === 1 || opened.shown) && !(await actions(page)).includes('toggleClick'), JSON.stringify(opened));
+  check(`${tag}: select has options 40..200, selected = current`, (await page.locator('.tempo-select option').count()) === 161 && (await page.locator('.tempo-select').inputValue()) === '96');
+  await page.locator('.tempo-select').selectOption('120', { force: true });
+  check(`${tag}: select change calls onSetTempo(120)`, (await actions(page)).includes('setTempo:120'), (await actions(page)).join());
+
+  // locked tempo (vocals present): no picker; presses are forwarded once (main toasts)
+  await openScene(page, url, 'tempo-locked');
+  check(`${tag}: locked look`, await page.locator('.tempo.locked').count() === 1);
+  await resetLogs(page);
+  await mousePress(page, '.tempo-num', 600);
+  const lockedOpen = await page.evaluate(() => document.querySelector('.tempo')!.classList.contains('picking'));
+  check(`${tag}: locked: hold opens no picker (forwarded as onSetTempo(current))`, !lockedOpen && (await actions(page)).join() === 'setTempo:96', (await actions(page)).join());
+  await resetLogs(page);
+  await mousePress(page, '[data-tempo="up"]', 1000);
+  check(`${tag}: locked: + calls onSetTempo once, no repeat`, (await actions(page)).join() === 'setTempo:97', (await actions(page)).join());
+
+  await openScene(page, url, 'tempo-muted');
+  check(`${tag}: muted: slash shown`, (await page.locator('.tempo.muted .tempo-slash').isVisible()));
+  await openScene(page, url, 'tempo-picker');
+  await page.waitForTimeout(900);
+  check(`${tag}: picker scene: the select is visible and focused`, (await page.locator('.tempo-select.shown').isVisible()) && (await page.evaluate(() => document.activeElement?.classList.contains('tempo-select') === true)));
+}
+
+async function checkSeek(page: Page, url: string): Promise<void> {
+  await openScene(page, url, 'four');
+  const at = (x: number): Promise<number | null> => page.evaluate((cx) => window.__lanes.posAt(cx), x);
+  const left = await at(76); // lane x 12 + body 64
+  const mid = await at(221);
+  const right = await at(366); // width 390 - 12 - 12
+  check('posAt: body left edge -> 0, middle -> L/2, right edge -> ~L (10 s)', left === 0 && Math.abs((mid ?? 0) - 5) < 0.01 && (right ?? 0) > 9.99 && (right ?? 99) < 10, `${left} ${mid} ${right}`);
+  const out = [await at(0), await at(389)];
+  check('posAt: outside the body clamps to [0, L)', out[0] === 0 && (out[1] ?? 99) < 10 && (out[1] ?? 0) > 9.99, out.join());
+  await openScene(page, url, 'empty');
+  check('posAt: null without a loop', (await at(200)) === null);
+}
+
+async function checkNarrow(page: Page, url: string): Promise<void> {
+  for (const width of [360, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await openScene(page, url, 'four');
+    const fit = await page.evaluate(() => {
+      const bar = document.querySelector('.topbar')!.getBoundingClientRect();
+      const left = document.querySelector('.topbar-left')!.getBoundingClientRect();
+      const right = document.querySelector('.topbar-right')!.getBoundingClientRect();
+      const bottom = document.querySelector('.transport')!;
+      return { barW: bar.width, left: [left.left, left.right], right: [right.left, right.right], tpOverflow: bottom.scrollWidth > bottom.clientWidth, docOverflow: document.documentElement.scrollWidth > innerWidth };
+    });
+    const ok = fit.left[0]! >= 0 && fit.left[1]! <= fit.right[0]! && fit.right[1]! <= width && !fit.tpOverflow && !fit.docOverflow;
+    check(`narrow ${width}px: top bar and transport fit on one row`, ok, JSON.stringify(fit));
+    await page.screenshot({ path: `${OUT_DIR}narrow-${width}.png` });
+  }
+  await page.setViewportSize(VIEWPORT);
+}
 
 // ---------- setup wizard ----------
 interface WizHooks {
@@ -498,8 +632,28 @@ async function main(): Promise<void> {
     await checkGestures(page, dev.url, cdp);
     await checkSheets(page, dev.url);
     await checkLaneMenu(page, dev.url, cdp);
+    await checkTransport(page, dev.url);
+    await checkTempo(page, dev.url, 'chromium');
+    await checkSeek(page, dev.url);
+    await checkNarrow(page, dev.url);
     await checkSetupRow(page, dev.url);
     await checkWizard(page, dev.url, cdp);
+
+    // the tempo control also runs in WebKit (showPicker / select behaviour differs)
+    const webkit = await launch('webkit');
+    try {
+      const wpage = await (await webkit.newContext({ viewport: VIEWPORT, deviceScaleFactor: 2 })).newPage();
+      wpage.on('pageerror', (e) => check('no page error (webkit)', false, e.message));
+      await checkTempo(wpage, dev.url, 'webkit');
+      await openScene(wpage, dev.url, 'tempo-picker');
+      await wpage.waitForTimeout(900);
+      await wpage.screenshot({ path: `${OUT_DIR}tempo-picker-webkit.png` });
+      await openScene(wpage, dev.url, 'four');
+      await wpage.waitForTimeout(500);
+      await wpage.screenshot({ path: `${OUT_DIR}four-webkit.png` });
+    } finally {
+      await webkit.close();
+    }
   } finally {
     await browser.close();
     await dev.close();
