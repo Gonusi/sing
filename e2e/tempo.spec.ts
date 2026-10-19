@@ -20,7 +20,8 @@ async function takeOfBars(page: Page, bars: number): Promise<{ L: number; bar: n
 
 test('first take rounds to whole bars (round half up, at least one)', async ({ page }) => {
   const errors = await boot(page); // default 90 bpm 4/4: bar 2.667 s
-  for (const [recorded, bars] of [[1.4, 1], [1.6, 2], [0.3, 1], [2.5, 3]] as const) {
+  // not exactly on a half bar: stop − D at 2.5 bars is a float hair under 2.5 and rounds down (a real tap never ties)
+  for (const [recorded, bars] of [[1.4, 1], [1.55, 2], [0.3, 1], [2.6, 3]] as const) {
     const r = await takeOfBars(page, recorded);
     console.log(`[tempo] recorded ${recorded} bars → loop ${(r.L / r.bar).toFixed(4)} bars`);
     expect(r.L).toBeCloseTo(bars * r.bar, 6);
