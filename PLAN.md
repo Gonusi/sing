@@ -291,6 +291,13 @@ One tutorial on first launch for now (later: each step launchable alone; whether
 - [x] shell: wizard UI (6 step cards), ⋯ → Setup row
 - [ ] tester: e2e for the wizard (deferred: engine check already runs all 6 steps against the real SetupApi on Chromium + WebKit; add as regression later)
 
+## Round 4 — transport, tempo, seek (owner, 2026-10-19)
+GarageBand-like. Bottom transport: ⏮ (to start; keeps playing), ▶/⏸ (resume from the playhead), ● (stopped → 1-bar count-in then record from the playhead; playing → punch in now; recording → stop recording, the lane plays at once). Position "bar.beat" left, loop "n bars" right. Tap on lanes/empty area = seek (snap to beat); tap no longer records. Hold = voice (record/stop/play = transport). Tempo top-left: −/+ 1 bpm, tap number = metronome click on/off, hold = native select 40–200; the number pulses per beat (red while counting in/recording). Default 90 bpm 4/4; first take rounds to whole bars; tempo change rescales note/drum takes, locked once a vocal take exists; metronome clicks excluded from drum takes.
+- [x] contract: Tempo, DEFAULT_TEMPO, AppState countIn, TransportAction, Gesture tap x/y, View tempo/playhead/beat/countIn/tempoEditable, Controller transport/seek/setTempo/setClick (integration branch `tempo`)
+- [ ] engine: transport state machine, count-in, punch in/out, resume from playhead, seek, bar-rounded loops, tempo rescale/lock, metronome + click exclusion
+- [ ] shell: transport bar, tempo control (pulse, tap/hold), beat grid + seek mapping in lanes, hints
+- [ ] tester: update specs for the new transport (tap no longer records), add transport/tempo specs
+
 ## Known issues
 - (fixed locally 2026-10-17, not yet deployed) WebKit advances currentTime mid-task: vocal starts lost a render quantum (2.7 ms late) → 10 ms start margin; the states.spec failure was a two-clock-reads test artefact.
 

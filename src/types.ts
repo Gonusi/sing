@@ -81,7 +81,9 @@ export interface Session {
   tracks: Track[];
   selectedId: string | null;
   /** song-wide settings; missing in older saved sessions (treat as defaults). smooth = note smoothing 0..1 */
-  fx?: { echo: number; smooth?: number };
+  fx?: { echo: number; smooth?: number; click?: boolean };
+  /** song tempo; missing in older sessions (treat as DEFAULT_TEMPO). The loop length is a whole number of bars. */
+  tempo?: Tempo;
 }
 
 /** Per device, stored apart from the session (undo never touches it). */
@@ -231,7 +233,22 @@ export interface Scheduler {
 
 // ---------- app ----------
 
-export type AppState = 'idle' | 'recordingFirst' | 'playing' | 'overdubbing' | 'stopped';
+export interface Tempo {
+  bpm: number;
+  beatsPerBar: number;
+}
+export const DEFAULT_TEMPO: Tempo = { bpm: 90, beatsPerBar: 4 };
+export const TEMPO_MIN_BPM = 40;
+export const TEMPO_MAX_BPM = 200;
+
+/**
+ * idle = no loop yet; countIn = one bar of clicks before recording (first take or a record from stopped);
+ * stopped = paused at `View.playhead` (play resumes there).
+ */
+export type AppState = 'idle' | 'countIn' | 'recordingFirst' | 'playing' | 'overdubbing' | 'stopped';
+
+/** The bottom transport bar; voice commands record / stop / play map onto the same actions. */
+export type TransportAction = 'play' | 'pause' | 'record' | 'toStart';
 
 export type Command =
   | { type: 'create'; kind: InstrumentKind }
@@ -243,7 +260,8 @@ export type Command =
 
 /** All times are ctx.currentTime at pointerdown. Taps fire on release, holds fire holdStart at 300 ms. */
 export type Gesture =
-  | { type: 'tap'; tDown: Sec }
+  /** x, y: client coordinates of the tap (the stage maps x to a loop position for seeking) */
+  | { type: 'tap'; tDown: Sec; x?: number; y?: number }
   | { type: 'holdStart'; tDown: Sec }
   | { type: 'holdEnd'; tDown: Sec; tUp: Sec };
 
@@ -271,6 +289,16 @@ export interface View {
   loopPos: Sec | null;
   /** seconds into the first take while recordingFirst; seconds left in the overdub window while overdubbing */
   elapsed: Sec | null;
+  /** the song tempo (DEFAULT_TEMPO until set) */
+  tempo: Tempo;
+  /** where the playhead is: the heard position while playing, the resume position while stopped (null = no loop) */
+  playhead: Sec | null;
+  /** beat clock for pulsing UI: bar (1-based), beat in bar (1-based), phase 0..1 within the beat; null when not running */
+  beat: { bar: number; beat: number; phase: number } | null;
+  /** count-in: beats left (counts down to 1), null otherwise */
+  countIn: number | null;
+  /** tempo can be changed (false once a vocal take exists: raw audio can't be stretched yet) */
+  tempoEditable: boolean;
 }
 
 export type VoiceStatus = 'off' | 'loading' | 'ready' | 'error';
@@ -300,6 +328,14 @@ export interface Controller {
   setSmoothing(amount: number): void;
   /** remove a lane (an undo point); false if the id is unknown */
   deleteTrack(trackId: string): boolean;
+  /** the bottom transport bar (see TransportAction); false = refused in this state */
+  transport(action: TransportAction, tDown: Sec): boolean;
+  /** move the playhead to loop position `pos` (snapped to the nearest beat); refused while recording */
+  seek(pos: Sec): boolean;
+  /** clamp to TEMPO_MIN..MAX; rescales note/drum takes, refused when !tempoEditable */
+  setTempo(bpm: number): boolean;
+  /** metronome click on/off (Session.fx.click; the count-in always clicks) */
+  setClick(on: boolean): void;
   setDevice(patch: Partial<DeviceSettings>): Promise<void>;
   clearSession(): Promise<void>;
   /** WAV of the raw mic audio of the last take (for exporting real fixtures) */
