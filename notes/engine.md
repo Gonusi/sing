@@ -240,6 +240,13 @@ State table: the header of src/app/controller.ts (authoritative). Summary:
   semantics (stop = pause now, play resumes from the playhead, record from stopped counts in); fake-mic and ui specs tap the stage
   to record.
 
+## Round 5: duplicateTrack (2026-10-19)
+`duplicateTrack(id) → copy id | null`: the copy (same kind, on/off, take with a new take id; notes/hits/raw/peaks as they are)
+goes right below the original and is selected; an undo point; logged 'duplicate'. Null for an unknown id or the lane being
+recorded (incl. its count-in). Vocal copies SHARE the stored audio key: the audio GC keeps a key while any lane or undo
+snapshot references it, so deleting either lane never drops audio the other uses. Checks w1–w3 (identical sched events,
+undo / refusal, vocal copy survives deleting the original + reload with one stored key).
+
 ## Known risks
 - **Vocal first replay** misses ≈ 0.13 s after an overdub window (commit latency); a provisional commit before the window end could
   close it, not built. **Beep exclusion** zeroes 80 ms of a vocal take right after the record tap (on speakers the mic hears the beep).

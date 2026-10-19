@@ -1272,6 +1272,85 @@ async function checkTransport(page: Page): Promise<void> {
     `while recording ${d.tempoWhileRec}; editable ${d.editable}; with vocals ${d.tempoLocked}`);
 }
 
+// ---------- w: duplicateTrack ----------
+
+async function checkDuplicate(page: Page, url: string): Promise<void> {
+  const d = await page.evaluate(async () => {
+    const e = (window as unknown as W).__eng;
+    const inLat = 0.01;
+    await e.c.clearSession();
+    await e.c.setDevice({ inLat });
+    const t0 = (await e.recordFirst(100))!; // 1 bar = 2.4 s
+    e.tone(t0 + 0.2 + inLat, 60, 0.3);
+    e.tone(t0 + 1.0 + inLat, 64, 0.3);
+    e.tone(t0 + 1.8 + inLat, 67, 0.3);
+    await e.waitUntil(t0 + 2.5);
+    e.c.transport('record', t0 + 2.4);
+    const orig = e.c.session.tracks[0].id;
+    e.command({ type: 'create', kind: 'bass' }); // a lane below, so "right below the original" is visible
+    const unknown = e.c.duplicateTrack('nope');
+    const tDup = e.now();
+    const copy = e.c.duplicateTrack(orig);
+    const order = e.c.session.tracks.map((t) => t.id);
+    const selected = e.c.session.selectedId;
+    const copyTrack = e.c.session.tracks.find((t) => t.id === copy)!;
+    await e.sleep(5.2);
+    const sched = e.events.filter((x) => x.type === 'sched').map((x) => x.data as { trackId: string; pos: number; cycle: number; heard: number; when: number });
+    const after = (id: string) => sched.filter((x) => x.trackId === id && x.heard >= tDup + 0.3).map((x) => `${x.pos.toFixed(5)}|${x.cycle}|${x.when.toFixed(6)}`).sort();
+    const same = JSON.stringify(after(orig)) === JSON.stringify(after(copy!));
+    const n = after(orig).length;
+    const undo = e.command({ type: 'undo' });
+    const afterUndo = e.c.session.tracks.map((t) => t.id);
+    // refused while that lane is recorded
+    e.command({ type: 'create', kind: 'violin' });
+    const rec = e.c.session.selectedId!;
+    e.c.transport('record', e.now()); // punch in
+    const whileRec = e.c.duplicateTrack(rec);
+    e.c.transport('record', e.now());
+    // vocals: punch in a vocal take, duplicate, delete the original → the copy keeps its audio (survives reload)
+    e.command({ type: 'create', kind: 'vocals' });
+    const voc = e.c.session.selectedId!;
+    const ts = e.now() + 0.05;
+    e.injectSamples(e.noise(3, Math.round(1.0 * e.sampleRate)), ts + inLat);
+    e.c.transport('record', ts);
+    await e.sleep(0.9);
+    e.c.transport('record', e.now());
+    const vocCopy = e.c.duplicateTrack(voc)!;
+    const sum = (id: string) => {
+      const b = e.c.vocalAudio(id);
+      if (!b) return null;
+      const x = b.getChannelData(0);
+      let s2 = 0;
+      for (let i = 0; i < x.length; i++) s2 += Math.abs(x[i]) * ((i % 7) + 1);
+      return `${x.length}:${s2.toFixed(3)}`;
+    };
+    const vocSum = sum(voc);
+    e.c.deleteTrack(voc);
+    e.c.transport('pause', e.now());
+    await e.c.flush();
+    await e.sleep(0.3);
+    return { unknown, copy, order, orig, selected, copyKind: copyTrack.kind, copyNotes: copyTrack.take?.notes.length, same, n, undo, afterUndo, whileRec, vocCopy, vocSum, copySum: sum(vocCopy) };
+  });
+  check('w1 duplicate: below the original, selected, same take → identical sched events (pos, cycle, when)', d.unknown === null && !!d.copy &&
+    d.order[1] === d.copy && d.order[0] === d.orig && d.selected === d.copy && d.copyKind === 'synth' && d.copyNotes === 3 && d.same && d.n >= 3,
+    `order ${d.order.map((id) => (id === d.orig ? 'orig' : id === d.copy ? 'copy' : 'other')).join(',')}; ${d.n} events each, identical ${d.same}`);
+  check('w2 undo removes the copy; duplicating the lane being recorded is refused', d.undo && JSON.stringify(d.afterUndo) === JSON.stringify(d.order.filter((id) => id !== d.copy)) && d.whileRec === null,
+    `after undo ${d.afterUndo.length} lanes; while recording ${d.whileRec}`);
+  await boot(page, url);
+  const r = await page.evaluate(async (id) => {
+    const e = (window as unknown as W).__eng;
+    const b = e.c.vocalAudio(id);
+    let s2 = 0;
+    if (b) {
+      const x = b.getChannelData(0);
+      for (let i = 0; i < x.length; i++) s2 += Math.abs(x[i]) * ((i % 7) + 1);
+    }
+    return { sum: b ? `${b.getChannelData(0).length}:${s2.toFixed(3)}` : null, keys: (await e.audioKeys()).length, lanes: e.c.session.tracks.length };
+  }, d.vocCopy);
+  check('w3 vocal copy shares the audio: delete the original + reload → the copy still plays the same audio', d.vocSum !== null && d.copySum === d.vocSum && r.sum === d.vocSum && r.keys === 1,
+    `copy ${d.copySum} (orig ${d.vocSum}); after reload ${r.sum}, ${r.keys} stored key(s), ${r.lanes} lanes`);
+}
+
 // ---------- m: tests are silent on the speakers ----------
 
 async function checkMuted(page: Page): Promise<void> {
@@ -1339,6 +1418,7 @@ async function runEngine(engine: Engine, url: string): Promise<void> {
       ['u', () => checkSetup(page)],
       ['u11', () => checkTaughtDrums(page)],
       ['x', () => checkTransport(page)],
+      ['w', () => checkDuplicate(page, url)],
       ['u9', async () => checkLearnedSettings()],
     ];
     for (const [name, fn] of steps) {
