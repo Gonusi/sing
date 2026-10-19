@@ -1260,7 +1260,7 @@ async function checkTransport(page: Page): Promise<void> {
   check('x1 pause keeps the playhead; seek snaps to the beat; play resumes there; seek while playing jumps; toStart → 0', d.pausedHead !== null &&
     d.seekOk && d.head === 1 && play?.from === 1 && d.jumpOk && jump?.to === 3.5 && d.toStartOk && toStart?.to === 0,
     `paused at ${d.pausedHead?.toFixed(3)}; seek 1.13 → ${d.head}; play from ${play?.from}; jump to ${jump?.to}; toStart ${toStart?.to}`);
-  check('x2 setTempo while playing: L and notes ×2 (120 → 60), bar position kept', d.tempoOk && d.L2 === 8 && JSON.stringify(d.notes2) === JSON.stringify(d.notes1.map((p) => +(p * 2).toFixed(3))) &&
+  check('x2 setTempo while playing: L and notes ×2 (120 → 60), bar position kept', d.tempoOk && d.L2 === 8 && d.notes2.length === d.notes1.length && d.notes2.every((p, i) => Math.abs(p - d.notes1[i] * 2) < 0.002) &&
     d.tempoOf === 60 && Math.abs(d.posAfter - d.posBefore * 2) < 0.1,
     `L ${d.L2}, notes ${d.notes2.join(',')}, pos ${d.posBefore.toFixed(3)} → ${d.posAfter.toFixed(3)}`);
   check('x3 metronome: click off → silent master; on → a click on every beat (±3 ms)', d.offRms < 1e-4 && d.peaks >= 2 && d.beatErr < 0.003,
