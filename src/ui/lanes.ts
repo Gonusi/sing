@@ -2,6 +2,10 @@
 // Holding a strip button 450 ms opens the lane menu (lanemenu.ts: mute/unmute, delete) instead of the tap action.
 // One <canvas class="lanes"> is redrawn every animation frame from view(). The strip buttons are DOM <button>s
 // (data-no-gesture) laid over the canvas; the canvas only paints their circle + letter.
+// Swipe (iOS Voice Memos style): input.ts hands a sideways drag to `LanesApi.swipe`; the lane (canvas content + strip button) is drawn/translated
+// left by the row offset, and a clipped DOM `.swipe-actions` box (duplicate / delete) at the lane's right edge is revealed behind it.
+// State per swiped lane = a `Row` (offset x <= 0, optional animation). Only one row is open at a time. Rows are driven from the frame loop.
+// Layout changes (a lane added/removed) slide the other lanes to their new place (`slides`, FLIP-style, canvas + strip buttons).
 // Colours are read from the CSS tokens in style.css (single source of truth).
 // Coordinates: "lane-local" x starts at the lane's left edge (LANE_MARGIN_X); all other x are canvas css px.
 import { openLaneMenu } from './lanemenu.ts';
@@ -12,6 +16,14 @@ type OpenNote = NonNullable<UiView['openNote']>;
 export interface LanesApi {
   /** screen x (clientX) -> loop position in seconds, clamped to [0, L); null when there is no loop yet */
   posAt(clientX: number): Sec | null;
+  /** pass to mountInput as `onSwipe` */
+  swipe: {
+    start(clientX: number, clientY: number): boolean;
+    move(dx: number): void;
+    end(dx: number, vx: number): void;
+    open(): boolean;
+    dismiss(): void;
+  };
   destroy(): void;
 }
 
@@ -21,6 +33,8 @@ export interface LanesOptions {
   onToggle(trackId: string): void;
   /** holding a strip button (lane menu -> delete) */
   onDelete(trackId: string): void;
+  /** the swipe action: add a copy of the track (below it) */
+  onDuplicate(trackId: string): void;
 }
 
 // ---------- layout constants (css px) ----------
@@ -36,6 +50,20 @@ const BODY_LEFT = 64; // lane-local
 const BODY_RIGHT_PAD = 12;
 const HOLD_MS = 450; // holding a strip button this long opens the lane menu
 const HOLD_HAPTIC_MS = 10;
+
+// ---------- swipe actions ----------
+const OPEN_W = 168; // the lane rests this far left when open (2 buttons of 84)
+const SNAP_OPEN_PX = 80; // released further left than this -> opens
+const FLICK_V = 0.5; // px/ms: a flick this fast opens (left) / closes (right)
+const DELETE_FRAC = 0.6; // of the lane width ...
+const DELETE_V = 0.8; // ... with a flick this fast = full-swipe delete
+const RUBBER = 0.5; // the lane follows the finger by this factor beyond OPEN_W
+const SNAP_MS = 180;
+const REMOVE_MS = 200;
+const REMOVE_TIMEOUT_MS = 800; // a lane that is still there this long after onDelete comes back
+const SLIDE_MS = 220;
+const ICON_COPY = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2.5"/><path d="M5 15V6.5A2.5 2.5 0 0 1 7.5 4H15"/></svg>';
+const ICON_TRASH = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l.8 12.5h9.4L17.5 7M10 11v5M14 11v5"/></svg>';
 
 // ---------- lane look ----------
 const FILL_ALPHA = 0.08;
@@ -383,8 +411,12 @@ function drawLane(env: DrawEnv, index: number, laneH: number, areaW: number, tra
   g.restore();
 }
 
-function drawPlayhead(env: DrawEnv, view: UiView, axis: Axis, areaW: number, laneH: number): void {
-  const count = view.session.tracks.length;
+/** per-lane offset of the lane being swiped (dx) and of lanes sliding to a new place (dy) */
+type OffsetOf = (trackId: string) => { dx: number; dy: number };
+
+function drawPlayhead(env: DrawEnv, view: UiView, axis: Axis, areaW: number, laneH: number, offsetOf: OffsetOf): void {
+  const tracks = view.session.tracks;
+  const count = tracks.length;
   if (count === 0) return;
   const body = bodyOf(laneRect(0, laneH, areaW));
   const { fg, rec } = env.p;
@@ -409,8 +441,15 @@ function drawPlayhead(env: DrawEnv, view: UiView, axis: Axis, areaW: number, lan
   const { g } = env;
   const x = xAt(body, axis, pos);
   g.beginPath();
-  g.moveTo(x, 0);
-  g.lineTo(x, count * laneH + (count - 1) * LANE_GAP);
+  // one segment per lane (so a swiped lane carries its piece of the playhead); the gap below a lane is bridged when it and the next lane are at rest
+  tracks.forEach((t, i) => {
+    const o = offsetOf(t.id);
+    const next = i < count - 1 ? offsetOf(tracks[i + 1]!.id) : null;
+    const top = i * (laneH + LANE_GAP) + o.dy;
+    const bridge = next !== null && o.dx === 0 && next.dx === 0 ? LANE_GAP : 0;
+    g.moveTo(x + o.dx, top);
+    g.lineTo(x + o.dx, top + laneH + bridge);
+  });
   g.lineWidth = PLAYHEAD_W;
   g.strokeStyle = color;
   g.stroke();
@@ -421,6 +460,39 @@ function div(className: string): HTMLDivElement {
   const el = document.createElement('div');
   el.className = className;
   return el;
+}
+
+// ---------- swipe rows ----------
+interface Anim {
+  from: number;
+  to: number;
+  start: number;
+  ms: number;
+  done?: () => void;
+}
+
+/** one swiped lane: x = how far it is shifted left (<= 0), el = the clipped action box behind it */
+interface Row {
+  id: string;
+  x: number;
+  base: number; // x when the current drag began
+  dragging: boolean;
+  open: boolean; // resting (or heading) open; the only state that makes taps elsewhere close it
+  removing: boolean; // flying off for onDelete
+  removedAt: number;
+  anim: Anim | null;
+  el: HTMLDivElement;
+  geom: string;
+}
+
+const easeOut = (t: number): number => 1 - (1 - t) ** 3;
+
+function actionButton(className: string, icon: string, label: string): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.className = `swipe-btn ${className}`;
+  b.innerHTML = `${icon}<span>${label}</span>`;
+  b.setAttribute('aria-label', label);
+  return b;
 }
 
 export function mountLanes(root: HTMLElement, opts: LanesOptions): LanesApi {
@@ -447,7 +519,123 @@ export function mountLanes(root: HTMLElement, opts: LanesOptions): LanesApi {
   let layoutKey = '';
   let layout: Layout = { laneH: LANE_MAX_H, contentH: 0 };
   const strips = new Map<string, HTMLButtonElement>();
+  const stripTransform = new Map<string, string>();
 
+  // ---------- swipe state ----------
+  const rows = new Map<string, Row>();
+  /** lanes sliding to a new y after the lane list changed: dy = from * (1 - ease(t)) */
+  const slides = new Map<string, { from: number; start: number }>();
+  let lastY = new Map<string, number>(); // base y of each lane at the last layout
+  let swipeId: string | null = null; // the row under the finger
+  let cancelPendingHold: (() => void) | null = null;
+  let swallowClick = false; // set after a lane-menu hold, a swipe, or a closing tap; the next strip click is ignored
+  let swallowOutsideClick = false;
+  let lastFrameMs = 0;
+
+  const anyOpen = (): boolean => [...rows.values()].some((r) => r.open && !r.removing);
+
+  function slideDy(id: string, nowMs: number): number {
+    const s = slides.get(id);
+    if (!s) return 0;
+    const t = (nowMs - s.start) / SLIDE_MS;
+    if (t >= 1) {
+      slides.delete(id);
+      return 0;
+    }
+    return s.from * (1 - easeOut(Math.max(0, t)));
+  }
+  const offsetOf = (id: string, nowMs = lastFrameMs): { dx: number; dy: number } => ({ dx: rows.get(id)?.x ?? 0, dy: slideDy(id, nowMs) });
+
+  function animateTo(row: Row, to: number, ms: number, done?: () => void): void {
+    if (row.x === to && !row.anim) {
+      done?.();
+      return;
+    }
+    row.anim = { from: row.x, to, start: performance.now(), ms, ...(done ? { done } : {}) };
+  }
+  function openRow(row: Row): void {
+    row.open = true;
+    animateTo(row, -OPEN_W, SNAP_MS);
+  }
+  function closeRow(row: Row): void {
+    row.open = false;
+    animateTo(row, 0, SNAP_MS);
+  }
+  function closeAll(except?: string): void {
+    for (const row of rows.values()) if (row.id !== except && (row.open || row.x < 0) && !row.removing) closeRow(row);
+  }
+  /** full swipe / Delete button: the lane flies off to the left, then onDelete (the others slide up when the track is gone) */
+  function deleteRow(row: Row): void {
+    row.open = false;
+    row.dragging = false;
+    row.removing = true;
+    row.removedAt = performance.now();
+    row.el.classList.add('deleting');
+    animateTo(row, -areaW, REMOVE_MS, () => opts.onDelete(row.id));
+  }
+
+  function createRow(id: string): Row {
+    const el = div('swipe-actions');
+    el.dataset.noGesture = '';
+    el.dataset.id = id;
+    const row: Row = { id, x: 0, base: 0, dragging: false, open: false, removing: false, removedAt: 0, anim: null, el, geom: '' };
+    const dup = actionButton('swipe-dup', ICON_COPY, 'duplicate');
+    const del = actionButton('swipe-del', ICON_TRASH, 'delete');
+    dup.addEventListener('click', () => {
+      opts.onDuplicate(id);
+      closeRow(row);
+    });
+    del.addEventListener('click', () => deleteRow(row));
+    el.append(dup, del);
+    content.append(el);
+    rows.set(id, row);
+    return row;
+  }
+  function dropRow(row: Row): void {
+    row.el.remove();
+    rows.delete(row.id);
+  }
+
+  /** advance animations, drop finished/orphaned rows, place the action boxes */
+  function stepRows(nowMs: number, tracks: Track[]): void {
+    for (const row of [...rows.values()]) {
+      const index = tracks.findIndex((t) => t.id === row.id);
+      if (index < 0) {
+        dropRow(row);
+        continue;
+      }
+      const a = row.anim;
+      if (a) {
+        const t = Math.min(1, Math.max(0, (nowMs - a.start) / a.ms));
+        row.x = a.from + (a.to - a.from) * easeOut(t);
+        if (t >= 1) {
+          row.anim = null;
+          row.x = a.to;
+          a.done?.();
+        }
+      }
+      if (row.removing && !row.anim && performance.now() - row.removedAt > REMOVE_TIMEOUT_MS) {
+        row.removing = false; // onDelete changed nothing: bring the lane back
+        row.el.classList.remove('deleting');
+        closeRow(row);
+      }
+      if (!row.dragging && !row.anim && !row.open && !row.removing && row.x === 0) {
+        dropRow(row);
+        continue;
+      }
+      const reveal = Math.max(0, -row.x);
+      const y = laneRect(index, layout.laneH, areaW).y + slideDy(row.id, nowMs);
+      const geom = `${reveal.toFixed(1)}|${y.toFixed(1)}|${layout.laneH}`;
+      if (geom === row.geom) continue;
+      row.geom = geom;
+      row.el.style.display = reveal < 0.5 ? 'none' : 'flex';
+      row.el.style.width = `${reveal}px`;
+      row.el.style.top = `${y}px`;
+      row.el.style.height = `${layout.laneH}px`;
+    }
+  }
+
+  // ---------- strips ----------
   function handleStripClick(trackId: string): void {
     if (opts.view().session.selectedId === trackId) opts.onToggle(trackId);
     else opts.onSelect(trackId);
@@ -455,7 +643,6 @@ export function mountLanes(root: HTMLElement, opts: LanesOptions): LanesApi {
 
   // Hold: pointerdown arms a timer; if it fires while still pressed the lane menu opens and the release's click is swallowed.
   // `swallowClick` is cleared at the next pointerdown, so a release that never produces a click on the strip cannot eat a later tap.
-  let swallowClick = false;
   let closeMenu: (() => void) | null = null;
 
   function openMenu(trackId: string, button: HTMLElement): void {
@@ -477,6 +664,7 @@ export function mountLanes(root: HTMLElement, opts: LanesOptions): LanesApi {
       swallowClick = false;
       if (e.button !== 0) return;
       cancel();
+      cancelPendingHold = cancel;
       timer = window.setTimeout(() => {
         swallowClick = true;
         openMenu(trackId, button);
@@ -489,10 +677,12 @@ export function mountLanes(root: HTMLElement, opts: LanesOptions): LanesApi {
     const button = document.createElement('button');
     button.className = 'lane-strip';
     button.dataset.noGesture = '';
+    button.dataset.swipeThrough = ''; // input.ts lets a sideways swipe start here
     button.dataset.id = track.id;
     button.setAttribute('aria-label', `${track.kind} lane`);
     button.addEventListener('click', () => {
       if (swallowClick) swallowClick = false;
+      else if (anyOpen()) closeAll(); // a tap while a lane is open only closes it
       else handleStripClick(track.id);
     });
     armHold(button, track.id);
@@ -507,6 +697,7 @@ export function mountLanes(root: HTMLElement, opts: LanesOptions): LanesApi {
       if (ids.has(id)) continue;
       button.remove();
       strips.delete(id);
+      stripTransform.delete(id);
     }
     tracks.forEach((track, i) => {
       const button = strips.get(track.id) ?? createStrip(track);
@@ -519,7 +710,7 @@ export function mountLanes(root: HTMLElement, opts: LanesOptions): LanesApi {
     });
   }
 
-  function applyLayout(tracks: Track[], dpr: number): void {
+  function applyLayout(tracks: Track[], dpr: number, nowMs: number): void {
     const key = `${areaW}x${areaH}|${dpr}|${tracks.map((t) => t.id).join(',')}`;
     if (key === layoutKey) return;
     layoutKey = key;
@@ -530,25 +721,122 @@ export function mountLanes(root: HTMLElement, opts: LanesOptions): LanesApi {
     canvas.width = Math.round(areaW * dpr);
     canvas.height = Math.round(layout.contentH * dpr);
     syncStrips(tracks);
+    // lanes that stay but change place slide from where they were drawn
+    const next = new Map<string, number>();
+    tracks.forEach((t, i) => {
+      const y = laneRect(i, layout.laneH, areaW).y;
+      next.set(t.id, y);
+      const before = lastY.get(t.id);
+      if (before !== undefined && Math.abs(before + slideDy(t.id, nowMs) - y) > 0.5) slides.set(t.id, { from: before + slideDy(t.id, nowMs) - y, start: nowMs });
+    });
+    lastY = next;
+    for (const row of rows.values()) row.geom = '';
+  }
+
+  function applyStripTransforms(tracks: Track[], nowMs: number): void {
+    for (const t of tracks) {
+      const button = strips.get(t.id);
+      if (!button) continue;
+      const o = offsetOf(t.id, nowMs);
+      const value = o.dx === 0 && o.dy === 0 ? '' : `translate(${o.dx}px, ${o.dy}px)`;
+      if (stripTransform.get(t.id) === value) continue;
+      stripTransform.set(t.id, value);
+      button.style.transform = value;
+    }
   }
 
   let raf = 0;
   function frame(nowMs: number): void {
     raf = requestAnimationFrame(frame);
+    lastFrameMs = nowMs;
     if (areaW === 0 || areaH === 0) return;
     const view = opts.view();
     const tracks = view.session.tracks;
     const dpr = window.devicePixelRatio || 1;
-    applyLayout(tracks, dpr);
+    applyLayout(tracks, dpr, nowMs);
+    stepRows(nowMs, tracks);
 
     const env: DrawEnv = { g, p: palette, dpr, nowMs };
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, areaW, layout.contentH);
     const axis = axisOf(view);
-    tracks.forEach((track, i) => drawLane(env, i, layout.laneH, areaW, track, view, axis));
-    drawPlayhead(env, view, axis, areaW, layout.laneH);
+    tracks.forEach((track, i) => {
+      const o = offsetOf(track.id, nowMs);
+      g.save();
+      g.translate(o.dx, o.dy);
+      drawLane(env, i, layout.laneH, areaW, track, view, axis);
+      g.restore();
+    });
+    drawPlayhead(env, view, axis, areaW, layout.laneH, (id) => offsetOf(id, nowMs));
+    applyStripTransforms(tracks, nowMs);
   }
   raf = requestAnimationFrame(frame);
+
+  // A press on a button/control outside the open lane (transport, top bar, another strip's menu ...) closes it and does nothing else.
+  // Presses on the stage itself are handled by input.ts (swipe.open / swipe.dismiss); the lane's own strip and action buttons are exempt.
+  function onWindowPointerDown(e: PointerEvent): void {
+    swallowOutsideClick = false;
+    if (!anyOpen() || !(e.target instanceof Element)) return;
+    const t = e.target;
+    if (!t.closest('[data-no-gesture]') || t.closest('.swipe-actions') || t.closest('[data-swipe-through]')) return;
+    closeAll();
+    swallowOutsideClick = true;
+    e.stopPropagation();
+  }
+  function onWindowClick(e: MouseEvent): void {
+    if (!swallowOutsideClick) return;
+    swallowOutsideClick = false;
+    e.stopPropagation();
+    e.preventDefault();
+  }
+  window.addEventListener('pointerdown', onWindowPointerDown, true);
+  window.addEventListener('click', onWindowClick, true);
+
+  /** the track whose lane row is under clientY (lane rows only, not the gaps or empty space) */
+  function trackAtY(clientY: number): string | null {
+    const tracks = opts.view().session.tracks;
+    const y = clientY - area.getBoundingClientRect().top + area.scrollTop;
+    const stride = layout.laneH + LANE_GAP;
+    const index = Math.floor(y / stride);
+    if (y < 0 || index >= tracks.length || y - index * stride > layout.laneH) return null;
+    return tracks[index]!.id;
+  }
+
+  const swipe: LanesApi['swipe'] = {
+    start(_clientX, clientY) {
+      const id = trackAtY(clientY);
+      if (id === null) return false;
+      cancelPendingHold?.();
+      swallowClick = true;
+      closeAll(id);
+      const row = rows.get(id) ?? createRow(id);
+      if (row.removing) return false;
+      row.anim = null;
+      row.base = row.x;
+      row.dragging = true;
+      swipeId = id;
+      return true;
+    },
+    move(dx) {
+      const row = swipeId === null ? undefined : rows.get(swipeId);
+      if (!row?.dragging) return;
+      const total = Math.min(0, row.base + dx);
+      row.x = total < -OPEN_W ? -OPEN_W + (total + OPEN_W) * RUBBER : total;
+    },
+    end(dx, vx) {
+      const row = swipeId === null ? undefined : rows.get(swipeId);
+      swipeId = null;
+      if (!row?.dragging) return;
+      row.dragging = false;
+      const total = Math.min(0, row.base + dx);
+      if (total < -(areaW - 2 * LANE_MARGIN_X) * DELETE_FRAC && vx < -DELETE_V) deleteRow(row);
+      else if (vx > FLICK_V) closeRow(row);
+      else if (total < -SNAP_OPEN_PX || vx < -FLICK_V) openRow(row);
+      else closeRow(row);
+    },
+    open: anyOpen,
+    dismiss: () => closeAll(),
+  };
 
   /** the lane body (x BODY_LEFT .. laneWidth - BODY_RIGHT_PAD, lane-local) is the time axis; taps left/right of it clamp */
   function posAt(clientX: number): Sec | null {
@@ -563,12 +851,16 @@ export function mountLanes(root: HTMLElement, opts: LanesOptions): LanesApi {
 
   return {
     posAt,
+    swipe,
     destroy: () => {
       cancelAnimationFrame(raf);
       closeMenu?.();
+      window.removeEventListener('pointerdown', onWindowPointerDown, true);
+      window.removeEventListener('click', onWindowClick, true);
       resizeObserver.disconnect();
       area.remove();
       strips.clear();
+      rows.clear();
     },
   };
 }
