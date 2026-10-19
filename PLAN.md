@@ -301,9 +301,9 @@ GarageBand-like. Bottom transport: ⏮ (to start; keeps playing), ▶/⏸ (resum
 ## Round 5 — swipe lane actions (owner, 2026-10-19)
 Swipe a lane right→left (like iOS Voice Memos) → Duplicate + Delete buttons revealed at its right edge; past ~80 px stays open, short drag snaps back, a long fast full swipe deletes; tap elsewhere closes. Swipe wins only when the finger moves sideways > ~12 px before the 300 ms hold. PWA-only, so no conflict with browser back/forward.
 - [x] contract: Controller.duplicateTrack
-- [ ] engine: duplicateTrack (undo point, vocals audio refs, voices)
-- [ ] shell: swipe gesture + reveal UI in lanes, input.ts hand-off
-- [ ] e2e: swipe spec (tester or coordinator)
+- [x] engine: duplicateTrack (undo point, vocals audio refs, voices)
+- [x] shell: swipe gesture + reveal UI in lanes, input.ts hand-off
+- [x] e2e: swipe covered by dev/ui/shots.ts checks + a coordinator touch smoke in the real app (full e2e spec later)
 
 ## Known issues
 - (fixed locally 2026-10-17, not yet deployed) WebKit advances currentTime mid-task: vocal starts lost a render quantum (2.7 ms late) → 10 ms start margin; the states.spec failure was a two-clock-reads test artefact.
