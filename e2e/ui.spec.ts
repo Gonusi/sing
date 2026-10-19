@@ -5,13 +5,18 @@
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import type { DrumHit, Note, Session, Track } from '../src/types.ts';
-import { OUT_DIR, boot, getSession, groundTruth, putFixtures } from './helpers.ts';
+import { OUT_DIR, boot, getSession, groundTruth, putFixtures, stateWord } from './helpers.ts';
+
+const recordButton = (page: Page) => page.locator('.tp-btn[data-button="record"]');
+/** the downbeat of the count-in that just started */
+const downbeat = (page: Page): Promise<number> =>
+  page.evaluate(() => Number(window.__sing!.log().filter((e) => e.type === 'countIn').pop()!.data!.D));
 
 const shot = (page: Page, name: string) => page.screenshot({ path: join(OUT_DIR, `${test.info().project.name}-${name}.png`) });
 /** an empty spot of the gesture layer (below the top bar, right of the strips) */
 const SPOT = { x: 230, y: 470 };
 
-test('empty, sheets, command overlay, recording via real taps', async ({ page }) => {
+test('empty, sheets, command overlay, count-in + recording via the transport buttons', async ({ page }) => {
   const errors = await boot(page);
   await page.waitForTimeout(700);
   await expect(page.locator('.hint.on')).toBeVisible();
@@ -51,17 +56,20 @@ test('empty, sheets, command overlay, recording via real taps', async ({ page })
   expect(gestures).toEqual(['holdStart', 'holdEnd']);
   expect(await page.evaluate(() => window.__sing!.state())).toBe('idle');
 
-  // recording: a real tap starts the first take; fixture sung into the mic
+  // recording: ● counts in one bar, then records; the fixture is sung from the downbeat
   await putFixtures(page, ['sing-cmaj']);
-  await page.evaluate(() => window.__sing!.mic.play('/__fixtures/sing-cmaj.wav', window.__sing!.now() + 0.15));
-  await page.mouse.click(SPOT.x, SPOT.y, { delay: 60 });
+  await recordButton(page).click();
+  await expect(stateWord(page)).toHaveText(/count-in/);
+  await shot(page, 'count-in');
+  const D = await downbeat(page);
+  await page.evaluate((D) => window.__sing!.mic.play('/__fixtures/sing-cmaj.wav', D + 0.1), D);
+  await page.evaluate((D) => window.__sing!.waitUntil(D + 3.3), D);
   expect(await page.evaluate(() => window.__sing!.state())).toBe('recordingFirst');
-  await page.waitForTimeout(3300);
-  await expect(page.locator('.pill')).toHaveClass(/recordingFirst/);
+  await expect(stateWord(page)).toHaveText('recording');
   expect((await page.evaluate(() => window.__sing!.view().liveNotes)).length).toBeGreaterThanOrEqual(2);
   await shot(page, 'recording');
-  await page.mouse.click(SPOT.x, SPOT.y, { delay: 60 });
-  await expect(page.locator('.pill')).toHaveClass(/playing/);
+  await recordButton(page).click(); // stop recording, keep playing
+  await expect(stateWord(page)).toHaveText('playing');
   s = await getSession(page);
   expect(s.tracks[0].take!.notes.length).toBeGreaterThanOrEqual(3);
   await page.waitForTimeout(600);
@@ -81,6 +89,7 @@ function fourLaneSession(): Session {
   return {
     v: 1,
     loopLength: L,
+    tempo: { bpm: 75, beatsPerBar: 4 }, // 6.4 s = 2 bars
     selectedId: 'tv',
     tracks: [
       track('ts', 'synth', notes('sing-cmaj', 0, 6.2, 'ks')),
@@ -97,9 +106,9 @@ test('4 lanes playing (seeded session); strip tap selects, second tap toggles', 
   await expect(page.locator('.lane-strip')).toHaveCount(4);
   await page.waitForTimeout(500);
   await shot(page, 'four-stopped');
-  // stopped → tap = play
-  await page.mouse.click(SPOT.x, SPOT.y, { delay: 60 });
-  await expect(page.locator('.pill')).toHaveClass(/playing/);
+  // stopped → ▶ (a tap on the stage only seeks)
+  await page.locator('.tp-btn[data-button="playPause"]').click();
+  await expect(stateWord(page)).toHaveText('playing');
   await page.waitForTimeout(1800);
   await shot(page, 'four-playing');
 
@@ -113,9 +122,9 @@ test('4 lanes playing (seeded session); strip tap selects, second tap toggles', 
   await shot(page, 'four-bass-off');
   await bass.click();
   expect((await getSession(page)).tracks.find((t) => t.id === 'tb')!.on).toBe(true);
-  // strip taps never reach the gesture layer
+  // strip and transport presses never reach the gesture layer
   const gestures = await page.evaluate(() => window.__sing!.log().filter((e) => e.type === 'gesture').length);
-  expect(gestures).toBe(1);
+  expect(gestures).toBe(0);
   expect(await page.evaluate(() => window.__sing!.state())).toBe('playing');
   expect(errors, errors.join('\n')).toEqual([]);
 });
@@ -141,16 +150,16 @@ test('vocals: ＋ sheet has 5 kinds; "create vocal track" by voice; waveform lan
   await expect(page.locator('.lane-strip').first()).toHaveAttribute('aria-label', 'vocals lane');
 
   await putFixtures(page, ['sing-cmaj']);
-  await page.evaluate(() => window.__sing!.mic.play('/__fixtures/sing-cmaj.wav', window.__sing!.now() + 0.15));
-  await page.waitForTimeout(300);
-  await page.mouse.click(SPOT.x, SPOT.y, { delay: 60 });
+  await recordButton(page).click();
+  const D = await downbeat(page);
+  await page.evaluate((D) => window.__sing!.mic.play('/__fixtures/sing-cmaj.wav', D + 0.1), D);
+  await page.evaluate((D) => window.__sing!.waitUntil(D + 2.5), D);
   expect(await page.evaluate(() => window.__sing!.state())).toBe('recordingFirst');
-  await page.waitForTimeout(2500);
   expect((await page.evaluate(() => window.__sing!.view().livePeaks))?.some((p) => p > 0.3)).toBe(true);
   await shot(page, 'vocals-recording');
-  await page.waitForTimeout(1500);
-  await page.mouse.click(SPOT.x, SPOT.y, { delay: 60 });
-  await expect(page.locator('.pill')).toHaveClass(/playing/);
+  await page.evaluate((D) => window.__sing!.waitUntil(D + 4.0), D);
+  await recordButton(page).click();
+  await expect(stateWord(page)).toHaveText('playing');
   const lane = (await getSession(page)).tracks[0];
   expect(lane.take!.peaks!.filter((p) => p > 0.3).length).toBeGreaterThan(50);
   await page.waitForTimeout(800);

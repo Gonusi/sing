@@ -1,6 +1,6 @@
 // [tester] The real getUserMedia path (no ?test): Chromium's fake capture device plays a WAV as the microphone
 // (--use-file-for-fake-audio-capture=<wav>%noloop, --use-fake-ui-for-media-stream). The WAV = 3 s of room noise +
-// sing-cmaj, so the singing starts after the record tap. Taps go through the real gesture layer.
+// sing-cmaj, so the singing starts after the record tap. Recording through the real transport buttons (● count-in, ● stop).
 // State is read the way a user's device holds it: the session in IndexedDB (idb-keyval 'keyval-store'/'keyval',
 // key sing.session.v1, saved 250 ms after a change) plus the DOM status pill. No product debug hooks.
 import { mkdirSync } from 'node:fs';
@@ -9,10 +9,9 @@ import { expect, test } from '@playwright/test';
 import type { Session } from '../src/types.ts';
 import { readWavMono, writeWav } from '../dev/wav.ts';
 import { launch } from '../dev/lib/browser.ts';
-import { FIXTURE_DIR, OUT_DIR, SESSION_KEY, boot, groundTruth, idbGet, watchErrors } from './helpers.ts';
+import { FIXTURE_DIR, OUT_DIR, SESSION_KEY, boot, groundTruth, idbGet, stateWord, watchErrors } from './helpers.ts';
 
 const LEAD_SEC = 3;
-const SPOT = { x: 230, y: 470 };
 
 test('fake capture device → real mic path → a take with the sung notes', async ({ browserName }) => {
   test.skip(browserName !== 'chromium', 'Chromium-only flags');
@@ -32,21 +31,23 @@ test('fake capture device → real mic path → a take with the sung notes', asy
     const page = await context.newPage();
     const errors = watchErrors(page);
     const t0 = Date.now();
-    await boot(page, { query: 'nosetup' }); // real mic path without the first-launch setup wizard
+    // real mic path without the first-launch setup wizard; ?mute keeps the Mac speakers silent
+    await boot(page, { query: 'nosetup&mute' });
     await page.waitForTimeout(300);
-    await page.mouse.click(SPOT.x, SPOT.y, { delay: 60 }); // record
-    await expect(page.locator('.pill')).toHaveClass(/recordingFirst/);
+    await page.locator('.tp-btn[data-button="record"]').click(); // ● → one-bar count-in → recording
+    await expect(stateWord(page)).toHaveText(/count-in/);
+    await expect(stateWord(page)).toHaveText('recording', { timeout: 5000 });
     const recordedAt = (Date.now() - t0) / 1000;
-    await page.waitForTimeout(9000);
-    await page.mouse.click(SPOT.x, SPOT.y, { delay: 60 }); // stop
-    await expect(page.locator('.pill')).toHaveClass(/playing/);
+    await page.waitForTimeout(8500);
+    await page.locator('.tp-btn[data-button="record"]').click(); // stop recording (whole bars)
+    await expect(stateWord(page)).toHaveText('playing');
     await page.waitForTimeout(1000); // debounced save (250 ms)
     const s = await idbGet<Session>(page, SESSION_KEY);
     expect(s).toBeTruthy();
     const notes = s!.tracks[0]?.take?.notes ?? [];
     console.log(`[fake-mic] record tapped ${recordedAt.toFixed(1)} s after boot start; loop ${s!.loopLength?.toFixed(2)} s; ${notes.length} notes: ${notes.map((n) => `${n.midi}@${n.pos.toFixed(2)}`).join(' ')}`);
-    // the take covers ~9 s of the 11.4 s line: at least 8 notes, all from the sung scale, in order of the line
-    expect(notes.length).toBeGreaterThanOrEqual(8);
+    // the take covers ~3 bars (8 s at 90 bpm) of the 11.4 s line: at least 7 notes, all from the sung scale, in order
+    expect(notes.length).toBeGreaterThanOrEqual(7);
     const scale = new Set(groundTruth('sing-cmaj').notes.map((n) => n.midi));
     expect(notes.every((n) => scale.has(n.midi))).toBe(true);
     const line = groundTruth('sing-cmaj').notes.map((n) => n.midi).join(',');
