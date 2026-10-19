@@ -36,7 +36,10 @@ test('echo 0 → dry; echo 1 → a repeat 0.33 s later', async ({ page }) => {
   // no noise bed: at −45 dBFS an empty drum first take records phantom hats (bugs.spec.ts); the faded slice needs none
   const errors = await boot(page, { noise: null });
   // the metronome clicks go into the master too (never the echo bus): off, so the master shows only the hat + echo
-  await page.evaluate(() => window.__sing!.setClick(false));
+  await page.evaluate(async () => {
+    window.__sing!.setClick(false);
+    await window.__sing!.setDevice({ output: 'wired' }); // keep the hat even if it falls on a count-in click
+  });
   expect((await getSession(page)).fx?.echo ?? 0).toBe(0);
   await putFixtures(page, ['beatbox-basic']);
   // one hat: beatbox-basic 0.7–1.05 s holds only the hat at 0.8 (faded edges: the cut is not an onset)
