@@ -1,9 +1,9 @@
 // [shell] Dev page: mounts the real UI modules on a scripted fake UiView. Pick the scene with ?s=<name>:
-//   empty | four | five (four + vocals) | recording | recording-vocals | overdub | command | toast | settings | calibrating (settings + calibration running; ?ci=<ms> click period) | plus | menu (lane menu on violin) | many (12 lanes, scrolls)
+//   swipe (four + the violin lane swiped open) | empty | four | five (four + vocals) | recording | recording-vocals | overdub | command | toast | settings | calibrating (settings + calibration running; ?ci=<ms> click period) | plus | menu (lane menu on violin) | many (12 lanes, scrolls)
 //   transport-stopped (paused at bar 3 beat 2) | transport-countin | transport-recording (= overdub) | tempo-muted | tempo-locked | tempo-picker (native select shown)
 // ?t=<seconds> freezes the loop position (used for stable screenshots). Tempo is 96 bpm 4/4, the loop 4 bars = 10 s.
 // Actions only log (tempo -/+ and the click toggle also change the fake state).
-// Test hooks: window.__gestures (every Gesture emitted), window.__actions (every action called), window.__lanes (posAt), window.__ready.
+// Test hooks: window.__gestures (every Gesture emitted), window.__actions (every action called), window.__lanes (posAt, swipe), window.__ready.
 import '../../src/ui/style.css';
 import type { DrumHit, Gesture, InstrumentKind, Note, Take, Track, UiView } from '../../src/types.ts';
 import { mountInput } from '../../src/ui/input.ts';
@@ -227,6 +227,7 @@ const SCENES: Record<string, () => UiView> = {
   calibrating: fourView,
   plus: fourView,
   menu: fourView,
+  swipe: fourView,
   'transport-stopped': stoppedView,
   'transport-countin': countInView,
   'transport-recording': overdubView,
@@ -241,9 +242,17 @@ let clickOn = scene !== 'tempo-muted' && params.get('click') !== '0';
 const tempoEditable = scene !== 'tempo-locked' && params.get('locked') !== '1';
 /** tracks removed by onDelete (the fake session keeps them out of every later view) */
 const deleted = new Set<string>();
+/** copies made by onDuplicate, inserted right below their original */
+const copies: Array<{ after: string; track: Track }> = [];
 const view = (): UiView => {
   const v = baseSceneView();
-  return deleted.size === 0 ? v : { ...v, session: { ...v.session, tracks: v.session.tracks.filter((t) => !deleted.has(t.id)) } };
+  if (deleted.size === 0 && copies.length === 0) return v;
+  let tracks = v.session.tracks.filter((t) => !deleted.has(t.id));
+  for (const c of copies) {
+    const at = tracks.findIndex((t) => t.id === c.after);
+    if (at >= 0) tracks = [...tracks.slice(0, at + 1), c.track, ...tracks.slice(at + 1)];
+  }
+  return { ...v, session: { ...v.session, tracks } };
 };
 
 // ---------- mount (same order as src/main.ts) ----------
@@ -258,6 +267,11 @@ window.__lanes = mountLanes(stage, {
   onDelete: (id) => {
     deleted.add(id);
     log(`delete:${id}`);
+  },
+  onDuplicate: (id) => {
+    const original = view().session.tracks.find((t) => t.id === id);
+    if (original) copies.push({ after: id, track: { ...original, id: `${id}-copy${copies.length + 1}` } });
+    log(`duplicate:${id}`);
   },
 });
 mountStatus(stage, { view });
@@ -327,6 +341,7 @@ mountSheets(stage, {
 mountInput(stage, {
   now: () => performance.now() / 1000,
   onGesture: (g) => window.__gestures.push(g),
+  onSwipe: window.__lanes.swipe,
 });
 
 const topbarLeft = document.querySelector<HTMLElement>('.topbar-left')!;
@@ -361,5 +376,19 @@ if (scene === 'menu') {
     strip.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'touch' }));
   };
   requestAnimationFrame(press);
+}
+if (scene === 'swipe') {
+  // open the violin lane through the same API a finger uses (start / move / end)
+  const open = (): void => {
+    const strip = document.querySelector<HTMLElement>('.lane-strip[data-id="violin"]');
+    if (!strip || strip.offsetHeight === 0) return void requestAnimationFrame(open);
+    const r = strip.getBoundingClientRect();
+    const lanes = window.__lanes.swipe;
+    if (lanes.start(r.left + 100, r.top + r.height / 2)) {
+      lanes.move(-168);
+      lanes.end(-168, 0);
+    }
+  };
+  requestAnimationFrame(open);
 }
 window.__ready = true;

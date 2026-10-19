@@ -114,3 +114,12 @@ Signatures for main.ts (tsc fails there until wired):
 - Top bar at < 400 px: echo slider 72 px; echo label hidden < 360 px (fits to 320 px, checked).
 - Pulse flash strength: rec 60%/32% (downbeat/other), fg 24%/11%, decays over 60% of the beat. Record button swell 7% (downbeat 1.8x).
 - During countIn the playhead is drawn in --rec at `view.playhead ?? 0`.
+
+## Round 5 — swipe lane actions (branch shell8)
+- `input.ts`: `InputOptions.onSwipe?: SwipeHandler {start, move, end, open?, dismiss?}`. Sideways move > 12 px with |dx| > 1.5|dy| before the hold timer -> `start(x0,y0)`; true = swipe (move/end forwarded, no tap/hold), false = rest of the press ignored. `end(dx, vx px/ms over last 80 ms)`. `open()` true -> a plain stage tap only calls `dismiss()` (no tap/hold). Targets marked `[data-swipe-through]` (strip buttons) may start a swipe although inside a no-gesture zone.
+- `lanes.ts`: `LanesApi.swipe` (= the SwipeHandler), `LanesOptions.onDuplicate`. Per-lane `Row` (offset x, anim), canvas lane drawn translated, strip button CSS-translated, `.swipe-actions` DOM box (clipped, width = reveal, buttons 84 px, uncovered from the right) behind it. Playhead drawn per lane so the swiped lane carries its piece. Lanes that change place (add/remove) slide 220 ms (`slides`).
+- Thresholds (consts at top of lanes.ts): open if released < -80 px or vx < -0.5; right flick closes; full-swipe delete if total < -0.6 lane width and vx < -0.8. Rubber band 0.5 beyond 168 px. Delete (button or full swipe) first flies the lane off (200 ms), then `onDelete`; if the track is still there after 800 ms the lane comes back.
+- Tap on a no-gesture control outside the open lane (transport, top bar...) closes it and swallows that press/click (window capture listener in lanes.ts); a tap on the open lane's strip only closes.
+- Dev: scene `swipe`; shots `swipe-open.png`, `swipe-mid.png` in dev/ui/out; checks `swipe: ...` in shots.ts. The old check "moving the finger does not cancel the hold" now moves mostly vertically (a sideways move off a lane is ignored by design).
+- Decisions: velocity window 80 ms; mouse also swipes; keyboard Space unaffected; drag on empty space / gaps is ignored (no tap).
+- main.ts wiring: `mountLanes(..., { ..., onDuplicate: (id) => controller.duplicateTrack(id) })`, `mountInput(stage, { ..., onSwipe: lanes.swipe })`.

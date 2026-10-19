@@ -190,6 +190,37 @@ button:focus-visible { outline: 2px solid var(--cmd); outline-offset: 2px; }
   outline-offset: -2px;
 }
 
+/* swipe actions (swipe a lane left): a clipped box at the lane's right edge, as wide as the lane has moved; buttons keep their 84 px and are uncovered from the right */
+.swipe-actions {
+  position: absolute;
+  right: 12px; /* = LANE_MARGIN_X in lanes.ts */
+  top: 0;
+  display: none;
+  justify-content: flex-end;
+  overflow: hidden;
+  border-radius: 0 14px 14px 0;
+  background: var(--bg);
+}
+.swipe-btn {
+  flex: 0 0 84px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  transition: flex-basis 160ms ease-out;
+}
+.swipe-btn svg { display: block; }
+.swipe-dup { background: var(--surface); color: var(--fg); box-shadow: inset 0 0 0 1px var(--line); }
+.swipe-dup:active { background: var(--line); }
+.swipe-del { flex-grow: 1; background: var(--rec); color: #fff; }
+.swipe-del:active { filter: brightness(0.85); }
+.swipe-actions.deleting .swipe-dup { flex-basis: 0; }
+
 /* lane menu (hold a strip button) */
 .lane-menu-layer { position: fixed; inset: 0; z-index: 45; }
 .lane-menu-backdrop { position: absolute; inset: 0; background: transparent; }

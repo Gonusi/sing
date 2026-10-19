@@ -110,11 +110,11 @@ async function checkGestures(page: Page, url: string, cdp: CDPSession): Promise<
 
   await resetLogs(page);
   await touch(cdp, 'touchStart', x, y);
-  await touch(cdp, 'touchMove', x + 40, y + 20);
+  await touch(cdp, 'touchMove', x + 10, y + 40);
   await page.waitForTimeout(HOLD_MS);
-  await touch(cdp, 'touchMove', x + 80, y + 40);
+  await touch(cdp, 'touchMove', x + 20, y + 80);
   await touch(cdp, 'touchEnd');
-  check('gesture: moving the finger does not cancel the hold', (await gestureTypes(page)).join() === 'holdStart,holdEnd', (await gestureTypes(page)).join());
+  check('gesture: moving the finger (not sideways) does not cancel the hold', (await gestureTypes(page)).join() === 'holdStart,holdEnd', (await gestureTypes(page)).join());
 
   await resetLogs(page);
   await page.keyboard.press('Space');
@@ -614,6 +614,152 @@ async function checkSetupRow(page: Page, url: string): Promise<void> {
   check('settings: Setup row calls openSetup and closes the sheet', sub === 'listening, mic, latency, drums, voice' && (await actions(page)).join() === 'openSetup' && (await page.locator('.sheet-layer.open').count()) === 0, (await actions(page)).join());
 }
 
+// ---------- swipe lane actions ----------
+const LANE_X = 250; // on a lane body (not the strip)
+const VIOLIN_Y = 52 + 128 + 60; // `four` scene: top bar 52, lanes 120 high + 8 gap, violin = second lane
+const SWIPE_BOX = '.swipe-actions[data-id="violin"]';
+
+/** finger drag along x with steps; rest = pause before release (so the release velocity is ~0), release=false keeps the finger down */
+async function drag(cdp: CDPSession, x: number, y: number, dx: number, o: { steps?: number; stepMs?: number; restMs?: number; release?: boolean; dy?: number } = {}): Promise<void> {
+  const { steps = 6, stepMs = 25, restMs = 120, release = true, dy = 0 } = o;
+  await touch(cdp, 'touchStart', x, y);
+  for (let i = 1; i <= steps; i++) {
+    await touch(cdp, 'touchMove', x + (dx * i) / steps, y + (dy * i) / steps);
+    await page_wait(stepMs);
+  }
+  await page_wait(restMs);
+  if (release) await touch(cdp, 'touchEnd');
+}
+
+/** revealed width of the violin action box (0 when hidden) */
+const revealed = (page: Page): Promise<number> =>
+  page.evaluate((sel) => {
+    const el = document.querySelector<HTMLElement>(sel);
+    return el && getComputedStyle(el).display !== 'none' ? el.getBoundingClientRect().width : 0;
+  }, SWIPE_BOX);
+
+async function checkSwipe(page: Page, url: string, cdp: CDPSession): Promise<void> {
+  const settle = (): Promise<void> => page.waitForTimeout(350);
+  const nothingEmitted = async (): Promise<boolean> => (await gestureTypes(page)).length === 0 && (await actions(page)).length === 0;
+
+  // screenshots
+  await openScene(page, url, 'swipe');
+  await page.waitForTimeout(SETTLE_MS);
+  await page.screenshot({ path: `${OUT_DIR}swipe-open.png` });
+  console.log('shot swipe-open');
+  check('swipe: scene opens the violin lane, both buttons visible (168 px)', Math.abs((await revealed(page)) - 168) < 2 && (await page.locator(`${SWIPE_BOX} .swipe-btn`).count()) === 2, `w=${await revealed(page)}`);
+
+  await openScene(page, url, 'four');
+  await resetLogs(page);
+  await drag(cdp, LANE_X, VIOLIN_Y, -90, { release: false });
+  await page.screenshot({ path: `${OUT_DIR}swipe-mid.png` });
+  console.log('shot swipe-mid');
+  const mid = await revealed(page);
+  check('swipe: mid-drag (-90 px) reveals about 90 px', Math.abs(mid - 90) < 6, `w=${mid}`);
+  await touch(cdp, 'touchEnd');
+  await settle();
+  check('swipe: released at -90 px snaps open (168 px)', Math.abs((await revealed(page)) - 168) < 2, `w=${await revealed(page)}`);
+  check('swipe: no tap/hold gesture, no select/seek', await nothingEmitted(), `${(await gestureTypes(page)).join()} ${(await actions(page)).join()}`);
+
+  // tap elsewhere closes, does nothing else
+  await page.touchscreen.tap(FREE_SPOT.x, FREE_SPOT.y);
+  await settle();
+  check('swipe: tap on the stage closes the open lane without a gesture', (await revealed(page)) === 0 && (await nothingEmitted()), `w=${await revealed(page)} ${(await gestureTypes(page)).join()}`);
+
+  // short drag snaps back
+  await drag(cdp, LANE_X, VIOLIN_Y, -40);
+  await settle();
+  check('swipe: short drag (-40 px) snaps back, nothing emitted', (await revealed(page)) === 0 && (await nothingEmitted()), `w=${await revealed(page)}`);
+
+  // open, then tap transport: closes, the transport action is swallowed
+  await drag(cdp, LANE_X, VIOLIN_Y, -120);
+  await settle();
+  await tap(page, BTN('playPause'));
+  await settle();
+  check('swipe: tap on the transport closes the lane and does nothing else', (await revealed(page)) === 0 && (await nothingEmitted()), `w=${await revealed(page)} ${(await actions(page)).join()}`);
+  await tap(page, BTN('playPause'));
+  check('swipe: the transport works again afterwards', (await actions(page)).join() === 'transport:pause', (await actions(page)).join());
+
+  // tap on another lane closes; the tap is not a seek
+  await resetLogs(page);
+  await drag(cdp, LANE_X, VIOLIN_Y, -120);
+  await settle();
+  await page.touchscreen.tap(LANE_X, 52 + 60); // drums lane
+  await settle();
+  check('swipe: tap on another lane closes without a tap gesture', (await revealed(page)) === 0 && (await nothingEmitted()), `w=${await revealed(page)} ${(await gestureTypes(page)).join()}`);
+
+  // swipe right closes
+  await drag(cdp, LANE_X, VIOLIN_Y, -120);
+  await settle();
+  await drag(cdp, LANE_X - 100, VIOLIN_Y, 120);
+  await settle();
+  check('swipe: swiping the open lane right closes it', (await revealed(page)) === 0 && (await nothingEmitted()), `w=${await revealed(page)}`);
+
+  // from the strip circle
+  await drag(cdp, 40, VIOLIN_Y, -120);
+  await settle();
+  check('swipe: a swipe may start on the strip button', Math.abs((await revealed(page)) - 168) < 2 && (await nothingEmitted()), `w=${await revealed(page)} ${(await actions(page)).join()}`);
+  await page.touchscreen.tap(40, VIOLIN_Y); // strip tap while open: closes only
+  await settle();
+  check('swipe: tapping the open lane\'s strip only closes it (no select/toggle)', (await revealed(page)) === 0 && (await nothingEmitted()), `w=${await revealed(page)} ${(await actions(page)).join()}`);
+
+  // Duplicate
+  await drag(cdp, LANE_X, VIOLIN_Y, -120);
+  await settle();
+  await tap(page, `${SWIPE_BOX} .swipe-dup`);
+  await settle();
+  check('swipe: Duplicate calls onDuplicate(violin) and closes', (await actions(page)).join() === 'duplicate:violin' && (await revealed(page)) === 0, `${(await actions(page)).join()} w=${await revealed(page)}`);
+  check('swipe: the copy appears below (5 lanes)', (await page.locator('.lane-strip').count()) === 5);
+  check('swipe: Duplicate emitted no gesture', (await gestureTypes(page)).length === 0);
+
+  // Delete button
+  await openScene(page, url, 'four');
+  await drag(cdp, LANE_X, VIOLIN_Y, -120);
+  await settle();
+  await tap(page, `${SWIPE_BOX} .swipe-del`);
+  await page.waitForTimeout(500);
+  check('swipe: Delete calls onDelete(violin), the lane is gone', (await actions(page)).join() === 'delete:violin' && (await page.locator('.lane-strip').count()) === 3, `${(await actions(page)).join()} strips=${await page.locator('.lane-strip').count()}`);
+
+  // full swipe (fast, long)
+  await openScene(page, url, 'four');
+  await drag(cdp, 350, VIOLIN_Y, -320, { steps: 4, stepMs: 8, restMs: 0 });
+  await page.waitForTimeout(500);
+  check('swipe: a fast full swipe calls onDelete(violin)', (await actions(page)).join() === 'delete:violin' && (await gestureTypes(page)).length === 0, `${(await actions(page)).join()} ${(await gestureTypes(page)).join()}`);
+
+  // a slow full-width drag opens, does not delete
+  await openScene(page, url, 'four');
+  await drag(cdp, 350, VIOLIN_Y, -300, { steps: 8, stepMs: 30 });
+  await settle();
+  check('swipe: a slow long drag opens (no delete)', (await actions(page)).length === 0 && Math.abs((await revealed(page)) - 168) < 2, `${(await actions(page)).join()} w=${await revealed(page)}`);
+
+  // empty space below the lanes is not a lane: no swipe, nothing emitted
+  await openScene(page, url, 'four');
+  await drag(cdp, LANE_X, 700, -120);
+  await settle();
+  check('swipe: a sideways drag on empty space does nothing (no tap, no hold)', (await revealed(page)) === 0 && (await nothingEmitted()), `${(await gestureTypes(page)).join()}`);
+
+  // old behaviour intact
+  await openScene(page, url, 'four');
+  await drag(cdp, LANE_X, VIOLIN_Y, 4, { steps: 2, stepMs: 20, restMs: 0, dy: 120 });
+  check('swipe: a vertical drag is no swipe (tap on release, as before)', (await revealed(page)) === 0 && (await gestureTypes(page)).join() === 'tap', `${(await gestureTypes(page)).join()}`);
+  await resetLogs(page);
+  await touch(cdp, 'touchStart', LANE_X, VIOLIN_Y);
+  await page.waitForTimeout(400);
+  await touch(cdp, 'touchEnd');
+  check('swipe: holding still 400 ms on a lane still emits holdStart, holdEnd', (await gestureTypes(page)).join() === 'holdStart,holdEnd', (await gestureTypes(page)).join());
+  await resetLogs(page);
+  await page.touchscreen.tap(LANE_X, VIOLIN_Y);
+  const t0 = (await page.evaluate(() => window.__gestures))[0];
+  check('swipe: a quick tap on a lane still emits tap with x/y', t0?.type === 'tap' && t0.x === LANE_X && t0.y === VIOLIN_Y, JSON.stringify(t0));
+  // a sideways move after the hold started is not a swipe
+  await resetLogs(page);
+  await touch(cdp, 'touchStart', LANE_X, VIOLIN_Y);
+  await page.waitForTimeout(400);
+  await touch(cdp, 'touchMove', LANE_X - 100, VIOLIN_Y);
+  await touch(cdp, 'touchEnd');
+  check('swipe: moving sideways after the hold started stays a hold', (await gestureTypes(page)).join() === 'holdStart,holdEnd' && (await revealed(page)) === 0, (await gestureTypes(page)).join());
+}
+
 async function main(): Promise<void> {
   mkdirSync(OUT_DIR, { recursive: true });
   const dev = await startDev(REPO_ROOT);
@@ -632,6 +778,7 @@ async function main(): Promise<void> {
     await checkGestures(page, dev.url, cdp);
     await checkSheets(page, dev.url);
     await checkLaneMenu(page, dev.url, cdp);
+    await checkSwipe(page, dev.url, cdp);
     await checkTransport(page, dev.url);
     await checkTempo(page, dev.url, 'chromium');
     await checkSeek(page, dev.url);
