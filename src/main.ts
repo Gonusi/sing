@@ -82,6 +82,9 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
     onDelete: (id) => {
       if (controller.deleteTrack(id)) toast('track deleted · say “undo” to bring it back');
     },
+    onDuplicate: (id) => {
+      if (controller.duplicateTrack(id)) toast('track duplicated');
+    },
   });
   mountStatus(stage, { view });
   mountSheets(stage, {
@@ -160,6 +163,7 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
 
   mountInput(stage, {
     now: () => ctx.currentTime,
+    onSwipe: lanes.swipe,
     onGesture: (g: Gesture) => {
       switch (g.type) {
         case 'tap': {
