@@ -807,6 +807,18 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       log('delete', { trackId, left: tracks.length });
       return true;
     },
+    duplicateTrack(trackId) {
+      const cur = store.current;
+      const idx = cur.tracks.findIndex((t) => t.id === trackId);
+      if (idx < 0 || take?.trackId === trackId) return null; // unknown, or being recorded (incl. its count-in)
+      const src = cur.tracks[idx];
+      // a vocal copy shares the stored audio key: GC keeps a key while any lane or undo snapshot references it
+      const copy: Track = { ...newTrack(src.kind), on: src.on, take: src.take ? { ...src.take, id: newId('k') } : null };
+      const tracks = [...cur.tracks.slice(0, idx + 1), copy, ...cur.tracks.slice(idx + 1)];
+      commitSession({ ...cur, tracks, selectedId: copy.id }, cur);
+      log('duplicate', { trackId, copyId: copy.id, kind: src.kind, sharedAudio: src.take?.audio?.key ?? null });
+      return copy.id;
+    },
     vocalAudio(trackId) {
       return vocalBufferOf(trackId)();
     },
