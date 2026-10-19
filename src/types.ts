@@ -328,6 +328,8 @@ export interface Controller {
   setSmoothing(amount: number): void;
   /** remove a lane (an undo point); false if the id is unknown */
   deleteTrack(trackId: string): boolean;
+  /** copy a lane with its take (vocal audio shared or copied) right below it and select the copy (an undo point); returns the new id or null */
+  duplicateTrack(trackId: string): string | null;
   /** the bottom transport bar (see TransportAction); false = refused in this state */
   transport(action: TransportAction, tDown: Sec): boolean;
   /** move the playhead to loop position `pos` (snapped to the nearest beat); refused while recording */
