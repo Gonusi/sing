@@ -381,7 +381,7 @@ async function checkTempo(page: Page, url: string, engine: string): Promise<void
   check(`${tag}: muted: slash shown`, (await page.locator('.tempo.muted .tempo-slash').isVisible()));
   await openScene(page, url, 'tempo-picker');
   await page.waitForTimeout(900);
-  check(`${tag}: picker scene: the select is visible and focused`, (await page.locator('.tempo-select.shown').isVisible()) && (await page.evaluate(() => document.activeElement?.classList.contains('tempo-select'))));
+  check(`${tag}: picker scene: the select is visible and focused`, (await page.locator('.tempo-select.shown').isVisible()) && (await page.evaluate(() => document.activeElement?.classList.contains('tempo-select') === true)));
 }
 
 async function checkSeek(page: Page, url: string): Promise<void> {
