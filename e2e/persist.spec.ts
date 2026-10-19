@@ -2,7 +2,7 @@
 // (state stopped, same session) → play schedules both lanes. Then offline (context.setOffline) + reload → the app
 // boots from the service worker (incl. violin samples) → play → the violin lane is audible.
 import { expect, test, type Page } from '@playwright/test';
-import { boot, firstTake, getSession, overdub, scheds } from './helpers.ts';
+import { boot, firstTake, getSession, overdub, scheds, stateWord } from './helpers.ts';
 
 async function playAndCapture(page: Page, trackId: string): Promise<{ state: string; sched: number; rms: number; tracks: string[] }> {
   return page.evaluate(async (id) => {
@@ -38,7 +38,7 @@ test('session survives reload; app + violin work offline', async ({ page, contex
     expect(await getSession(page)).toEqual(before);
     const bootEv = await page.evaluate(() => window.__sing!.log().find((e) => e.type === 'boot')!.data);
     expect(bootEv).toMatchObject({ restored: true, tracks: 2, state: 'stopped' });
-    await expect(page.locator('.pill')).toHaveClass(/stopped/);
+    await expect(stateWord(page)).toHaveText('paused');
     await expect(page.locator('.lane-strip')).toHaveCount(2);
     const r = await playAndCapture(page, dub.trackId);
     expect(r.state).toBe('playing');

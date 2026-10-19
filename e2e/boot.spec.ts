@@ -12,7 +12,8 @@ test('start screen → stage, idle, no errors', async ({ page }) => {
   await boot(page, { navigate: false });
   await expect(page.locator('.start')).toHaveCount(0, { timeout: 5000 });
   expect(await page.evaluate(() => window.__sing!.state())).toBe('idle');
-  await expect(page.locator('.pill')).toHaveClass(/idle/);
+  await expect(page.locator('.tp-state')).toHaveText('ready');
+  await expect(page.locator('.tp-right')).toHaveText('—');
   await expect(page.locator('.hint.on')).toBeVisible();
   const s = await page.evaluate(() => ({ sr: window.__sing!.sampleRate(), outLat: window.__sing!.outLat(), now: window.__sing!.now() }));
   console.log(`[boot] sampleRate ${s.sr}, outLat ${(s.outLat * 1000).toFixed(1)} ms, ctx time ${s.now.toFixed(3)}`);

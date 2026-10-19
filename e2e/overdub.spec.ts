@@ -34,7 +34,8 @@ const mod = (x: number, m: number) => ((x % m) + m) % m;
 test('four lanes overdubbed: positions, silent until ts + L, exact looping, every lane audible', async ({ page }) => {
   test.slow();
   const errors = await boot(page);
-  await page.evaluate((inLat) => window.__sing!.setDevice({ inLat }), IN_LAT);
+  // headphones: drum takes keep hits that coincide with metronome clicks (speakers drop them: metronome.spec.ts)
+  await page.evaluate((inLat) => window.__sing!.setDevice({ inLat, output: 'wired' }), IN_LAT);
 
   const first = await firstTake(page, { ...FIRST, L, lead: LEAD });
   expect(await page.evaluate(() => window.__sing!.state())).toBe('playing');

@@ -4,7 +4,7 @@
 // with real voices: the lane's output over cycle 1, re-detected by the real dsp = the take's notes (± 40 ms, same midi).
 import { expect, test } from '@playwright/test';
 import {
-  boot, exactness, firstTake, getLog, getSession, groundTruth, matchNotes, maxAbs, ms, rawNotes, scheds, worstWhenError,
+  boot, checkPlayed, exactness, firstTake, getLog, getSession, groundTruth, matchNotes, maxAbs, ms, rawNotes, scheds, worstWhenError,
 } from './helpers.ts';
 
 const FIXTURE = 'sing-cmaj';
@@ -69,11 +69,16 @@ test('first take: notes at sung positions, exact scheduling, output re-detected'
     return;
   }
   const playedC1 = sc.filter((s) => s.cycle === 1 && s.offset === 0);
-  const midiAt = new Map(notes.map((n) => [n.pos.toFixed(5), n.midi]));
-  const expOut = playedC1.map((s) => ({ t: s.at, midi: midiAt.get(s.pos.toFixed(5))! }));
-  const am = matchNotes(rawNotes(out.det.notes), expOut, 0.04);
-  console.log(`[first-take] re-detected ${out.det.notes.length} notes, matched ${am.matched}/${am.expected}, onset err max ${ms(maxAbs(am.errors))} mean ${ms(am.errors.reduce((a, b) => a + b, 0) / Math.max(1, am.errors.length))}; missed ${am.missed.join(' ')}; wrong ${am.wrongPitch.join(' ')}; extra ${am.extra}`);
-  expect(am.missed, 'output notes missed').toEqual([]);
+  const byPos = new Map(notes.map((n) => [n.pos.toFixed(5), n]));
+  const expN = playedC1.map((s) => ({ at: s.at, midi: byPos.get(s.pos.toFixed(5))!.midi, dur: byPos.get(s.pos.toFixed(5))!.dur }));
+  const am = matchNotes(rawNotes(out.det.notes), expN.map((e) => ({ t: e.at, midi: e.midi })), 0.04);
+  const frames = await page.evaluate(([a, b]) => window.__sing!.capture.frames('lane', a, b), [run.stopT - 0.3, run.stopT + run.L] as const);
+  const pc = checkPlayed(frames, expN);
+  console.log(`[first-take] output: played ${expN.length - pc.late.length - pc.offPitch.length}/${expN.length} (onset err max ${ms(maxAbs(pc.errors))}, late ${pc.late.join(' ')}, off-pitch ${pc.offPitch.join(' ')}); segmenter re-detection ${am.matched}/${am.expected} ±40 ms, max ${ms(maxAbs(am.errors))}; missed ${am.missed.join(' ')}; wrong ${am.wrongPitch.join(' ')}; extra ${am.extra}`);
+  // frame check (polyphonic release tails fool the segmenter's onset refinement, notes/tester.md) + segmenter ≥ 85%
+  expect(pc.late, 'output: pitch not reached in [−40, +80] ms').toEqual([]);
+  expect(pc.offPitch, 'output: sustain off pitch').toEqual([]);
   expect(am.wrongPitch, 'output notes wrong pitch').toEqual([]);
+  expect(am.matched / am.expected).toBeGreaterThanOrEqual(0.85);
   expect(errors, errors.join('\n')).toEqual([]);
 });

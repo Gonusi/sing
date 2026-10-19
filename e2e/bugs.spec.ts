@@ -10,13 +10,13 @@ test('regression engine: undo right after record-from-stopped discards the overd
     const s = window.__sing!;
     s.command({ type: 'stop' });
     const t = s.now();
-    s.command({ type: 'record' }, t); // stopped → playing + overdubbing from origin = now + outLat + 0.03
-    const undo = s.command({ type: 'undo' }, t + 0.01); // read against the state at tDown: should discard the overdub
+    s.command({ type: 'record' }, t); // round 4: stopped → one-bar count-in, then overdub from the playhead
+    const undo = s.command({ type: 'undo' }, t + 0.01); // read against the state at tDown: cancels the count-in
     return { undo, state: s.state(), loopLength: s.session().loopLength, tracks: s.session().tracks.length };
   });
   console.log(`[bug undo-after-record-from-stopped] got ${JSON.stringify(r)}`);
-  // expected: the pending overdub is discarded, the loop keeps playing, the first take survives
-  expect(r).toEqual({ undo: true, state: 'playing', loopLength: expect.any(Number), tracks: 1 });
+  // expected: the pending overdub is discarded (count-in cancelled → back to stopped), the first take survives
+  expect(r).toEqual({ undo: true, state: 'stopped', loopLength: expect.any(Number), tracks: 1 });
 });
 
 test('regression shell: a press right after closing a sheet starts a gesture', async ({ page }) => {
@@ -37,14 +37,13 @@ test('regression engine: no one-sample clicks at vocal loop seams (up to 3 takes
   test.setTimeout(180_000);
   await boot(page);
   // seam inside a sustained sung A4 (sing-cmaj 3.84–4.59 s), as in vocals.spec.ts
-  const L = 4.29;
   const lines: string[] = [];
   let clicks = 0;
   for (let attempt = 1; attempt <= 3 && clicks === 0; attempt++) {
     await page.evaluate(() => window.__sing!.clearSession());
     await page.evaluate(() => window.__sing!.command({ type: 'create', kind: 'vocals' }));
-    const run = await firstTake(page, { fixture: 'sing-cmaj', L, lead: 0.1, captureKey: 'lane' });
-    await page.evaluate((t) => window.__sing!.waitUntil(t), run.t0 + 4 * L + 0.2);
+    const run = await firstTake(page, { fixture: 'sing-cmaj', L: 4.29, bars: 2, lead: 0.1, captureKey: 'lane' });
+    await page.evaluate((t) => window.__sing!.waitUntil(t), run.t0 + 4 * run.L + 0.2);
     await page.evaluate(() => window.__sing!.capture.end('lane'));
     const sched = (await page.evaluate(() => window.__sing!.log())).filter((e) => e.type === 'sched' && e.data!.trackId === run.trackId && Number(e.data!.offset) === 0);
     expect(sched.length).toBeGreaterThanOrEqual(2);
@@ -74,11 +73,11 @@ test('regression engine: a drum first take of room noise only (−45 dBFS) recor
     // let the noise bed run first: its own start (digital silence → noise) is a real onset, 50 ms after boot
     await s.waitUntil(s.now() + 0.5);
     s.command({ type: 'create', kind: 'drums' });
-    const t0 = s.now();
-    await s.waitUntil(t0 + 0.1);
-    s.gesture({ type: 'tap', tDown: t0 });
-    await s.waitUntil(t0 + 2.0);
-    s.gesture({ type: 'tap', tDown: t0 + 1.9 });
+    s.transport('record'); // one-bar count-in, then the take from the downbeat t0
+    const t0 = Number(s.log().filter((e) => e.type === 'take' && e.data?.phase === 'start').pop()!.data!.start);
+    const bar = (60 / s.view().tempo.bpm) * s.view().tempo.beatsPerBar;
+    await s.waitUntil(t0 + bar + 0.1);
+    s.transport('record', t0 + bar);
     return s.session().tracks[0].take?.hits.map((h) => `${h.kind}@${h.pos.toFixed(3)}`) ?? [];
   });
   console.log(`[bug phantom hats] ${JSON.stringify(hits)}`);
