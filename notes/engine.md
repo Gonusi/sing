@@ -200,6 +200,46 @@ Risk: a glitch that read AHEAD (never observed) would make all later stamps 2.7 
   kick/snare/hat classify the whole beatbox fixture exactly). Wizard UI flow (?test&setup) driven through all 6 steps against
   the real API in both engines: no errors.
 
+## Round 4 (2026-10-19): transport, count-in, seek, tempo, metronome
+State table: the header of src/app/controller.ts (authoritative). Summary:
+- **Taps do nothing** in the controller (main.ts maps them to seek). Holds keep their exclusions. Voice record/play/stop =
+  transport record/play/pause, read against the state at tDown.
+- **Count-in** (record from idle or stopped): the first click is heard at now + outLat + 0.1 s, the downbeat D one bar later.
+  The take is created at once with t0 (or ts) = D, so its feed simply starts at D's pre-roll; from stopped the scheduler starts
+  at once with origin = D − P (P = beat-snapped playhead) and from = D, so playback begins exactly at D. The tick switches
+  countIn → recordingFirst/overdubbing at D. Cancel (record/pause/undo during count-in) discards the take and returns to the
+  previous state. The lane to record into exists from the count-in on.
+- **First take**: L = max(1, round-half-up(recorded / bar)) bars; `finish(end, L)` clips events after t0 + L (a vocal loop gets
+  silence when rounded up, the seam continuation when rounded down); playback from min(end, t0 + L) (rounded down → cycle 1 is
+  already running, catch-up plays it).
+- **Punch in** (record while playing): ts = tDown; record again → commit what was sung, keep playing; auto-commit after one
+  full cycle; the new lane plays every note from its next occurrence (activeFrom = ts + L).
+- **Pause** keeps the heard position as `resumePos` (View.playhead while stopped); **play** resumes there (origin = now + outLat +
+  0.03 − P); **seek(pos)** snaps to the nearest beat (mod L): stopped → resumePos, playing → `scheduler.jump()` (15 ms fade +
+  stopAll, new origin, the current track list handed over atomically); **toStart** = seek 0; both refused in countIn/recording.
+- **Tempo** (Session.tempo, DEFAULT_TEMPO 90 4/4): setTempo clamps to 40–200 (0.01 bpm), rescales every note/hit/raw pos+dur
+  and L by old/new bpm (same bars), rescales the resume position, jumps to the same bar position while playing. Not an undo
+  point: undo keeps the current tempo and rescales the restored snapshot. Refused while counting in or recording and once a
+  vocal take exists (View.tempoEditable). Clear keeps the tempo and fx.
+- **Metronome** (src/loop/metronome.ts): clicks on the beat grid (anchor = loop origin; count-in: D; first take: t0), accented
+  downbeat, into master (never the echo bus), scheduled in the heard domain like the loop. Audible: always during the count-in,
+  else when fx.click (default on; setClick, not an undo point). **Drum takes** drop hits within [click − 10 ms, click + 40 ms]
+  (corrected time = heard time of the click) — only when the output is not headphones (DeviceSettings.output wired/bluetooth:
+  no bleed, so on-beat hits must stay); a beatboxer on speakers hitting exactly on a click loses that hit (headphones advised).
+  Vocal takes on speakers contain click bleed (no exclusion: it would cut the audio).
+- **View**: tempo; playhead (heard pos playing/overdubbing, resume pos stopped or counting in from it, else null); beat
+  {bar, beat, phase} during countIn (the count-in bar counts as bar 1), recordingFirst (from t0) and playing; countIn = beats
+  left (4…1); tempoEditable.
+- Checks: c1–c3 rewritten for the transport table (28 steps); a/b/g/r/s/t/v drive takes with transport('record') at a tempo
+  whose bar is the intended L; x1–x6 (seek/resume/jump, tempo rescale and lock, metronome on/off on master within 0.5 ms of
+  the grid, click exclusion speaker vs wired, View count-in and beat clock, bar rounding).
+- Host note: Chromium reported outputLatency 0.168 s on this Mac today (was 0.032; probably a Bluetooth default output). Checks
+  that assumed the old host now follow the measured outLat (loopback delays outLat + Δ, u8's guess, v2's first-replay bound).
+- **e2e depending on tap-to-record** (for the tester): helpers.ts firstTake/overdub (gesture tap at t0/stopT/ts) → used by
+  first-take, overdub, calibration, echo, persist, vocals, states, bugs specs; states.spec also walks taps and voice stop/play
+  semantics (stop = pause now, play resumes from the playhead, record from stopped counts in); fake-mic and ui specs tap the stage
+  to record.
+
 ## Known risks
 - **Vocal first replay** misses ≈ 0.13 s after an overdub window (commit latency); a provisional commit before the window end could
   close it, not built. **Beep exclusion** zeroes 80 ms of a vocal take right after the record tap (on speakers the mic hears the beep).

@@ -37,6 +37,8 @@ export const DRUM_LATE_MAX_SEC = 0.03;
 export const MIN_CATCHUP_REMAIN_SEC = 0.03;
 export const RAMP_ONOFF_SEC = 0.01;
 export const RAMP_STOP_SEC = 0.02;
+/** jump(): fade-out of what is sounding before the restart */
+export const JUMP_FADE_SEC = 0.015;
 /** shorter loops are not scheduled at all (guards the cycle loop) */
 export const MIN_LOOP_SEC = 0.01;
 /** boundary slack for `from` / activeFrom / activeUntil: heard = origin + pos + k·L can land 1 ulp below `from` */
@@ -85,6 +87,11 @@ export interface LoopScheduler extends Scheduler {
   resync(): void;
   /** the per-track gain (voice.output → this → master) */
   trackOutput(trackId: string): GainNode | null;
+  /**
+   * seek while running: what is sounding fades out (JUMP_FADE_SEC) and stops, then scheduling restarts with a new
+   * origin (and loop length) from heard time `from` — which must lie ≥ JUMP_FADE_SEC + outLat in the future
+   */
+  jump(origin: Sec, loopLength: Sec, from: Sec, tracks?: ScheduledTrack[]): void;
   /** setTracks; catchUp false = events new to a track are not caught up in the range already passed */
   setTracks(tracks: ScheduledTrack[], opts?: { catchUp?: boolean }): void;
   dispose(): void;
@@ -205,6 +212,40 @@ export function createScheduler(engine: AudioEngine, opts: SchedulerOptions = {}
     }, 100);
   };
 
+  const applyTracks = (list: ScheduledTrack[], catchUp: boolean) => {
+    const seen = new Set<string>();
+    for (const st of list) {
+      const id = st.track.id;
+      seen.add(id);
+      let s = strips.get(id);
+      if (s && s.voice !== st.voice) {
+        removeStrip(s);
+        s = undefined;
+      }
+      if (!s) s = addStrip(st);
+      const wasOn = s.st.track.on;
+      s.st = st;
+      if (wasOn !== st.track.on) applyGain(s, RAMP_ONOFF_SEC);
+      // keys only grow until the next start(): forgetting one could schedule an occurrence twice
+      catchUpNewEvents(s, catchUp);
+    }
+    for (const s of [...strips.values()]) if (!seen.has(s.st.track.id)) removeStrip(s);
+  };
+
+  /** (re)start scheduling; gains come up at `gainAt` (null = now) */
+  const begin = (o: Sec, loopLength: Sec, f: Sec, gainAt: Sec | null) => {
+    running = true;
+    origin = o;
+    L = loopLength;
+    from = f;
+    lastHi = f - EDGE_EPS_SEC;
+    for (const s of strips.values()) {
+      s.scheduledUntil = f - EDGE_EPS_SEC;
+      s.known = new Set(trackEvents(s.st, loopLength).map(eventKey));
+      applyGain(s, RAMP_ONOFF_SEC, gainAt ?? ctx.currentTime);
+    }
+  };
+
   const unsubscribeTick = engine.onTick(tick);
 
   return {
@@ -218,17 +259,26 @@ export function createScheduler(engine: AudioEngine, opts: SchedulerOptions = {}
       return running ? L : null;
     },
     start(o, loopLength, f) {
-      running = true;
-      origin = o;
-      L = loopLength;
-      from = f;
-      lastHi = f - EDGE_EPS_SEC;
-      for (const s of strips.values()) {
-        s.scheduledUntil = f - EDGE_EPS_SEC;
-        s.known = new Set(trackEvents(s.st, loopLength).map(eventKey));
-        applyGain(s, RAMP_ONOFF_SEC);
-      }
+      begin(o, loopLength, f, null);
       opts.onTransport?.({ action: 'start', at: ctx.currentTime, origin: o, loopLength, from: f });
+      tick();
+    },
+    jump(o, loopLength, f, list) {
+      const now = ctx.currentTime;
+      if (running) {
+        for (const s of strips.values()) {
+          rampParam(s.gain.gain, 0, now, JUMP_FADE_SEC);
+          try {
+            s.voice.stopAll(now + JUMP_FADE_SEC);
+          } catch (err) {
+            console.error('voice.stopAll failed', err);
+          }
+        }
+      }
+      running = false; // new tracks (a tempo change) are taken without catch-up, before scheduling restarts
+      if (list) applyTracks(list, false);
+      begin(o, loopLength, f, now + JUMP_FADE_SEC + 0.002);
+      opts.onTransport?.({ action: 'start', at: now, origin: o, loopLength, from: f });
       tick();
     },
     stop(at) {
@@ -252,23 +302,7 @@ export function createScheduler(engine: AudioEngine, opts: SchedulerOptions = {}
       return mod(Math.max(at, from) - origin, L);
     },
     setTracks(list, setOpts = {}) {
-      const seen = new Set<string>();
-      for (const st of list) {
-        const id = st.track.id;
-        seen.add(id);
-        let s = strips.get(id);
-        if (s && s.voice !== st.voice) {
-          removeStrip(s);
-          s = undefined;
-        }
-        if (!s) s = addStrip(st);
-        const wasOn = s.st.track.on;
-        s.st = st;
-        if (wasOn !== st.track.on) applyGain(s, RAMP_ONOFF_SEC);
-        // keys only grow until the next start(): forgetting one could schedule an occurrence twice
-        catchUpNewEvents(s, setOpts.catchUp ?? true);
-      }
-      for (const s of [...strips.values()]) if (!seen.has(s.st.track.id)) removeStrip(s);
+      applyTracks(list, setOpts.catchUp ?? true);
       tick();
     },
     tick,

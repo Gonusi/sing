@@ -84,8 +84,7 @@ async function checkFirstTake(page: Page): Promise<void> {
     await e.c.setDevice({ inLat: 0.01 });
     const inLat = 0.01;
     const notes: [number, number, number][] = [[0.05, 0.5, 60], [0.8, 0.3, 64], [1.3, 0.4, 67], [1.9, 0.3, 72]];
-    const t0 = e.now();
-    e.gesture({ type: 'tap', tDown: t0 });
+    const t0 = (await e.recordFirst(100))!; // count-in bar, then t0 = the downbeat; 100 bpm: 1 bar = 2.4 s
     for (const [p, dur, m] of notes) e.tone(t0 + p + inLat, m, dur);
     const stopT = t0 + 2.4;
     await e.waitUntil(t0 + 2.1); // mid-take: 3 notes final, the 4th (1.9 + 0.3) being sung
@@ -94,7 +93,7 @@ async function checkFirstTake(page: Page): Promise<void> {
     const mid = { state: v.state, rec: v.recordingTrackId, live: v.liveNotes.map((n) => n.pos), open: v.openNote, elapsed: v.elapsed, before, after: e.now(), loopPos: v.loopPos };
     await e.waitUntil(stopT + 0.15); // the tap is released 150 ms after touch-down
     const startBefore = e.now();
-    e.gesture({ type: 'tap', tDown: stopT });
+    e.c.transport('record', stopT); // stop recording, keep playing
     const startAt = e.now();
     await e.waitUntil(stopT + 2 * 2.4 + 0.2);
     e.command({ type: 'stop' });
@@ -163,12 +162,11 @@ async function checkOverdub(page: Page): Promise<void> {
     await e.c.setDevice({ inLat: 0.03 });
     const inLat = 0.03;
     const L = 2.0;
-    const t0 = e.now();
-    e.gesture({ type: 'tap', tDown: t0 });
+    const t0 = (await e.recordFirst(120))!; // 120 bpm: 1 bar = 2.0 s
     e.tone(t0 + 0.1 + inLat, 62, 0.4);
     e.tone(t0 + 1.0 + inLat, 65, 0.4);
     await e.waitUntil(t0 + L + 0.1);
-    e.gesture({ type: 'tap', tDown: t0 + L });
+    e.c.transport('record', t0 + L);
     e.command({ type: 'create', kind: 'violin' });
     const violinId = e.c.session.selectedId;
     await e.sleep(0.2);
@@ -183,7 +181,7 @@ async function checkOverdub(page: Page): Promise<void> {
     ];
     for (const n of sung) e.tone(n.tc + inLat, n.midi, n.dur); // the mic hears it inLat late
     await e.waitUntil(ts + 0.05);
-    e.gesture({ type: 'tap', tDown: ts });
+    e.c.transport('record', ts); // punch in
     const stateAfterTap = e.c.state;
     await e.waitUntil(ts + L + inLat + 0.15 + 0.05);
     const stateAfterWindow = e.c.state;
@@ -222,72 +220,83 @@ async function checkOverdub(page: Page): Promise<void> {
 async function checkStateTable(page: Page): Promise<void> {
   const res = await page.evaluate(async () => {
     const e = (window as unknown as W).__eng;
-    const out: { step: string; state: string; lanes: number; loop: number | null; accepted: boolean | null; loopPos: number | null }[] = [];
-    const snap = (step: string, accepted: boolean | null = null) =>
-      out.push({ step, state: e.c.state, lanes: e.c.session.tracks.length, loop: e.c.session.loopLength, accepted, loopPos: e.c.view().loopPos });
+    const out: { step: string; state: string; lanes: number; loop: number | null; accepted: boolean | null; loopPos: number | null; playhead: number | null }[] = [];
+    const snap = (step: string, accepted: boolean | null = null) => {
+      const v = e.c.view();
+      out.push({ step, state: e.c.state, lanes: e.c.session.tracks.length, loop: e.c.session.loopLength, accepted, loopPos: v.loopPos, playhead: v.playhead });
+    };
     const inLat = 0.01;
-    const tap = () => e.gesture({ type: 'tap', tDown: e.now() });
+    const rec = () => e.c.transport('record', e.now());
+    const countInEnd = () => Number([...e.events].reverse().find((x) => x.type === 'countIn')!.data!.D);
     await e.c.clearSession();
     await e.c.setDevice({ inLat });
+    e.c.setTempo(200); // 1 bar = 1.2 s
     snap('clear');
     snap('idle: undo (nothing)', e.command({ type: 'undo' }));
+    snap('idle: play (no loop)', e.c.transport('play', e.now()));
     snap('idle: create drums', e.command({ type: 'create', kind: 'drums' }));
-    tap();
-    snap('idle: tap');
+    snap('idle: record', rec());
+    snap('countIn: record (cancel)', rec());
+    rec();
+    await e.waitUntil(countInEnd() + 0.3);
+    snap('countIn → recordingFirst at the downbeat');
     snap('recordingFirst: undo', e.command({ type: 'undo' }));
-    tap();
-    await e.sleep(0.5);
-    tap();
-    snap('recordingFirst: tap after 0.5 s (too short)');
-    const t0 = e.now();
-    tap();
+    rec();
+    const t0 = countInEnd();
     e.burst(t0 + 0.3 + inLat, 100);
-    await e.sleep(1.2);
-    tap();
-    snap('recordingFirst: tap after 1.2 s');
-    tap();
-    snap('playing: tap');
+    await e.waitUntil(t0 + 1.25);
+    snap('recordingFirst: record after 1.25 s (rounds to 1 bar)', rec());
+    snap('playing: record (punch in)', rec());
     snap('overdubbing: create synth', e.command({ type: 'create', kind: 'synth' }));
-    snap('overdubbing: record', e.command({ type: 'record' }));
     snap('overdubbing: undo', e.command({ type: 'undo' }));
     const ts = e.now();
-    tap();
+    rec();
     e.burst(ts + 0.1 + inLat, 1000);
     await e.sleep(0.4);
-    tap();
-    snap('overdubbing: tap after 0.4 s (commit so far)');
-    snap('playing: stop', e.command({ type: 'stop' }));
-    snap('stopped: play', e.command({ type: 'play' }));
-    snap('playing: stop again', e.command({ type: 'stop' }));
-    snap('stopped: record', e.command({ type: 'record' }));
-    const origin = e.c.scheduler.origin ?? e.now();
-    e.burst(origin + 0.2 + inLat, 6000);
-    await e.waitUntil(origin + 0.5);
-    snap('overdubbing: stop (commit so far)', e.command({ type: 'stop' }));
+    snap('overdubbing: record (commit so far, keep playing)', rec());
+    await e.sleep(0.3);
+    snap('playing: pause', e.c.transport('pause', e.now()));
+    const pausedAt = out[out.length - 1].playhead;
+    snap('stopped: play (resume)', e.c.transport('play', e.now()));
+    await e.sleep(0.1);
+    snap('playing: pause again', e.c.transport('pause', e.now()));
+    snap('stopped: toStart', e.c.transport('toStart', e.now()));
+    snap('stopped: record (count-in)', rec());
+    const D = countInEnd();
+    e.burst(D + 0.2 + inLat, 6000);
+    await e.waitUntil(D + 0.5);
+    snap('countIn → overdubbing from the playhead');
+    snap('overdubbing: pause (commit, stopped)', e.c.transport('pause', e.now()));
     snap('stopped: undo', e.command({ type: 'undo' }));
-    tap();
-    snap('stopped: tap');
+    snap('stopped: voice play', e.command({ type: 'play' }));
+    snap('playing: voice stop (= pause)', e.command({ type: 'stop' }));
+    snap('stopped: play', e.c.transport('play', e.now()));
     snap('playing: undo', e.command({ type: 'undo' }));
     snap('playing: undo (first take)', e.command({ type: 'undo' }));
     snap('idle: undo (create)', e.command({ type: 'undo' }));
     snap('idle: play', e.command({ type: 'play' }));
-    return { out, changes: e.changes, errors: e.events.filter((x) => x.type === 'error').map((x) => String(x.data?.message)) };
+    return { out, pausedAt, changes: e.changes, errors: e.events.filter((x) => x.type === 'error').map((x) => String(x.data?.message)) };
   });
   const { out: steps } = res;
-  check('c3 onChange fired; refused create/record logged as errors', res.changes > 10 && res.errors.includes('create while overdubbing') && res.errors.includes('record while overdubbing'),
+  check('c3 onChange fired; refused create logged as an error', res.changes > 10 && res.errors.includes('create while overdubbing'),
     `${res.changes} changes; errors: ${res.errors.join(', ')}`);
   const want: [string, number, boolean | null][] = [
-    ['idle', 0, null], ['idle', 0, false], ['idle', 1, true], ['recordingFirst', 1, null], ['idle', 1, true], ['idle', 1, null],
-    ['playing', 1, null], ['overdubbing', 2, null], ['overdubbing', 2, false], ['overdubbing', 2, false], ['playing', 1, true],
-    ['playing', 2, null], ['stopped', 2, true], ['playing', 2, true], ['stopped', 2, true], ['overdubbing', 3, true], ['stopped', 3, true],
-    ['stopped', 2, true], ['playing', 2, null], ['playing', 1, true], ['idle', 1, true], ['idle', 0, true], ['idle', 0, false],
+    ['idle', 0, null], ['idle', 0, false], ['idle', 0, false], ['idle', 1, true], ['countIn', 1, true], ['idle', 1, true],
+    ['recordingFirst', 1, null], ['idle', 1, true], ['playing', 1, true], ['overdubbing', 2, true], ['overdubbing', 2, false],
+    ['playing', 1, true], ['playing', 2, true], ['stopped', 2, true], ['playing', 2, true], ['stopped', 2, true],
+    ['stopped', 2, true], ['countIn', 3, true], ['overdubbing', 3, null], ['stopped', 3, true], ['stopped', 2, true],
+    ['playing', 2, true], ['stopped', 2, true], ['playing', 2, true], ['playing', 1, true], ['idle', 1, true], ['idle', 0, true],
+    ['idle', 0, false],
   ];
+
   const bad = steps.map((s, i) => ({ s, w: want[i] })).filter(({ s, w }) => !w || s.state !== w[0] || s.lanes !== w[1] || (w[2] !== null && s.accepted !== w[2]));
-  check('c1 state table walk (state, lanes, accepted)', bad.length === 0 && steps.length === want.length,
+  check('c1 transport table walk (state, lanes, accepted)', bad.length === 0 && steps.length === want.length,
     bad.length ? bad.map(({ s, w }) => `${s.step}: got ${s.state}/${s.lanes}/${s.accepted} want ${w?.join('/')}`).join('; ') : `${steps.length} steps`);
-  const loopL = steps[6].loop ?? 0;
-  check('c2 L from the 1.2 s take; loopPos null when stopped, set when playing', Math.abs(loopL - 1.2) < 0.02 && steps[12].loopPos === null && steps[13].loopPos !== null,
-    `L=${loopL.toFixed(3)} stopped loopPos=${steps[12].loopPos} playing loopPos=${steps[13].loopPos?.toFixed(3)}`);
+  const loopL = steps[8].loop ?? 0;
+  const at = (name: string) => steps.find((x) => x.step.startsWith(name))!;
+  check('c2 bar-rounded L = 1.2 s; stopped keeps the playhead (loopPos null); toStart → 0', Math.abs(loopL - 1.2) < 1e-9 &&
+    at('playing: pause').loopPos === null && res.pausedAt !== null && at('stopped: toStart').playhead === 0,
+    `L=${loopL.toFixed(4)} paused at ${res.pausedAt?.toFixed(3)} toStart ${at('stopped: toStart').playhead}`);
 }
 
 // ---------- g: holds (exclusion) and commands read against the state at tDown ----------
@@ -298,8 +307,7 @@ async function checkHolds(page: Page): Promise<void> {
     await e.c.clearSession();
     await e.c.setDevice({ inLat: 0.01 });
     const inLat = 0.01;
-    const t0 = e.now();
-    e.gesture({ type: 'tap', tDown: t0 });
+    const t0 = (await e.recordFirst(100))!; // 1 bar = 2.4 s
     e.tone(t0 + 0.2 + inLat, 60, 0.3); // A kept
     e.tone(t0 + 0.55 + inLat, 62, 0.5); // C cut at the hold start (t0 + 0.8)
     e.tone(t0 + 1.15 + inLat, 64, 0.3); // B inside the hold: dropped
@@ -312,14 +320,14 @@ async function checkHolds(page: Page): Promise<void> {
     const toggled = e.command({ type: 'toggle', kind: 'violin', on: false }, tH);
     const stateAfterHold = e.c.state;
     await e.waitUntil(t0 + 2.4 + 0.05);
-    e.gesture({ type: 'tap', tDown: t0 + 2.4 });
+    e.c.transport('record', t0 + 2.4);
     const firstNotes = e.c.session.tracks[0]?.take?.notes ?? [];
     // state at tDown: hold starts just before the overdub window ends; the command arrives after the commit
     e.command({ type: 'create', kind: 'bass' });
     const bassId = e.c.session.selectedId;
     const L = e.c.session.loopLength ?? 0;
     const ts = e.now();
-    e.gesture({ type: 'tap', tDown: ts });
+    e.c.transport('record', ts); // punch in
     e.tone(ts + 0.3 + inLat, 45, 0.3);
     const tH2 = ts + L - 0.1;
     await e.waitUntil(tH2 + 0.3);
@@ -370,17 +378,19 @@ async function checkCalibration(page: Page): Promise<void> {
   const d = await page.evaluate(async () => {
     const e = (window as unknown as W).__eng;
     if (e.c.state === 'playing' || e.c.state === 'overdubbing') e.command({ type: 'stop' });
-    return e.calibrateLoopback(0.12);
+    // a loopback is the whole round trip: physical only when longer than the reported output latency (a Bluetooth
+    // default output reports ~0.17 s) → d = outLat + 0.12
+    return e.calibrateLoopback(e.outLat() + 0.12);
   });
-  const expected = 0.12 - d.outLat + d.limiterDelay;
-  check('e1 calibration with loopback 120 ms: ok, inLat = d − (outLat − limiter delay) (±5 ms)', d.result.ok && Math.abs(d.result.inLat - expected) < 0.005,
+  const expected = 0.12 + d.limiterDelay;
+  check('e1 calibration with loopback outLat + 120 ms: ok, inLat = d − (outLat − limiter delay) (±5 ms)', d.result.ok && Math.abs(d.result.inLat - expected) < 0.005,
     `ok ${d.result.ok} matched ${d.result.matched} inLat ${ms(d.result.inLat)} expected ${ms(expected)} spread ${ms(d.result.spread)}`);
 }
 
 /** Bluetooth-like round trip near the phase limit (period − 0.05 = 0.6 s) */
 async function checkCalibrationBluetooth(page: Page): Promise<void> {
-  const d = await page.evaluate(() => (window as unknown as W).__eng.calibrateLoopback(0.45));
-  const expected = 0.45 - d.outLat + d.limiterDelay;
+  const d = await page.evaluate(() => { const e = (window as unknown as W).__eng; return e.calibrateLoopback(e.outLat() + 0.45); });
+  const expected = 0.45 + d.limiterDelay;
   check('e2 calibration, 450 ms loopback (Bluetooth-like): ok, inLat within ±5 ms', d.result.ok && Math.abs(d.result.inLat - expected) < 0.005,
     `ok ${d.result.ok} heard ${d.result.heard}/${d.result.measured} inLat ${ms(d.result.inLat)} expected ${ms(expected)}`);
 }
@@ -636,20 +646,18 @@ async function checkRealAnalysis(page: Page, url: string): Promise<void> {
     const beat = await e.loadFixture('beatbox-basic');
     // r1 first take: fixture second 0.6 = t0 (the C4 at 0.5 starts in the pre-roll → clipped), stop inside F4 (5.265)
     const A = 0.6;
-    const t0 = e.now() + 0.8;
+    const t0 = (await e.recordFirst(100))!; // 2 bars = 4.8 s
     e.injectFixture('sing-cmaj', 0, 5.6, t0 - A + inLat);
-    await e.waitUntil(t0 + 0.05);
-    e.gesture({ type: 'tap', tDown: t0 });
     const stop = t0 + 4.8;
     await e.waitUntil(stop + 0.15);
-    e.gesture({ type: 'tap', tDown: stop });
+    e.c.transport('record', stop);
     const first = e.c.session.tracks[0];
     // r2 overdub (new synth lane): window = fixture [4.9, 9.7): G4 (4.593) starts 0.31 s before ts → clipped; A4 (9.176) is open at the end
     const S = 4.9;
     const ts = e.now() + 1.0;
     e.injectFixture('sing-cmaj', 4.1, 10.2, ts - (S - 4.1) + inLat);
     await e.waitUntil(ts + 0.05);
-    e.gesture({ type: 'tap', tDown: ts });
+    e.c.transport('record', ts); // punch in
     const lane2 = e.c.session.selectedId;
     await e.waitUntil(ts + 4.8 + inLat + 0.15 + 0.2);
     const state2 = e.c.state;
@@ -660,10 +668,10 @@ async function checkRealAnalysis(page: Page, url: string): Promise<void> {
     const ts3 = e.now() + 0.6;
     e.injectFixture('beatbox-basic', 0.2, 5.1, ts3 - (B - 0.2) + inLat);
     await e.waitUntil(ts3 + 0.05);
-    e.gesture({ type: 'tap', tDown: ts3 });
+    e.c.transport('record', ts3); // punch in
     const end3 = ts3 + (5.03 - B);
     await e.waitUntil(end3 + 0.06);
-    e.gesture({ type: 'tap', tDown: end3 });
+    e.c.transport('record', end3); // stop recording, keep playing
     const state3 = e.c.state;
     await e.sleep(0.2);
     e.command({ type: 'stop' });
@@ -758,15 +766,13 @@ async function checkVocals(page: Page, url: string): Promise<void> {
     // v1: vocal FIRST take (sets L); noise A starts 0.3 s before t0
     e.command({ type: 'create', kind: 'vocals' });
     const lane1 = e.c.session.selectedId!;
-    const t0 = e.now() + 0.5;
+    const t0 = (await e.recordFirst(100))!; // 1 bar = 2.4 s
     const A = e.noise(11, Math.round(3.0 * sr));
     e.injectSamples(A, t0 - PRE + inLat);
-    await e.waitUntil(t0 + 0.05);
-    e.gesture({ type: 'tap', tDown: t0 });
     await e.waitUntil(t0 + 1.2);
     const live1 = nonzero(e.c.view().livePeaks);
     await e.waitUntil(t0 + 2.4 + 0.15);
-    e.gesture({ type: 'tap', tDown: t0 + 2.4 });
+    e.c.transport('record', t0 + 2.4);
     const L = e.c.session.loopLength!;
     const Ls = Math.round(L * sr);
     const buf1 = e.c.vocalAudio(lane1);
@@ -783,7 +789,7 @@ async function checkVocals(page: Page, url: string): Promise<void> {
     const B = e.noise(22, Math.round((L + 0.8) * sr));
     e.injectSamples(B, ts - PRE + inLat);
     await e.waitUntil(ts + 0.05);
-    e.gesture({ type: 'tap', tDown: ts });
+    e.c.transport('record', ts); // punch in
     const lane2 = e.c.session.selectedId!;
     await e.waitUntil(ts + 1.2);
     const live2 = nonzero(e.c.view().livePeaks);
@@ -799,7 +805,7 @@ async function checkVocals(page: Page, url: string): Promise<void> {
     const sine = new Float32Array(n3).map((_, i) => 0.3 * Math.sin((2 * Math.PI * 330 * i) / sr));
     e.injectSamples(sine, ts3 - PRE + inLat);
     await e.waitUntil(ts3 + 0.05);
-    e.gesture({ type: 'tap', tDown: ts3 });
+    e.c.transport('record', ts3); // punch in
     const lane3 = e.c.session.selectedId!;
     await e.waitUntil(ts3 + L + inLat + 0.05 + 0.3);
     const cap = await e.captureNode(e.c.voiceOutput(lane3)!, L + 0.4);
@@ -840,7 +846,7 @@ async function checkVocals(page: Page, url: string): Promise<void> {
     Math.abs(d.a1.lag) <= d.sr * 0.001 && d.a1.err < 1e-3 && d.tailSame && d.peaks1.length === 256 && d.peaks1.filter((p) => p > 0.3 && p <= 1).length >= 256 - 12,
     `mic gaps ${d.micStats.gaps} (${JSON.stringify(d.micStats.recent)}); lag ${d.a1.lag} samples, mean err ${d.a1.err.toExponential(1)}, tail copy ${d.tailSame}, peaks ${d.peaks1.length} (${d.peaks1.filter((p) => p <= 0.3).length} quiet bins: the beep exclusion)`);
   check('v2 vocal overdub: rotated audio = injected samples (≤ 1 ms), plays from the window end', Math.abs(d.a2.lag) <= d.sr * 0.001 && d.a2.err < 1e-3 &&
-    !!d.first2 && d.first2.at + d.first2.outLat >= d.ts + d.L - 0.001 && d.first2.at + d.first2.outLat <= d.ts + d.L + 0.16,
+    !!d.first2 && d.first2.at + d.first2.outLat >= d.ts + d.L - 0.001 && d.first2.at - d.ts - d.L <= d.inLat + 0.05 + 0.07, // commit (inLat + VOCAL_COMMIT_MARGIN) + a tick/block; then heard outLat later
     `lag ${d.a2.lag} samples, mean err ${d.a2.err.toExponential(1)}; first replay heard from ts+L+${d.first2 ? ms(d.first2.at + d.first2.outLat - d.ts - d.L) : '?'}`);
   const wantLive1 = (1.2 / 4) * 256;
   // first take: minus ≈ 5 bins of the beep exclusion (0.08 s of 4 s)
@@ -900,11 +906,11 @@ async function checkEcho(page: Page): Promise<void> {
     const e = (window as unknown as W).__eng;
     e.c.setEcho(1);
     await e.sleep(0.3);
-    const r = await e.calibrateLoopback(0.12);
+    const r = await e.calibrateLoopback(e.outLat() + 0.12);
     e.c.setEcho(0);
     return r;
   });
-  const expected = 0.12 - c.outLat + c.limiterDelay;
+  const expected = 0.12 + c.limiterDelay;
   check('v7 calibration with echo 1 unaffected (clicks bypass the FX bus)', c.result.ok && Math.abs(c.result.inLat - expected) < 0.005,
     `ok ${c.result.ok} inLat ${ms(c.result.inLat)} expected ${ms(expected)} spread ${ms(c.result.spread)}`);
 }
@@ -918,14 +924,13 @@ async function checkSmoothing(page: Page): Promise<void> {
     await e.c.setDevice({ inLat: 0.01 });
     e.c.setEcho(0.25);
     e.c.setSmoothing(0.5);
-    const t0 = e.now();
-    e.gesture({ type: 'tap', tDown: t0 });
+    const t0 = (await e.recordFirst(100))!;
     // 0.12 s note (dropped by the fake cleanNotes at 0.5: < 0.15 s), 0.25 s (dropped at 1: < 0.3 s), 0.45 s (kept)
     e.tone(t0 + 0.3 + 0.01, 60, 0.12);
     e.tone(t0 + 0.8 + 0.01, 64, 0.25);
     e.tone(t0 + 1.4 + 0.01, 67, 0.45);
     await e.waitUntil(t0 + 2.2);
-    e.gesture({ type: 'tap', tDown: t0 + 2.1 });
+    e.c.transport('record', t0 + 2.1); // rounds to 1 bar (2.4 s)
     const take = () => e.c.session.tracks[0].take!;
     const at05 = { notes: take().notes.map((n) => n.midi), raw: take().raw?.map((n) => n.midi) ?? null, fx: e.c.session.fx };
     const t = e.now();
@@ -960,11 +965,10 @@ async function checkDeleteTrack(page: Page): Promise<void> {
     await e.c.clearSession();
     await e.c.setDevice({ inLat: 0.01 });
     const ids = () => e.c.session.tracks.map((t) => t.id);
-    const t0 = e.now();
-    e.gesture({ type: 'tap', tDown: t0 });
+    const t0 = (await e.recordFirst(200))!; // 1 bar = 1.2 s
     e.tone(t0 + 0.2 + 0.01, 60, 0.4);
     await e.waitUntil(t0 + 1.3);
-    e.gesture({ type: 'tap', tDown: t0 + 1.2 }); // playing, 1 synth lane
+    e.c.transport('record', t0 + 1.2); // playing, 1 synth lane
     e.command({ type: 'create', kind: 'bass' });
     e.command({ type: 'create', kind: 'violin' });
     const [a, b, c] = ids();
@@ -973,7 +977,7 @@ async function checkDeleteTrack(page: Page): Promise<void> {
     const del1 = e.c.deleteTrack(b); // selected middle lane → selection moves to the next (c)
     const afterDel1 = { ids: ids(), sel: e.c.session.selectedId, loop: e.c.session.loopLength, state: e.c.state };
     e.c.select(c);
-    e.gesture({ type: 'tap', tDown: e.now() }); // overdub into the empty violin lane c
+    e.c.transport('record', e.now()); // punch in: overdub into the empty violin lane c
     const stateOd = e.c.state;
     const del2 = e.c.deleteTrack(c); // the lane being recorded: take discarded, back to playing
     const afterDel2 = { ids: ids(), state: e.c.state, rec: e.c.view().recordingTrackId };
@@ -1054,6 +1058,7 @@ async function checkSetup(page: Page): Promise<void> {
     const heardCmd = await tr.stop();
     // u8 output
     const guess = S.guessOutput();
+    const outputLatency = e.engine.ctx.outputLatency || 0;
     await S.applyOutput('bluetooth');
     const bt = { ...S.device() };
     await S.applyOutput('speaker');
@@ -1061,7 +1066,7 @@ async function checkSetup(page: Page): Promise<void> {
     return {
       level, floor, toneRms, tailRms, templates, hitsSeen, kinds, sing, voiced: pitches.filter((p) => p !== null).length,
       medianPitch: [...pitches.filter((p): p is number => p !== null)].sort((a, b) => a - b)[Math.floor(pitches.filter((p) => p !== null).length / 2)] ?? null,
-      held, stateBefore, stateAfter: e.c.state, during, heardCmd, ran: e.ranCommands.length, guess, bt, sp,
+      held, stateBefore, stateAfter: e.c.state, during, heardCmd, ran: e.ranCommands.length, guess, bt, sp, outputLatency,
     };
   });
   check('u1 setup level + noiseFloor read the mic RMS (±25%)', Math.abs(d.level - 0.01) < 0.0025 && Math.abs(d.floor - 0.01) < 0.0025,
@@ -1077,7 +1082,7 @@ async function checkSetup(page: Page): Promise<void> {
   check('u6 captureRange: held E3', d.held === 52, `held ${d.held}`);
   check('u7 tryCommand: heard "record", NOT run (main.ts guard), state unchanged', d.during && d.heardCmd.text === 'record' && d.heardCmd.command?.type === 'record' && d.ran === 0 && d.stateAfter === d.stateBefore,
     `during ${d.during}, heard ${JSON.stringify(d.heardCmd)}, ran ${d.ran}, state ${d.stateBefore}→${d.stateAfter}`);
-  check('u8 guessOutput + applyOutput (bluetooth: ec off, built-in mic if listed; speaker: ec on)', d.guess === 'speaker' && d.bt.output === 'bluetooth' && d.bt.ec === false &&
+  check('u8 guessOutput + applyOutput (bluetooth: ec off, built-in mic if listed; speaker: ec on)', d.guess === (d.outputLatency > 0.1 ? 'bluetooth' : 'speaker') && d.bt.output === 'bluetooth' && d.bt.ec === false &&
     d.sp.output === 'speaker' && d.sp.ec === true && (d.sp.micId ?? null) === null, `guess ${d.guess}; bt ${JSON.stringify({ ec: d.bt.ec, micId: d.bt.micId })}; speaker ${JSON.stringify({ ec: d.sp.ec, micId: d.sp.micId })}`);
 }
 
@@ -1132,6 +1137,141 @@ function checkLearnedSettings(): void {
   check('u10 drum takes hand the taught templates to the onset detector', seen?.templates === templates, `options ${JSON.stringify(seen)}`);
 }
 
+// ---------- x: transport, seek, tempo, metronome (round 4) ----------
+
+async function checkTransport(page: Page): Promise<void> {
+  const d = await page.evaluate(async () => {
+    const e = (window as unknown as W).__eng;
+    const inLat = 0.01;
+    await e.c.clearSession();
+    await e.c.setDevice({ inLat, output: undefined });
+    e.c.setClick(true);
+    // x6 bar rounding: 120 bpm (bar 2 s); stop after 3.4 s → 2 bars; a note at 3.6 s (after the rounded end... in bar 2) kept,
+    // a note at 4.1 s (after 4.0) dropped
+    const t0 = (await e.recordFirst(120))!;
+    const viewCount: (number | null)[] = [];
+    const vBeat: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      await e.waitUntil(t0 - 2 + 0.25 + i * 0.5);
+      const v = e.c.view();
+      viewCount.push(v.countIn);
+      vBeat.push(v.beat ? `${v.beat.bar}.${v.beat.beat}` : '-');
+    }
+    e.tone(t0 + 0.2 + inLat, 60, 0.3);
+    e.tone(t0 + 3.0 + inLat, 64, 0.3);
+    await e.waitUntil(t0 + 3.4);
+    const stoppedAt = e.now();
+    e.c.transport('record', e.now()); // 3.4 s = 1.7 bars → 2 bars
+    const L1 = e.c.session.loopLength;
+    const notes1 = e.c.session.tracks[0].take!.notes.map((n) => +n.pos.toFixed(3));
+    await e.sleep(0.3);
+    const vPlay = e.c.view();
+    // x1 seek / resume / jump
+    e.c.transport('pause', e.now());
+    const pausedHead = e.c.view().playhead;
+    const seekOk = e.c.seek(1.13); // → nearest beat 1.0 (beat 0.5 s)
+    const head = e.c.view().playhead;
+    const tPlay = e.now();
+    e.c.transport('play', tPlay);
+    await e.sleep(0.6);
+    const tJump = e.now();
+    const jumpOk = e.c.seek(3.26); // playing → jump to 3.5
+    await e.sleep(1.0);
+    const toStartOk = e.c.transport('toStart', e.now());
+    await e.sleep(0.3);
+    // x2 tempo while playing: 120 → 60: L 4 → 8, notes ×2, the bar position kept
+    const posBefore = e.c.scheduler.pos(e.now())!;
+    const tempoOk = e.c.setTempo(60);
+    const posAfter = e.c.scheduler.pos(e.now())!;
+    const L2 = e.c.session.loopLength;
+    const notes2 = e.c.session.tracks[0].take!.notes.map((n) => +n.pos.toFixed(3));
+    const tempoOf = e.c.view().tempo.bpm;
+    await e.sleep(0.4);
+    e.c.setTempo(120);
+    e.c.transport('pause', e.now());
+    // x3 metronome on master: an empty drums lane loop, clicks only (the synth lane is muted)
+    e.c.toggleTrack(e.c.session.tracks[0].id);
+    e.c.setClick(false);
+    const capOff = e.captureNode(e.engine.master, 1.2);
+    e.c.transport('play', e.now());
+    const offPcm = await capOff;
+    e.c.setClick(true);
+    const capOn = e.captureNode(e.engine.master, 1.2);
+    const onStart = e.now();
+    const offRms = Math.sqrt(offPcm.pcm.reduce((a, x) => a + x * x, 0) / Math.max(1, offPcm.pcm.length));
+    const onPcm = await capOn;
+    const sr = e.sampleRate;
+    const peaks: number[] = [];
+    for (let i = 1; i < onPcm.pcm.length; i++) if (Math.abs(onPcm.pcm[i]) > 0.05 && Math.abs(onPcm.pcm[i - 1]) <= 0.05 && (peaks.length === 0 || (onPcm.frame + i) / sr - peaks[peaks.length - 1] > 0.2)) peaks.push((onPcm.frame + i) / sr);
+    const origin = e.c.scheduler.origin!;
+    const ol = e.outLat();
+    const beatErr = peaks.map((t) => { const k = Math.round((t + ol - origin) / 0.5); return Math.abs(t + ol - (origin + k * 0.5)); });
+    e.c.transport('pause', e.now());
+    // x4 drum click exclusion: drums first take at 120 bpm, click on; bursts ON beats 1–3 (clicks are there) and OFF beats
+    await e.c.clearSession();
+    e.command({ type: 'create', kind: 'drums' });
+    const td = (await e.recordFirst(120))!;
+    for (let k = 1; k <= 3; k++) {
+      e.burst(td + k * 0.5 + inLat, 100); // on the click
+      e.burst(td + k * 0.5 + 0.25 + inLat, 1000); // between clicks
+    }
+    await e.waitUntil(td + 2.2);
+    e.c.transport('record', td + 2.0);
+    const hitsSpeaker = e.c.session.tracks[0].take!.hits.map((h) => +h.pos.toFixed(2));
+    e.c.transport('pause', e.now());
+    await e.c.clearSession();
+    await e.c.setDevice({ output: 'wired' });
+    e.command({ type: 'create', kind: 'drums' });
+    const tw = (await e.recordFirst(120))!;
+    for (let k = 1; k <= 3; k++) e.burst(tw + k * 0.5 + inLat, 100);
+    await e.waitUntil(tw + 2.2);
+    e.c.transport('record', tw + 2.0);
+    const hitsWired = e.c.session.tracks[0].take!.hits.map((h) => +h.pos.toFixed(2));
+    // x5 tempo lock with a vocal take; refused while recording
+    e.command({ type: 'create', kind: 'synth' });
+    e.c.transport('record', e.now()); // punch in
+    const tempoWhileRec = e.c.setTempo(100);
+    await e.sleep(0.3);
+    e.c.transport('record', e.now());
+    e.command({ type: 'create', kind: 'vocals' });
+    e.c.transport('record', e.now());
+    await e.sleep(0.4);
+    e.c.transport('record', e.now()); // commit a short vocal take
+    const editable = e.c.view().tempoEditable;
+    const tempoLocked = e.c.setTempo(100);
+    e.c.transport('pause', e.now());
+    await e.c.setDevice({ output: undefined });
+    const ev = e.events.filter((x) => x.t >= tPlay - 0.01);
+    return {
+      L1, notes1, viewCount, vBeat, vPlayState: vPlay.state, vPlayBeat: vPlay.beat, stoppedAt, pausedHead, seekOk, head, jumpOk, toStartOk, tJump,
+      tempoOk, L2, notes2, tempoOf, posBefore, posAfter, offRms, peaks: peaks.length, beatErr: Math.max(0, ...beatErr), onStart,
+      hitsSpeaker, hitsWired, tempoWhileRec, editable, tempoLocked,
+      plays: ev.filter((x) => x.type === 'play').map((x) => x.data), jumps: ev.filter((x) => x.type === 'jump').map((x) => x.data),
+    };
+  });
+  check('x6 first take rounds to whole bars (3.4 s @120 → 2 bars = 4 s); notes inside kept', d.L1 === 4 && d.notes1.length === 2,
+    `L ${d.L1} notes ${d.notes1.join(',')}`);
+  check('x4a View: countIn counts 4→1 with beat 1.1–1.4, then playing with a beat clock', JSON.stringify(d.viewCount) === '[4,3,2,1]' &&
+    JSON.stringify(d.vBeat) === '["1.1","1.2","1.3","1.4"]' && d.vPlayState === 'playing' && !!d.vPlayBeat,
+    `countIn ${JSON.stringify(d.viewCount)} beats ${d.vBeat.join(' ')}; playing beat ${JSON.stringify(d.vPlayBeat)}`);
+  const play = d.plays[0] as { from: number } | undefined;
+  const jump = d.jumps[0] as { to: number } | undefined;
+  const toStart = d.jumps[1] as { to: number } | undefined;
+  check('x1 pause keeps the playhead; seek snaps to the beat; play resumes there; seek while playing jumps; toStart → 0', d.pausedHead !== null &&
+    d.seekOk && d.head === 1 && play?.from === 1 && d.jumpOk && jump?.to === 3.5 && d.toStartOk && toStart?.to === 0,
+    `paused at ${d.pausedHead?.toFixed(3)}; seek 1.13 → ${d.head}; play from ${play?.from}; jump to ${jump?.to}; toStart ${toStart?.to}`);
+  check('x2 setTempo while playing: L and notes ×2 (120 → 60), bar position kept', d.tempoOk && d.L2 === 8 && JSON.stringify(d.notes2) === JSON.stringify(d.notes1.map((p) => +(p * 2).toFixed(3))) &&
+    d.tempoOf === 60 && Math.abs(d.posAfter - d.posBefore * 2) < 0.1,
+    `L ${d.L2}, notes ${d.notes2.join(',')}, pos ${d.posBefore.toFixed(3)} → ${d.posAfter.toFixed(3)}`);
+  check('x3 metronome: click off → silent master; on → a click on every beat (±3 ms)', d.offRms < 1e-4 && d.peaks >= 2 && d.beatErr < 0.003,
+    `off RMS ${d.offRms.toExponential(1)}; on: ${d.peaks} clicks, worst ${ms(d.beatErr)} off the beat grid`);
+  check('x4 drum take: hits on the clicks dropped on speakers (only the off-beat ones kept), all kept with headphones',
+    JSON.stringify(d.hitsSpeaker) === '[0.75,1.25,1.75]' && JSON.stringify(d.hitsWired) === '[0.5,1,1.5]',
+    `speaker ${d.hitsSpeaker.join(',')}; wired ${d.hitsWired.join(',')}`);
+  check('x5 setTempo refused while recording and once a vocal take exists (tempoEditable false)', d.tempoWhileRec === false && d.editable === false && d.tempoLocked === false,
+    `while recording ${d.tempoWhileRec}; editable ${d.editable}; with vocals ${d.tempoLocked}`);
+}
+
 // ---------- h, i: probe and capture ----------
 
 async function checkProbeCapture(page: Page): Promise<void> {
@@ -1180,6 +1320,7 @@ async function runEngine(engine: Engine, url: string): Promise<void> {
       ['t', () => checkDeleteTrack(page)],
       ['u', () => checkSetup(page)],
       ['u11', () => checkTaughtDrums(page)],
+      ['x', () => checkTransport(page)],
       ['u9', async () => checkLearnedSettings()],
     ];
     for (const [name, fn] of steps) {
