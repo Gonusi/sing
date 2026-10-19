@@ -18,6 +18,8 @@ import { mountInput } from './ui/input.ts';
 import { mountLanes } from './ui/lanes.ts';
 import { mountStatus } from './ui/status.ts';
 import { mountSheets } from './ui/sheet.ts';
+import { mountTransport } from './ui/transport.ts';
+import { mountTempo } from './ui/tempo.ts';
 import { mountWizard } from './ui/wizard.ts';
 import { createSetupApi } from './app/setup.ts';
 
@@ -73,7 +75,7 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
   stage.className = 'stage';
   root.append(stage);
 
-  mountLanes(stage, {
+  const lanes = mountLanes(stage, {
     view,
     onSelect: (id) => controller.select(id),
     onToggle: (id) => controller.toggleTrack(id),
@@ -120,6 +122,29 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
     credits: CREDITS,
   });
 
+  // GarageBand-like transport (bottom) and tempo (top-left slot of the top bar, created by mountSheets)
+  mountTransport(stage, {
+    view,
+    onAction: (a) => {
+      if (!controller.transport(a, ctx.currentTime)) playBlip(ctx, 'err', undefined, engine.master);
+    },
+  });
+  const clickOn = () => controller.session.fx?.click ?? true;
+  const tempoSlot = stage.querySelector<HTMLElement>('.topbar-left');
+  if (tempoSlot) {
+    mountTempo(tempoSlot, {
+      view,
+      clickOn,
+      onToggleClick: () => {
+        controller.setClick(!clickOn());
+        toast(clickOn() ? 'metronome on' : 'metronome off');
+      },
+      onSetTempo: (bpm) => {
+        if (!controller.setTempo(bpm)) toast('tempo is locked once a vocal track exists', 'err');
+      },
+    });
+  }
+
   // hold-to-talk: one command per hold, read against the state at touch-down
   let holdDown: Sec = 0;
   let fired = false;
@@ -137,9 +162,14 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
     now: () => ctx.currentTime,
     onGesture: (g: Gesture) => {
       switch (g.type) {
-        case 'tap':
+        case 'tap': {
           controller.gesture(g);
+          // a tap moves the playhead (it no longer records — ● does)
+          const pos = g.x === undefined ? null : lanes.posAt(g.x);
+          if (pos !== null) controller.seek(pos);
+          else if (controller.session.loopLength === null) toast('press ● to record');
           break;
+        }
         case 'holdStart':
           holdDown = g.tDown;
           fired = false;
