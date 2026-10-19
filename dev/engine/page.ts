@@ -69,6 +69,11 @@ export interface Eng {
   setup: EngineSetupApi;
   /** commands a main.ts-like onCommand handler ran (it skips them while setup.tryingCommand()) */
   ranCommands: Command[];
+  /**
+   * transport('record') from idle (or stopped): resolves the heard downbeat D after the count-in bar — the first
+   * take's t0 (or the overdub's ts); null when refused
+   */
+  recordFirst(bpm?: number): Promise<Sec | null>;
   /** stored vocal audio keys in IndexedDB */
   audioKeys(): Promise<string[]>;
   /** onChange calls since boot */
@@ -223,6 +228,12 @@ async function boot(engineP: Promise<AudioEngine>): Promise<void> {
         errs.push(((got - want + N / 2) % N + N) % N - N / 2);
       }
       return errs;
+    },
+    async recordFirst(bpm?: number) {
+      if (bpm !== undefined) c.setTempo(bpm);
+      if (!c.transport('record', ctx.currentTime)) return null;
+      const ev = [...eng.events].reverse().find((x) => x.type === 'countIn');
+      return ev ? Number(ev.data!.D) : null;
     },
     audioKeys: async () => (await keys()).filter((k): k is string => typeof k === 'string' && k.startsWith('sing.audio.')),
     noise(seed: number, n: number, amp = 0.3) {

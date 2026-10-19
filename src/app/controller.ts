@@ -1,37 +1,41 @@
-// [engine] The state machine (idle → recordingFirst → playing ⇄ overdubbing, stopped) and the timing model.
-// See PLAN.md "State machine" and "Timing model". Owns voices (one per track), the scheduler and take recording.
+// [engine] The state machine (idle → countIn → recordingFirst → playing ⇄ overdubbing, stopped) and the timing model.
+// See PLAN.md "Round 4" (transport, tempo) and "Timing model". Owns voices, the scheduler, the metronome and takes.
 //
-// State table as implemented (s = state at tDown, read from a short state history; every action uses tDown):
-// | s              | input                  | result                                                              |
-// |----------------|------------------------|---------------------------------------------------------------------|
-// | idle           | tap / record           | recordingFirst: t0 = tDown, into the selected empty lane (else the  |
-// |                |                        | first empty lane, else a new synth lane); start beep                |
-// |                | undo                   | pop the undo stack (stays idle unless the snapshot has a loop)       |
-// | recordingFirst | tap / stop             | L = tDown − t0; L < 1 s → discard → idle; else commit → playing      |
-// |                |                        | (scheduler.start(origin = t0, L, from = tDown): catch-up)            |
-// |                | auto at t0 + 60 s      | as stop with tDown = t0 + 60                                        |
-// |                | undo                   | discard the take → idle                                             |
-// |                | any other held command | applied; the take continues; audio from the hold's tDown to its      |
-// |                |                        | release is dropped from the take                                     |
-// | playing        | tap / record           | overdubbing: ts = tDown, into the selected lane if empty, else a new |
-// |                |                        | lane of the same kind; pending notes play from ts + L               |
-// |                | stop                   | stopped                                                             |
-// |                | undo                   | pop the undo stack (no loop left → idle)                            |
-// | overdubbing    | window end             | commit → playing (at ts + L + inLat + COMMIT_MARGIN_SEC)            |
-// |                | tap                    | commit what was sung so far → playing                               |
-// |                | stop                   | commit so far → stopped                                             |
-// |                | undo                   | discard → playing (already committed at window end → undo it)       |
-// |                | create / record        | error blip, nothing else                                            |
-// | stopped        | tap / play             | playing (origin = now + outLat + START_LEAD_SEC, so pos 0 is whole)  |
-// |                | record                 | playing + overdubbing with ts = origin                              |
-// |                | undo                   | pop the undo stack (no loop left → idle)                            |
-// | any but overd. | create X               | add + select an empty X lane (undoable)                             |
-// | any            | toggle X on/off        | every X lane on/off (not undoable)                                  |
-// Ignored (logged): play/stop in idle, record/play in recordingFirst, play in playing/overdubbing, stop in stopped.
+// Transport table as implemented (s = state at tDown, from a short state history; taps do NOTHING here — main.ts maps
+// them to seek). Voice commands: record = transport('record'), play = 'play', stop = 'pause'.
+// | s              | input        | result                                                                       |
+// |----------------|--------------|------------------------------------------------------------------------------|
+// | idle           | record       | countIn (1 bar, always clicks) → recordingFirst with t0 = the downbeat D       |
+// | countIn        | record/pause | cancel → back to idle / stopped                                              |
+// |                | (tick at D)  | recordingFirst (first) or overdubbing (from stopped)                         |
+// | recordingFirst | record       | commit: L = max(1, round-half-up(bars)) bars → playing from min(end, t0 + L) |
+// |                | pause        | commit as above → stopped at the position heard then                         |
+// |                | auto t0+60 s | as record                                                                    |
+// |                | undo         | discard → idle                                                               |
+// | playing        | record       | punch in: overdubbing from now (ts = tDown), selected lane if empty else new |
+// |                | pause        | stopped; the playhead stays where it was heard                               |
+// | overdubbing    | record       | commit what was sung → playing                                               |
+// |                | pause        | commit → stopped                                                             |
+// |                | window end   | commit after exactly one cycle → playing                                     |
+// |                | undo         | discard → playing                                                            |
+// |                | create       | error blip                                                                   |
+// | stopped        | play         | playing from the playhead (resume)                                           |
+// |                | record       | countIn, then play from the playhead and overdub from it (ts = D)            |
+// | playing/stopped| toStart      | playhead → 0 (playing: jumps and keeps playing); refused otherwise           |
+// | any but overd. | create X     | add + select an empty X lane (undoable)                                      |
+// | any            | toggle X     | every X lane on/off (not undoable)                                           |
+// seek(pos): beat-snapped; playing → jump; stopped → new resume position; refused in countIn/recording/without a loop.
+// Tempo (Session.tempo): setTempo rescales every note/hit/raw and the loop (same bars), not an undo point (undo keeps
+// the current tempo); refused while a vocal take exists or while counting in / recording.
+// Metronome: clicks on the loop's beat grid while running when fx.click (default on), always during count-in; into
+// master (not the echo bus); drum takes exclude each click (unless the output is headphones).
 import type {
-  AppState, Command, Controller, DeviceSettings, Gesture, InstrumentKind, LogEvent, ScheduledTrack, Sec, Session, Take, Track,
-  View, Voice,
+  AppState, Command, Controller, DeviceSettings, Gesture, InstrumentKind, LogEvent, ScheduledTrack, Sec, Session, Take, Tempo,
+  Track, TransportAction, View, Voice,
 } from '../types.ts';
+import { DEFAULT_TEMPO, TEMPO_MAX_BPM, TEMPO_MIN_BPM } from '../types.ts';
+import { createMetronome, type BeatGrid } from '../loop/metronome.ts';
+import { JUMP_FADE_SEC } from '../loop/clock.ts';
 import type { AudioEngine } from '../audio/context.ts';
 import type { Mic } from '../audio/mic.ts';
 import { wavBlob } from '../audio/wav-encode.ts';
@@ -80,8 +84,11 @@ export interface EngineController extends Controller {
   dispose(): void;
 }
 
-export const MIN_FIRST_TAKE_SEC = 1;
 export const MAX_FIRST_TAKE_SEC = 60;
+/** count-in: the first click is heard this long after the record press (+ outLat) */
+export const COUNT_IN_LEAD_SEC = 0.1;
+/** drum takes drop hits within this corrected-time window around each metronome click (on speakers) */
+const CLICK_EXCLUDE = { before: 0.01, after: 0.04 } as const;
 /** overdub commit waits for the last audio (inLat) plus analysis finalisation */
 export const COMMIT_MARGIN_SEC = 0.15;
 /** vocal overdubs need only the 20 ms seam tail + one block: commit sooner, so less of the first replay is missed */
@@ -90,20 +97,21 @@ export const VOCAL_COMMIT_MARGIN_SEC = 0.05;
 export const DEFAULT_ECHO = 0.2;
 /** stopped → play: pos 0 is scheduled this long after now, so nothing starts late */
 export const START_LEAD_SEC = 0.03;
-const BEEP_HZ = 1320;
-const BEEP_SEC = 0.04;
-const BEEP_LEVEL = 0.25;
-/**
- * drum takes only: corrected-time span after the beep is heard that is dropped (on speakers the mic hears it and
- * the onset detector would make a hit of it). Melodic takes keep it: the beep is shorter than any note.
- */
-const BEEP_EXCLUDE_SEC = 0.08;
 export const LOG_MAX = 2000;
 const STATE_HISTORY_MAX = 64;
 const HOLDS_MAX = 16;
 
-/** a tap means a different input per state (TAP_MEANS); 'commit' = tap while overdubbing */
-type Input = 'tap' | 'commit' | Command['type'];
+type Input = Command['type'];
+
+interface CountIn {
+  /** heard time of the downbeat recording starts on */
+  D: Sec;
+  /** heard time of the first count-in click */
+  c0: Sec;
+  mode: 'first' | 'overdub';
+  /** state to go back to on cancel */
+  prev: AppState;
+}
 
 interface ActiveTake {
   rec: TakeRecorder;
@@ -181,9 +189,29 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
   }
   const echoOf = (sess: Session) => sess.fx?.echo ?? (deps.test ? 0 : DEFAULT_ECHO);
   const smoothOf = (sess: Session) => sess.fx?.smooth ?? DEFAULT_SMOOTHING;
-  /** Session.fx with both settings filled in (echo and smooth always travel together) */
+  const clickOf = (sess: Session) => sess.fx?.click ?? true;
+  /** Session.fx with every setting filled in (echo, smooth and click always travel together) */
   const withFx = (sess: Session, patch: Partial<NonNullable<Session['fx']>>): Session =>
-    ({ ...sess, fx: { echo: echoOf(sess), smooth: smoothOf(sess), ...patch } });
+    ({ ...sess, fx: { echo: echoOf(sess), smooth: smoothOf(sess), click: clickOf(sess), ...patch } });
+  const tempoOf = (sess: Session = store.current): Tempo => sess.tempo ?? DEFAULT_TEMPO;
+  const beatSecOf = (sess?: Session) => 60 / tempoOf(sess).bpm;
+  const barSecOf = (sess?: Session) => beatSecOf(sess) * tempoOf(sess).beatsPerBar;
+  const tempoEditable = (sess: Session = store.current) => !sess.tracks.some((t) => t.take?.audio);
+  /** every position and length × ratio (a tempo change keeps bar positions) */
+  const rescale = (sess: Session, ratio: number, tempo: Tempo): Session => ({
+    ...sess,
+    tempo,
+    loopLength: sess.loopLength === null ? null : sess.loopLength * ratio,
+    tracks: sess.tracks.map((t) => (!t.take ? t : {
+      ...t,
+      take: {
+        ...t.take,
+        notes: t.take.notes.map((n) => ({ ...n, pos: n.pos * ratio, dur: n.dur * ratio })),
+        hits: t.take.hits.map((h) => ({ ...h, pos: h.pos * ratio })),
+        ...(t.take.raw ? { raw: t.take.raw.map((n) => ({ ...n, pos: n.pos * ratio, dur: n.dur * ratio })) } : {}),
+      },
+    })),
+  });
   const profileOf = () => ({ tuningOffset: device.tuningOffset, range: device.range });
   /** re-derive every melodic take's notes from its raw detections (old takes without raw keep their notes) */
   const rederive = (sess: Session, smoothing: number): Session => {
@@ -207,6 +235,10 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
   const holds = new Map<Sec, Hold>();
   const voices = new Map<string, Voice>();
   const activeFrom = new Map<string, Sec>();
+  /** where play resumes (loop position) while stopped */
+  let resumePos: Sec = 0;
+  let countIn: CountIn | null = null;
+  const metronome = createMetronome(engine);
 
   const setState = (next: AppState, at: Sec) => {
     if (next === state) return;
@@ -263,7 +295,7 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       }
     }
   };
-  const pushTracks = (catchUp = true) => {
+  const scheduledList = (): ScheduledTrack[] => {
     const list: ScheduledTrack[] = [];
     for (const t of store.current.tracks) {
       const voice = voices.get(t.id);
@@ -271,8 +303,9 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       const pending = take?.mode === 'overdub' && take.trackId === t.id ? take.rec.pendingTake() : null;
       list.push({ track: pending ? { ...t, take: pending } : t, voice, activeFrom: activeFrom.get(t.id) });
     }
-    scheduler.setTracks(list, { catchUp });
+    return list;
   };
+  const pushTracks = (catchUp = true) => scheduler.setTracks(scheduledList(), { catchUp });
   const commitSession = (next: Session, undoPoint?: Session) => {
     store.set(next, undoPoint);
     syncVoices();
@@ -294,20 +327,6 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       console.error('blip failed', e);
     }
   };
-  const playBeep = (at: Sec) => {
-    const osc = ctx.createOscillator();
-    osc.frequency.setValueAtTime(BEEP_HZ, at);
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0, at);
-    g.gain.linearRampToValueAtTime(BEEP_LEVEL, at + 0.003);
-    g.gain.setValueAtTime(BEEP_LEVEL, at + BEEP_SEC - 0.01);
-    g.gain.linearRampToValueAtTime(0, at + BEEP_SEC);
-    osc.connect(g).connect(engine.master);
-    osc.start(at);
-    osc.stop(at + BEEP_SEC + 0.01);
-    osc.onended = () => g.disconnect();
-  };
-
   // ---- takes ----
   const newTake = (lane: Track, window: Parameters<typeof createTakeRecorder>[0]['window'], createdLane: boolean, prevSelected: string | null, tDown: Sec): ActiveTake => {
     const rec = createTakeRecorder({
@@ -340,7 +359,8 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     if (take === t) take = null;
   };
 
-  const startFirstTake = (tDown: Sec): boolean => {
+  /** the first take's recorder, created at the count-in with t0 = the downbeat D (its feed starts at D's pre-roll) */
+  const prepareFirstTake = (t0: Sec, tDown: Sec) => {
     const before = store.current;
     let lane = before.tracks.find((t) => t.id === before.selectedId && !t.take) ?? before.tracks.find((t) => !t.take);
     let s = before;
@@ -350,37 +370,31 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       s = { ...s, tracks: [...s.tracks, lane] };
     }
     commitSession({ ...s, selectedId: lane.id });
-    take = newTake(lane, { type: 'first', t0: tDown }, created, before.selectedId, tDown);
-    const beepAt = ctx.currentTime;
-    playBeep(beepAt);
-    const beepHeard = beepAt + engine.outLat();
-    if ((lane.kind === 'drums' || lane.kind === 'vocals') && beepHeard >= tDown) take.rec.addExclusion({ from: beepHeard, to: beepHeard + BEEP_EXCLUDE_SEC });
-    setState('recordingFirst', tDown);
-    return true;
+    take = newTake(lane, { type: 'first', t0 }, created, before.selectedId, tDown);
   };
+
+  /** whole bars: max(1, round-half-up(recorded bars)) */
+  const barRounded = (recorded: Sec) => Math.max(1, Math.floor(recorded / barSecOf() + 0.5)) * barSecOf();
 
   const finishFirstTake = (end: Sec): boolean => {
     const t = take;
     if (!t || t.mode !== 'first') return false;
-    const L = end - t.start;
-    if (L < MIN_FIRST_TAKE_SEC) {
-      discardTake('too-short', { L });
-      setState('idle', end);
-      return true;
-    }
-    const result = t.rec.finish(end);
+    const L = barRounded(end - t.start);
+    const result = t.rec.finish(end, L);
     endTake(t);
     keepVocalAudio(t.rec, result);
     const cur = store.current;
     const undoPoint = t.createdLane ? removeTrack(cur, t.trackId, t.prevSelected) : cur;
     commitSession({ ...cur, loopLength: L, tracks: withTake(cur.tracks, t.trackId, result) }, undoPoint);
-    log('take', { phase: 'commit', mode: 'first', trackId: t.trackId, takeId: result.id, L, t0: t.start, end, notes: result.notes.length, hits: result.hits.length });
-    scheduler.start(t.start, L, end);
+    log('take', { phase: 'commit', mode: 'first', trackId: t.trackId, takeId: result.id, L, bars: Math.round(L / barSecOf()), t0: t.start, end, notes: result.notes.length, hits: result.hits.length });
+    // rounded down: cycle 1 already began (catch-up plays it from t0 + L); rounded up: a silent tail until t0 + L
+    scheduler.start(t.start, L, Math.min(end, t.start + L));
     setState('playing', end);
     return true;
   };
 
-  const startOverdub = (ts: Sec, tDown: Sec): boolean => {
+  /** the overdub recorder for window [ts, ts + L) (state is set by the caller) */
+  const prepareOverdub = (ts: Sec, tDown: Sec): boolean => {
     const L = store.current.loopLength;
     const origin = scheduler.origin;
     if (L === null || origin === null || take) return false;
@@ -398,9 +412,6 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     activeFrom.set(lane.id, ts + L);
     take = newTake(lane, { type: 'overdub', origin, loopLength: L, ts }, created, before.selectedId, tDown);
     commitSession({ ...s, selectedId: lane.id });
-    // stamped at the command's tDown, not at ts: from stopped, ts = origin is in the future, and a command between
-    // tDown and origin must still be read as overdubbing (else undo would pop the first take)
-    setState('overdubbing', tDown);
     return true;
   };
 
@@ -441,22 +452,82 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
   };
 
   // ---- playback ----
-  const startPlayback = (): Sec | null => {
+  const snapToBeat = (pos: Sec): Sec => {
+    const L = store.current.loopLength ?? 0;
+    const b = beatSecOf();
+    const p = Math.round(pos / b) * b;
+    return L > 0 ? ((p % L) + L) % L : 0;
+  };
+  /** play from loop position P: P is heard START_LEAD_SEC (+ outLat) from now */
+  const startPlaybackFrom = (P: Sec): Sec | null => {
     const L = store.current.loopLength;
     if (L === null) return null;
     // one read of the clock for the logged numbers: currentTime can advance by a quantum within a task
     const now = ctx.currentTime;
     const outLat = engine.outLat();
-    const origin = now + outLat + START_LEAD_SEC;
-    log('play', { now, outLat, origin });
+    const origin = now + outLat + START_LEAD_SEC - P;
+    log('play', { now, outLat, origin, from: P });
     activeFrom.clear();
     pushTracks();
-    scheduler.start(origin, L, origin);
+    scheduler.start(origin, L, origin + P);
     return origin;
+  };
+  /** while playing: continue from loop position P (fade, new origin) */
+  const jumpTo = (P: Sec) => {
+    const L = store.current.loopLength;
+    if (L === null) return;
+    const now = ctx.currentTime;
+    const outLat = engine.outLat();
+    const origin = now + outLat + START_LEAD_SEC + JUMP_FADE_SEC - P;
+    log('jump', { now, outLat, origin, to: P });
+    scheduler.jump(origin, L, origin + P, scheduledList());
   };
   const stopPlayback = () => {
     scheduler.stop(ctx.currentTime);
     activeFrom.clear();
+    metronome.cancel();
+  };
+  /** stop and keep the heard position as the resume point */
+  const pauseHere = (at: Sec) => {
+    resumePos = scheduler.pos(ctx.currentTime) ?? resumePos;
+    stopPlayback();
+    setState('stopped', at);
+  };
+
+  // ---- count-in ----
+  const startCountIn = (mode: 'first' | 'overdub', tDown: Sec): boolean => {
+    const bar = barSecOf();
+    const c0 = ctx.currentTime + engine.outLat() + COUNT_IN_LEAD_SEC;
+    const D = c0 + bar;
+    if (mode === 'first') {
+      prepareFirstTake(D, tDown);
+    } else {
+      const L = store.current.loopLength;
+      if (L === null) return false;
+      const P = snapToBeat(resumePos);
+      resumePos = P;
+      activeFrom.clear();
+      pushTracks();
+      scheduler.start(D - P, L, D); // playback begins exactly at the downbeat, at P
+      if (!prepareOverdub(D, tDown)) {
+        stopPlayback();
+        return false;
+      }
+    }
+    countIn = { D, c0, mode, prev: state };
+    log('countIn', { D, c0, mode, beats: tempoOf().beatsPerBar, bpm: tempoOf().bpm });
+    setState('countIn', tDown);
+    return true;
+  };
+  const cancelCountIn = (at: Sec): boolean => {
+    const c = countIn;
+    if (!c) return false;
+    countIn = null;
+    discardTake('count-in cancelled');
+    if (c.mode === 'overdub') stopPlayback();
+    metronome.cancel();
+    setState(c.prev, at);
+    return true;
   };
 
   // ---- undo ----
@@ -467,8 +538,10 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       log('undo', { empty: true });
       return false;
     }
-    // echo and smoothing are not undo steps: keep the current settings on the restored snapshot (its notes re-derived)
-    const prev = fx ? rederive({ ...popped, fx }, smoothOf({ ...popped, fx })) : popped;
+    // echo, smoothing, click and tempo are not undo steps: keep the current ones on the restored snapshot
+    const tempo = tempoOf();
+    const retimed = tempoOf(popped).bpm !== tempo.bpm ? rescale(popped, tempoOf(popped).bpm / tempo.bpm, tempo) : popped;
+    const prev = fx ? rederive({ ...retimed, fx }, smoothOf({ ...retimed, fx })) : retimed;
     if (prev !== popped) store.set(prev);
     gcAudio();
     syncVoices();
@@ -496,40 +569,70 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
   };
 
   // ---- the table ----
-  const act = (input: Input, s: AppState, tDown: Sec, c?: Command): boolean => {
-    switch (input) {
-      case 'tap':
-        return act(TAP_MEANS[s], s, tDown);
+  /** the transport, read against s = the state at tDown */
+  const transportAct = (action: TransportAction, s: AppState, tDown: Sec): boolean => {
+    switch (action) {
       case 'record':
-        if (s === 'idle') return startFirstTake(tDown);
-        if (s === 'playing') return state === 'playing' && startOverdub(tDown, tDown);
-        if (s === 'overdubbing') {
-          errorBlip('record while overdubbing');
-          return false;
+        if (s === 'countIn') return cancelCountIn(tDown);
+        if (s === 'idle') return state === 'idle' && startCountIn('first', tDown);
+        if (s === 'stopped') return state === 'stopped' && startCountIn('overdub', tDown);
+        if (s === 'playing') {
+          if (state !== 'playing' || !prepareOverdub(tDown, tDown)) return false;
+          setState('overdubbing', tDown); // punch in now
+          return true;
         }
-        if (s === 'stopped') {
-          const origin = startPlayback();
-          if (origin === null) return false;
-          setState('playing', tDown);
-          return startOverdub(origin, tDown);
+        if (s === 'recordingFirst') return finishFirstTake(tDown);
+        if (s === 'overdubbing') {
+          if (take?.mode !== 'overdub') return false;
+          commitOverdub(Math.max(tDown, take.start));
+          if (state === 'overdubbing') setState('playing', tDown);
+          return true;
         }
         return false;
-      case 'stop':
-        if (s === 'recordingFirst') return finishFirstTake(tDown);
+      case 'pause':
+        if (s === 'countIn') return cancelCountIn(tDown);
+        if (s === 'recordingFirst') {
+          if (!finishFirstTake(tDown)) return false;
+          pauseHere(tDown);
+          return true;
+        }
         if (s === 'playing' || s === 'overdubbing') {
           if (state !== 'playing' && state !== 'overdubbing') return false;
           if (take?.mode === 'overdub') commitOverdub(Math.max(tDown, take.start));
-          stopPlayback();
-          setState('stopped', tDown);
+          pauseHere(tDown);
           return true;
         }
         return false;
       case 'play':
         if (s !== 'stopped' || state !== 'stopped') return false;
-        if (startPlayback() === null) return false;
+        if (startPlaybackFrom(resumePos) === null) return false;
         setState('playing', tDown);
         return true;
+      case 'toStart':
+        return seekTo(0, 'toStart');
+    }
+  };
+
+  const seekTo = (pos: Sec, why: string): boolean => {
+    if (store.current.loopLength === null || (state !== 'playing' && state !== 'stopped')) return false;
+    const P = snapToBeat(pos);
+    if (state === 'playing') jumpTo(P);
+    else resumePos = P;
+    log('seek', { pos, to: P, why, state });
+    changed();
+    return true;
+  };
+
+  const act = (input: Input, s: AppState, tDown: Sec, c?: Command): boolean => {
+    switch (input) {
+      case 'record':
+        return transportAct('record', s, tDown);
+      case 'stop':
+        return transportAct('pause', s, tDown);
+      case 'play':
+        return transportAct('play', s, tDown);
       case 'undo':
+        if (s === 'countIn') return cancelCountIn(tDown);
         if (s === 'recordingFirst') {
           if (take?.mode !== 'first') return false;
           discardTake();
@@ -547,11 +650,6 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       case 'toggle':
         if (c?.type !== 'toggle') return false;
         setTrackOn((t) => t.kind === c.kind, () => c.on);
-        return true;
-      case 'commit':
-        if (take?.mode !== 'overdub') return false;
-        commitOverdub(Math.max(tDown, take.start));
-        if (state === 'overdubbing') setState('playing', tDown);
         return true;
     }
   };
@@ -571,10 +669,60 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
   };
 
   // ---- tick: window-end commit, first-take auto-stop ----
+  const currentGrid = (): BeatGrid | null => {
+    const t = tempoOf();
+    const g = (anchor: Sec): BeatGrid => ({ anchor, beatSec: 60 / t.bpm, beatsPerBar: t.beatsPerBar });
+    if (state === 'countIn' && countIn) return g(countIn.mode === 'first' ? countIn.D : (scheduler.origin ?? countIn.D));
+    if (state === 'recordingFirst' && take) return g(take.start);
+    if ((state === 'playing' || state === 'overdubbing') && scheduler.origin !== null) return g(scheduler.origin);
+    return null;
+  };
+  /** View.playhead: heard position while playing, resume position while stopped / counting in from it, else null */
+  const playheadAt = (now: Sec): Sec | null => {
+    if (store.current.loopLength === null) return null;
+    if (state === 'playing' || state === 'overdubbing') return scheduler.pos(now);
+    if (state === 'countIn' && countIn?.mode === 'overdub') return resumePos;
+    if (state === 'stopped') return resumePos;
+    return null;
+  };
+  /** View.beat: bar/beat (1-based) and phase while running; the count-in bar counts as bar 1 */
+  const beatAt = (now: Sec): View['beat'] => {
+    const t = tempoOf();
+    const beatSec = 60 / t.bpm;
+    let p: Sec | null = null;
+    if (state === 'countIn' && countIn) p = Math.max(0, now - countIn.c0);
+    else if (state === 'recordingFirst' && take) p = Math.max(0, now - take.start);
+    else if (state === 'playing' || state === 'overdubbing') p = scheduler.pos(now);
+    if (p === null) return null;
+    const b = p / beatSec;
+    const k = Math.floor(b + 1e-9);
+    return { bar: Math.floor(k / t.beatsPerBar) + 1, beat: (k % t.beatsPerBar) + 1, phase: Math.max(0, b - k) };
+  };
+  /** metronome clicks are heard by the mic on speakers: a drum take must not turn them into hats */
+  const excludeClicks = () => device.output !== 'wired' && device.output !== 'bluetooth';
+  const metronomeTick = () => {
+    metronome.setGrid(currentGrid());
+    const c = countIn;
+    metronome.tick(
+      (heard) => (c !== null && heard < c.D - 1e-6) || clickOf(store.current),
+      (heard) => {
+        if (take && excludeClicks() && store.current.tracks.find((x) => x.id === take?.trackId)?.kind === 'drums') {
+          take.rec.addExclusion({ from: heard - CLICK_EXCLUDE.before, to: heard + CLICK_EXCLUDE.after });
+        }
+      },
+    );
+  };
+
   const offTick = engine.onTick(() => {
-    const t = take;
-    if (!t) return;
     const now = ctx.currentTime;
+    if (state === 'countIn' && countIn && now >= countIn.D) {
+      const c = countIn;
+      countIn = null;
+      setState(c.mode === 'first' ? 'recordingFirst' : 'overdubbing', c.D);
+    }
+    metronomeTick();
+    const t = take;
+    if (!t || state === 'countIn') return;
     if (t.mode === 'first' && now - t.start >= MAX_FIRST_TAKE_SEC) {
       log('take', { phase: 'auto-stop' });
       finishFirstTake(t.start + MAX_FIRST_TAKE_SEC);
@@ -632,6 +780,7 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     deleteTrack(trackId) {
       if (!store.current.tracks.some((t) => t.id === trackId)) return false;
       const at = ctx.currentTime;
+      if (state === 'countIn' && take?.trackId === trackId) cancelCountIn(at);
       if (take?.trackId === trackId) {
         const mode = take.mode;
         discardTake(); // a lane created for the take goes with it
@@ -674,16 +823,53 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
         openNote: t ? t.rec.openNote() : null,
         loopPos: scheduler.pos(now),
         elapsed: !t ? null : t.mode === 'first' ? Math.max(0, now - t.start) : Math.max(0, t.start + L - now),
+        tempo: tempoOf(),
+        playhead: playheadAt(now),
+        beat: beatAt(now),
+        countIn: state === 'countIn' && countIn
+          ? Math.min(tempoOf().beatsPerBar, Math.max(1, Math.ceil((countIn.D - now) / beatSecOf() - 1e-9)))
+          : null,
+        tempoEditable: tempoEditable(),
       };
+    },
+    transport(action, tDown) {
+      const s = stateAt(tDown);
+      const accepted = transportAct(action, s, tDown);
+      log('transport-action', { action, tDown, stateAtTDown: s, state, accepted });
+      return accepted;
+    },
+    seek(pos) {
+      return seekTo(pos, 'seek');
+    },
+    setTempo(bpm) {
+      if (!Number.isFinite(bpm) || !tempoEditable()) return false;
+      if (state === 'countIn' || state === 'recordingFirst' || state === 'overdubbing') return false;
+      const old = tempoOf();
+      const b = Math.round(Math.min(TEMPO_MAX_BPM, Math.max(TEMPO_MIN_BPM, bpm)) * 100) / 100;
+      if (b === old.bpm) return true;
+      const ratio = old.bpm / b;
+      const pos = state === 'playing' ? scheduler.pos(ctx.currentTime) : null;
+      store.set(rescale(store.current, ratio, { ...old, bpm: b })); // not an undo point (like echo)
+      resumePos *= ratio;
+      // the same lanes and voices: while playing, jump hands the scheduler the rescaled tracks and loop atomically
+      if (pos !== null) jumpTo(pos * ratio);
+      else pushTracks();
+      log('tempo', { bpm: b, ratio });
+      changed();
+      return true;
+    },
+    setClick(on) {
+      const cur = store.current;
+      if (clickOf(cur) === on) return;
+      store.set(withFx(cur, { click: on })); // not an undo point
+      log('click', { on });
+      changed();
     },
     gesture(g: Gesture) {
       log('gesture', { ...g });
       switch (g.type) {
-        case 'tap': {
-          const s = stateAt(g.tDown);
-          act('tap', s, g.tDown);
-          return;
-        }
+        case 'tap':
+          return; // taps no longer record: main.ts maps them to seek
         case 'holdStart':
           holds.set(g.tDown, { tUp: null });
           if (holds.size > HOLDS_MAX) holds.delete(holds.keys().next().value as Sec);
@@ -740,8 +926,12 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
       if (take) discardTake();
       stopPlayback();
       const fx = store.current.fx;
+      const tempo = store.current.tempo;
+      if (countIn) cancelCountIn(ctx.currentTime);
       await store.clear();
-      if (fx) store.set({ ...store.current, fx }); // the echo setting survives a clear
+      // the settings and the tempo survive a clear
+      if (fx || tempo) store.set({ ...store.current, ...(fx ? { fx } : {}), ...(tempo ? { tempo } : {}) });
+      resumePos = 0;
       lastCommit = null;
       gcAudio();
       syncVoices();
@@ -776,15 +966,6 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
     },
   };
 }
-
-/** what a tap means in each state */
-const TAP_MEANS: Record<AppState, Input> = {
-  idle: 'record',
-  recordingFirst: 'stop',
-  playing: 'record',
-  overdubbing: 'commit',
-  stopped: 'play',
-};
 
 // ---------- pure session helpers ----------
 

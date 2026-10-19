@@ -154,8 +154,11 @@ export interface TakeRecorder {
   beginExclusion(from: Sec): void;
   endExclusion(to: Sec): void;
   addExclusion(span: Span): void;
-  /** close the window at corrected time `end` (overdub: clamped to ts + L; first take: L = end − t0) → the take */
-  finish(end: Sec): Take;
+  /**
+   * close the window at corrected time `end` (overdub: clamped to ts + L) → the take. First take: the loop length is
+   * `loopLength` (whole bars) or end − t0; events after t0 + loopLength are clipped/dropped.
+   */
+  finish(end: Sec, loopLength?: Sec): Take;
   discard(): void;
   /** raw (unzeroed) mic samples fed to this take; t = stamp of samples[0] */
   rawAudio(): { t: Sec; sampleRate: number; samples: Float32Array };
@@ -351,9 +354,11 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
       exclusions.push({ ...span });
       emit();
     },
-    finish(endAsked) {
-      // an overdub window never grows past ts + L (a tap inside the commit margin must not wrap notes to pos 0)
-      const end = win.type === 'overdub' ? Math.min(endAsked, win.ts + win.loopLength) : endAsked;
+    finish(endAsked, loopLength) {
+      const firstL = win.type === 'first' ? (loopLength ?? endAsked - win.t0) : 0;
+      // an overdub window never grows past ts + L (a stop inside the commit margin must not wrap notes to pos 0);
+      // a bar-rounded first take keeps only what lies inside its loop
+      const end = win.type === 'overdub' ? Math.min(endAsked, win.ts + win.loopLength) : Math.min(endAsked, win.t0 + firstL);
       if (segmenter && !segmenterClosed) {
         rawNotes.push(...segmenter.close(end + inLat));
         segmenterClosed = true;
@@ -362,9 +367,9 @@ export function createTakeRecorder(opts: TakeOptions): TakeRecorder {
       if (onsets) rawHits.push(...onsets.close(end + inLat));
       finished = true;
       unsubscribe();
-      const L = win.type === 'first' ? end - win.t0 : win.loopLength;
+      const L = win.type === 'first' ? firstL : win.loopLength;
       if (vocals) {
-        loopPcm = buildVocalLoop({ raw: joinRaw(), rawStartFrame: firstFrame, sampleRate: sr, inLat, win, end, exclusions });
+        loopPcm = buildVocalLoop({ raw: joinRaw(), rawStartFrame: firstFrame, sampleRate: sr, inLat, win, end: endAsked, exclusions, loopLength: L });
         return {
           id: takeId, notes: [], hits: [],
           audio: { key: audioKey(takeId), sampleRate: sr, length: loopPcm.length },
@@ -410,17 +415,20 @@ export interface VocalLoopInput {
   sampleRate: number;
   inLat: Sec;
   win: TakeWindow;
-  /** corrected window end asked for (first take: t0 + L; overdub: ≤ ts + L, earlier on a tap/stop commit) */
+  /** corrected time recording stopped (overdub: ≤ ts + L on an early commit) */
   end: Sec;
   exclusions: Span[];
+  /** first take: the (bar-rounded) loop length; default end − t0 */
+  loopLength?: Sec;
 }
 
 /** the loop audio: Ls = round(L·sr) samples (sample 0 = loop pos 0) + a tail copying the first samples */
 export function buildVocalLoop(v: VocalLoopInput): Float32Array {
   const { raw, sampleRate: sr, inLat, win } = v;
-  const L = win.type === 'first' ? v.end - win.t0 : win.loopLength;
+  const L = win.type === 'first' ? (v.loopLength ?? v.end - win.t0) : win.loopLength;
   const ws = win.type === 'first' ? win.t0 : win.ts;
-  const full = win.type === 'first' || v.end >= win.ts + win.loopLength;
+  // recorded through the loop end (+ seam tail)? A first take rounded UP to whole bars has silence after `end`
+  const full = v.end >= ws + L - 1e-9;
   const Ls = Math.max(1, Math.round(L * sr));
   const X = Math.min(Ls, Math.round(VOCAL_TAIL_SEC * sr));
   // recorded timeline: rec[d] = audio sung at corrected time ws + d/sr (d < Ls + X)
