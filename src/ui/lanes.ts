@@ -5,9 +5,15 @@
 // Colours are read from the CSS tokens in style.css (single source of truth).
 // Coordinates: "lane-local" x starts at the lane's left edge (LANE_MARGIN_X); all other x are canvas css px.
 import { openLaneMenu } from './lanemenu.ts';
-import type { DrumKind, InstrumentKind, Note, Sec, Track, UiView } from '../types.ts';
+import type { DrumKind, InstrumentKind, Note, Sec, Tempo, Track, UiView } from '../types.ts';
 
 type OpenNote = NonNullable<UiView['openNote']>;
+
+export interface LanesApi {
+  /** screen x (clientX) -> loop position in seconds, clamped to [0, L); null when there is no loop yet */
+  posAt(clientX: number): Sec | null;
+  destroy(): void;
+}
 
 export interface LanesOptions {
   view: () => UiView;
@@ -67,7 +73,14 @@ const WAVE_GAP_MIN_BAR_W = 2.5;
 const FIRST_TAKE_MIN_LENGTH: Sec = 4;
 const PLAYHEAD_W = 1.5;
 const PLAYHEAD_ALPHA = 0.7;
+const PLAYHEAD_STOPPED_ALPHA = 0.4;
+const POS_EPSILON: Sec = 1e-6; // posAt stays strictly below the loop length
 const DASH: [number, number] = [4, 6];
+
+// ---------- beat grid ----------
+const BAR_LINE_ALPHA = 0.12;
+const BEAT_LINE_ALPHA = 0.05;
+const GRID_LINE_W = 1;
 
 const LETTERS: Record<InstrumentKind, string> = { drums: 'D', violin: 'V', synth: 'S', bass: 'B', vocals: 'M' };
 const KINDS: InstrumentKind[] = ['drums', 'violin', 'synth', 'bass', 'vocals'];
@@ -318,10 +331,29 @@ function drawWaveform(env: DrawEnv, lane: Rect, body: Rect, peaks: number[], col
   }
 }
 
+/** bar lines (12% fg) and beat lines (5% fg) across one lane body, from t=0 up to the axis length; two paths per lane */
+function drawGrid(env: DrawEnv, body: Rect, axis: Axis, tempo: Tempo): void {
+  const { g, p } = env;
+  if (!(tempo.bpm > 0) || !(tempo.beatsPerBar > 0)) return;
+  const beatSec = 60 / tempo.bpm;
+  const count = Math.ceil(axis.length / beatSec - 1e-6); // beats that start inside the axis
+  const bars = new Path2D();
+  const beats = new Path2D();
+  for (let i = 0; i < count; i++) {
+    const x = Math.round(xAt(body, axis, i * beatSec) * env.dpr) / env.dpr + 0.5 / env.dpr;
+    (i % tempo.beatsPerBar === 0 ? bars : beats).rect(x - GRID_LINE_W / 2, body.y, GRID_LINE_W, body.h);
+  }
+  g.fillStyle = rgba(p.fg, BEAT_LINE_ALPHA);
+  g.fill(beats);
+  g.fillStyle = rgba(p.fg, BAR_LINE_ALPHA);
+  g.fill(bars);
+}
+
 function drawLaneContent(env: DrawEnv, lane: Rect, track: Track, view: UiView, axis: Axis): void {
   const color = env.p.kind[track.kind];
   const body = bodyOf(lane);
   const recording = view.recordingTrackId === track.id;
+  drawGrid(env, body, axis, view.tempo);
   if (!track.take && !recording) drawEmptyLine(env, body);
   if (track.kind === 'vocals') {
     const peaks = recording ? view.livePeaks : track.take?.peaks;
@@ -355,13 +387,23 @@ function drawPlayhead(env: DrawEnv, view: UiView, axis: Axis, areaW: number, lan
   const count = view.session.tracks.length;
   if (count === 0) return;
   const body = bodyOf(laneRect(0, laneH, areaW));
+  const { fg, rec } = env.p;
   let pos: Sec | null = null;
-  let color = rgba(env.p.fg, PLAYHEAD_ALPHA);
+  let color = rgba(fg, PLAYHEAD_ALPHA);
   if (view.state === 'recordingFirst') {
     pos = view.elapsed ?? 0;
-    color = rgba(env.p.rec, 1);
-  } else if (view.loopPos !== null && view.session.loopLength) {
-    pos = view.loopPos;
+    color = rgba(rec, 1);
+  } else if (view.state === 'countIn') {
+    pos = view.playhead ?? 0; // where the take will start
+    color = rgba(rec, 1);
+  } else if (view.state === 'overdubbing') {
+    pos = view.loopPos ?? view.playhead;
+    color = rgba(rec, 1);
+  } else if (view.state === 'playing') {
+    pos = view.loopPos ?? view.playhead;
+  } else if (view.playhead !== null) {
+    pos = view.playhead; // stopped (or idle with a position): the resume point, dimmed
+    color = rgba(fg, PLAYHEAD_STOPPED_ALPHA);
   }
   if (pos === null) return;
   const { g } = env;
@@ -381,7 +423,7 @@ function div(className: string): HTMLDivElement {
   return el;
 }
 
-export function mountLanes(root: HTMLElement, opts: LanesOptions): () => void {
+export function mountLanes(root: HTMLElement, opts: LanesOptions): LanesApi {
   const palette = readPalette();
   const area = div('lanes-area');
   const content = div('lanes-content');
@@ -508,11 +550,25 @@ export function mountLanes(root: HTMLElement, opts: LanesOptions): () => void {
   }
   raf = requestAnimationFrame(frame);
 
-  return () => {
-    cancelAnimationFrame(raf);
-    closeMenu?.();
-    resizeObserver.disconnect();
-    area.remove();
-    strips.clear();
+  /** the lane body (x BODY_LEFT .. laneWidth - BODY_RIGHT_PAD, lane-local) is the time axis; taps left/right of it clamp */
+  function posAt(clientX: number): Sec | null {
+    const length = opts.view().session.loopLength;
+    if (!length) return null;
+    const bodyLeft = area.getBoundingClientRect().left + LANE_MARGIN_X + BODY_LEFT;
+    const bodyW = area.clientWidth - 2 * LANE_MARGIN_X - BODY_LEFT - BODY_RIGHT_PAD;
+    if (bodyW <= 0) return null;
+    const frac = (clientX - bodyLeft) / bodyW;
+    return Math.min(Math.max(frac, 0) * length, length - POS_EPSILON);
+  }
+
+  return {
+    posAt,
+    destroy: () => {
+      cancelAnimationFrame(raf);
+      closeMenu?.();
+      resizeObserver.disconnect();
+      area.remove();
+      strips.clear();
+    },
   };
 }

@@ -6,7 +6,8 @@ Checks: `npx tsc` clean, `npx vite build` ok, `node dev/ui/shots.ts` passes (scr
 - `src/ui/start.ts` — start screen (`mountStart`): tap-to-start, progress, error + retry, fade-out.
 - `src/ui/input.ts` — gesture layer (`mountInput`): tap / holdStart / holdEnd, Space key, no-gesture zones.
 - `src/ui/lanes.ts` — canvas lanes + DOM strip buttons (`mountLanes`).
-- `src/ui/status.ts` — pill, toast, command overlay, empty hint, flash (`mountStatus`).
+- `src/ui/status.ts` — toast, command overlay, empty hint, flash (`mountStatus`; the pill is gone, round 4).
+- `src/ui/transport.ts` — bottom transport bar (`mountTransport`); `src/ui/tempo.ts` — tempo control (`mountTempo`).
 - `src/ui/sheet.ts` — top bar, ＋ sheet, ⋯ settings sheet (`mountSheets`).
 - `src/ui/style.css` — all styles; the colour tokens in `:root` are the single source (lanes.ts reads them at mount).
 - `index.html` — only added `<meta name="color-scheme" content="dark">`.
@@ -23,7 +24,7 @@ Dev pages: `${url}dev/ui/index.html?s=<scene>[&t=<loopPos seconds>]`, `${url}dev
 - Top bar: `[data-action="new-track"]` (＋), `[data-action="settings"]` (⋯).
 - Sheets: `.sheet-layer.open` (one open sheet), `.kind-btn[data-kind="violin"]`, rows `.row` (`.row.danger` = clear), `.sheet-done`, `.sheet-backdrop`.
 - Lanes: `.lanes` canvas, strip buttons `.lane-strip[data-id="<trackId>"]` (aria-label `<kind> lane`).
-- Status: `.pill` (class `idle|recordingFirst|playing|overdubbing|stopped`), `.toast`, `.cmd-overlay.on`, `.hint.on`.
+- Status: `.toast`, `.cmd-overlay.on`, `.hint.on`.
 - Start: `.start`, `.start-text`.
 - Gesture layer ignores anything inside `[data-no-gesture]` (top bar, sheets, strip buttons).
 
@@ -96,3 +97,20 @@ Dev pages: `${url}dev/ui/index.html?s=<scene>[&t=<loopPos seconds>]`, `${url}dev
 ### Questions
 1. Is a 4 s hum window / 3x floor rule right for the mic check, or should the engine return a verdict?
 2. The wizard lets the user finish with nothing done (every step skippable); setupDone is set on both onDone(true/false) in main.ts as today.
+
+## Round 4: transport, tempo, seek (branch shell7)
+Signatures for main.ts (tsc fails there until wired):
+- `mountLanes(root, opts): LanesApi` where `LanesApi = { posAt(clientX: number): Sec | null; destroy(): void }` (exported type). `posAt` maps the lane body (screen x = area left + 12 + 64 .. width - 12 - 12) to 0..L, clamped to [0, L - 1e-6]; null without a loop. The tap gesture carries `x`, `y` (absent for the Space key): main calls `lanes.posAt(g.x)` and `controller.seek(pos)`.
+- `mountTransport(root, { view, onAction(a: TransportAction) }): () => void` (mount on the stage; it is `position: fixed`).
+- `mountTempo(slot, { view, onToggleClick, onSetTempo(bpm), clickOn }): () => void`; slot = `document.querySelector('.topbar-left')` (created by mountSheets, so mount the tempo after mountSheets).
+- Selectors: `.transport`, `.transport [data-button="toStart|playPause|record"]` (aria-label play/pause, record/stop recording), `.tp-pos`, `.tp-state`, `.tp-right`; `.tempo`, `.tempo-num`, `.tempo-val`, `[data-tempo="down|up"]`, `.tempo-select` (`.shown` when visible), classes `.tempo.locked|muted|picking`.
+- Dev scenes: `transport-stopped`, `transport-countin`, `transport-recording`, `tempo-muted`, `tempo-locked`, `tempo-picker`; fake tempo 96 bpm, loop 4 bars = 10 s (`FROZEN_T` 3.8 s = bar 2 beat 3 just after the beat). `window.__lanes` exposes posAt. shots.ts runs the tempo checks in Chromium and WebKit.
+
+### Decisions I took (brief did not settle)
+- Transport buttons act on `pointerdown` (no release latency); keyboard clicks (detail 0) also act. ⏮ is also disabled in idle without a loop. ▶ is disabled only in idle without a loop.
+- Seek geometry: `posAt` uses the real drawn body (76 .. width-24), not the brief's literal 64..width-12 (those are lane-local).
+- Tempo number: the hold arms at 450 ms (outline + haptic) and the picker opens on RELEASE (touch release grants the user activation `showPicker()` needs). WebKit (Playwright) has no `select.showPicker`: the select appears in place and is focused.
+- Locked tempo (!tempoEditable): -/+ and the number-hold still call `onSetTempo` once (no repeat; hold passes the current bpm) so main can toast why; buttons are dimmed. Short tap on the number always toggles the click.
+- Top bar at < 400 px: echo slider 72 px; echo label hidden < 360 px (fits to 320 px, checked).
+- Pulse flash strength: rec 60%/32% (downbeat/other), fg 24%/11%, decays over 60% of the beat. Record button swell 7% (downbeat 1.8x).
+- During countIn the playhead is drawn in --rec at `view.playhead ?? 0`.

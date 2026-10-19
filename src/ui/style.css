@@ -1,5 +1,5 @@
-/* [shell] All styles of the UI. Dark only. Sections: tokens, global, start screen, stage layout, top bar,
-   lanes, status (pill, toast, overlay, hint, flash), sheets. JS reads the colour tokens from here
+/* [shell] All styles of the UI. Dark only. Sections: tokens, global, start screen, stage layout, top bar, tempo,
+   lanes, transport bar, status (toast, overlay, hint, flash), sheets. JS reads the colour tokens from here
    (lanes.ts draws the canvas with them), so change colours only in :root. */
 
 /* ---------- tokens ---------- */
@@ -22,7 +22,6 @@
 
   --top-h: 52px;
   --bottom-h: 72px;
-  --pill-h: 36px;
   --sheet-ms: 200ms;
 
   color-scheme: dark;
@@ -122,14 +121,16 @@ button:focus-visible { outline: 2px solid var(--cmd); outline-offset: 2px; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 12px 0 16px;
+  gap: 8px;
+  padding: 0 12px 0 12px;
 }
-.topbar-title { font-size: 15px; font-weight: 600; color: var(--dim); }
+.topbar-left { display: flex; align-items: center; min-width: 0; }
 .topbar-buttons { display: flex; gap: 8px; }
 .topbar-right { display: flex; align-items: center; gap: 12px; }
 .echo { display: flex; align-items: center; gap: 8px; }
 .echo-label { font-size: 11px; letter-spacing: 0.06em; color: var(--dim); }
-@media (max-width: 339px) { .echo-label { display: none; } }
+@media (max-width: 359px) { .echo-label { display: none; } }
+@media (max-width: 399px) { .echo-slider { width: 72px; } }
 .echo-slider {
   --fill: 0%;
   width: 96px;
@@ -210,38 +211,125 @@ button:focus-visible { outline: 2px solid var(--cmd); outline-offset: 2px; }
 .lane-menu-item:active { background: var(--surface); }
 .lane-menu-item.danger { color: var(--rec); }
 
-/* ---------- status: pill, toast ---------- */
-.bottom { position: relative; display: flex; align-items: center; justify-content: center; }
-.pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  height: var(--pill-h);
-  padding: 0 16px;
-  box-sizing: border-box;
-  border-radius: calc(var(--pill-h) / 2);
+/* ---------- tempo (top bar, left slot) ---------- */
+.tempo { display: flex; align-items: center; gap: 2px; }
+.tempo-step {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
   background: var(--surface);
   color: var(--fg);
-  font-size: 14px;
-  white-space: nowrap;
+  font-size: 18px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  touch-action: none;
 }
-.pill.idle, .pill.stopped { color: var(--dim); }
-.pill-dot {
-  width: 8px;
-  height: 8px;
+.tempo.locked .tempo-step { opacity: 0.35; }
+.tempo-mid { position: relative; display: flex; flex-direction: column; align-items: center; min-width: 48px; }
+.tempo-num {
+  position: relative;
+  box-sizing: border-box;
+  min-width: 48px;
+  height: 28px;
+  padding: 0 4px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+  text-align: center;
+  color: var(--fg);
+  touch-action: none;
+}
+.tempo-num.armed { box-shadow: inset 0 0 0 1.5px var(--fg); }
+.tempo-unit { margin-top: -1px; font-size: 9px; line-height: 10px; letter-spacing: 0.04em; color: var(--dim); pointer-events: none; }
+.tempo-slash {
+  display: none;
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  top: 50%;
+  height: 1.5px;
+  border-radius: 1px;
+  background: var(--dim);
+  transform: rotate(-32deg);
+  pointer-events: none;
+}
+.tempo.muted .tempo-num { color: var(--dim); }
+.tempo.muted .tempo-slash { display: block; }
+.tempo-select {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 28px;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  font-size: 18px;
+  font-weight: 700;
+  text-align: center;
+  text-align-last: center;
+  opacity: 0;
+  pointer-events: none;
+  color-scheme: dark;
+}
+.tempo-select.shown { opacity: 1; pointer-events: auto; }
+
+/* ---------- lanes: transport bar ---------- */
+.transport {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  box-sizing: border-box;
+  height: calc(var(--bottom-h) + env(safe-area-inset-bottom));
+  padding: 0 max(16px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(16px, env(safe-area-inset-left));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  background: var(--bg);
+  box-shadow: 0 -1px 0 var(--line);
+}
+.tp-left { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.tp-pos { font-size: 18px; font-weight: 600; line-height: 22px; color: var(--fg); }
+.tp-state { font-size: 11px; line-height: 14px; color: var(--dim); white-space: nowrap; }
+.tp-right { text-align: right; font-size: 13px; color: var(--dim); white-space: nowrap; }
+.tp-centre { display: flex; align-items: center; gap: 14px; }
+.tp-btn {
+  width: 52px;
+  height: 52px;
   border-radius: 50%;
-  background: var(--rec);
-  animation: pill-pulse 1s ease-in-out infinite;
+  background: var(--surface);
+  color: var(--fg);
+  display: grid;
+  place-items: center;
+  touch-action: none;
+  transition: opacity 120ms ease;
 }
-@keyframes pill-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
-.pill-bar { width: 64px; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
-.pill-bar-fill { display: block; width: 0; height: 100%; background: var(--fg); }
+.tp-btn:active:not(:disabled) { background: color-mix(in srgb, var(--fg) 14%, var(--surface)); }
+.tp-btn:disabled { opacity: 0.35; cursor: default; }
+.tp-btn svg { display: block; }
+.tp-record { background: var(--rec); color: #fff; will-change: transform; }
+.tp-record:active:not(:disabled) { background: var(--rec); filter: brightness(0.9); }
+
+/* ---------- status: toast ---------- */
+.bottom { position: relative; }
 
 .toast {
   position: absolute;
   left: 16px;
   right: 16px;
-  bottom: calc((var(--bottom-h) + var(--pill-h)) / 2 + 16px);
+  bottom: calc(100% + 16px); /* 16 px above the transport bar (.bottom is the grid row it covers) */
   text-align: center;
   font-size: 15px;
   color: var(--fg);

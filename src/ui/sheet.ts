@@ -1,4 +1,4 @@
-// [shell] Top bar (title, ＋ instrument picker, ⋯ settings) and the two bottom sheets they open.
+// [shell] Top bar (empty left slot `.topbar-left` for the tempo control, echo, ＋ instrument picker, ⋯ settings) and the two bottom sheets they open.
 // Everything here is data-no-gesture: taps never reach the record/stop gesture layer.
 // The top bar also holds the echo slider (0..1, live). Settings rows: echo cancellation, microphone picker, note smoothing slider, calibrate latency, setup wizard, audio probe, export last take, clear session, info, credits.
 import { INSTRUMENTS } from '../types.ts';
@@ -459,7 +459,7 @@ function createTopBar(actions: SheetActions, onPlus: () => void, onSettings: () 
   buttons.append(plus, more);
   const right = el('div', 'topbar-right');
   right.append(echo.root, buttons);
-  bar.append(el('div', 'topbar-title', 'Sing'), right);
+  bar.append(el('div', 'topbar-left'), right); // topbar-left is the slot for tempo.ts (main.ts mounts it)
   return { root: bar, syncEcho: echo.sync };
 }
 

@@ -1,5 +1,5 @@
 // [shell] Gesture layer: tap (< holdMs, fires on release) vs hold (holdStart at holdMs, holdEnd on release).
-// Times come from opts.now() (ctx.currentTime) at pointerdown. Targets inside [data-no-gesture] are ignored.
+// A tap carries x/y (client coordinates at pointerdown; absent for the Space key). Times come from opts.now() (ctx.currentTime) at pointerdown. Targets inside [data-no-gesture] are ignored.
 // One press at a time: the first pointer (or the Space key) owns the gesture until it ends.
 // Moving the finger never cancels. Only pointercancel / window blur end a press early.
 import type { Gesture, Sec } from '../types.ts';
@@ -24,6 +24,8 @@ export function mountInput(el: HTMLElement, opts: InputOptions): () => void {
 
   let activeId: number | null = null;
   let tDown: Sec = 0;
+  let downX: number | undefined;
+  let downY: number | undefined;
   let holdTimer: ReturnType<typeof setTimeout> | null = null;
   let holdStarted = false;
 
@@ -32,11 +34,13 @@ export function mountInput(el: HTMLElement, opts: InputOptions): () => void {
     holdTimer = null;
   }
 
-  function press(id: number): void {
+  function press(id: number, x?: number, y?: number): void {
     if (activeId !== null) return;
     activeId = id;
     holdStarted = false;
     tDown = opts.now();
+    downX = x;
+    downY = y;
     const downAt = tDown;
     holdTimer = setTimeout(() => {
       holdTimer = null;
@@ -49,7 +53,7 @@ export function mountInput(el: HTMLElement, opts: InputOptions): () => void {
     if (activeId !== id) return;
     clearTimer();
     if (holdStarted) opts.onGesture({ type: 'holdEnd', tDown, tUp: opts.now() });
-    else opts.onGesture({ type: 'tap', tDown });
+    else opts.onGesture({ type: 'tap', tDown, ...(downX !== undefined && downY !== undefined ? { x: downX, y: downY } : {}) });
     activeId = null;
     holdStarted = false;
   }
@@ -72,7 +76,7 @@ export function mountInput(el: HTMLElement, opts: InputOptions): () => void {
     } catch {
       // synthetic or already-ended pointers cannot be captured; the gesture still works
     }
-    press(e.pointerId);
+    press(e.pointerId, e.clientX, e.clientY);
   }
   const onPointerUp = (e: PointerEvent): void => release(e.pointerId);
   const onPointerCancel = (e: PointerEvent): void => cancel(e.pointerId);
