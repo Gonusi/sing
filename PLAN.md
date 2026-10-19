@@ -294,9 +294,9 @@ One tutorial on first launch for now (later: each step launchable alone; whether
 ## Round 4 — transport, tempo, seek (owner, 2026-10-19)
 GarageBand-like. Bottom transport: ⏮ (to start; keeps playing), ▶/⏸ (resume from the playhead), ● (stopped → 1-bar count-in then record from the playhead; playing → punch in now; recording → stop recording, the lane plays at once). Position "bar.beat" left, loop "n bars" right. Tap on lanes/empty area = seek (snap to beat); tap no longer records. Hold = voice (record/stop/play = transport). Tempo top-left: −/+ 1 bpm, tap number = metronome click on/off, hold = native select 40–200; the number pulses per beat (red while counting in/recording). Default 90 bpm 4/4; first take rounds to whole bars; tempo change rescales note/drum takes, locked once a vocal take exists; metronome clicks excluded from drum takes.
 - [x] contract: Tempo, DEFAULT_TEMPO, AppState countIn, TransportAction, Gesture tap x/y, View tempo/playhead/beat/countIn/tempoEditable, Controller transport/seek/setTempo/setClick (integration branch `tempo`)
-- [ ] engine: transport state machine, count-in, punch in/out, resume from playhead, seek, bar-rounded loops, tempo rescale/lock, metronome + click exclusion
-- [ ] shell: transport bar, tempo control (pulse, tap/hold), beat grid + seek mapping in lanes, hints
-- [ ] tester: update specs for the new transport (tap no longer records), add transport/tempo specs
+- [x] engine: transport state machine, count-in, punch in/out, resume from playhead, seek, bar-rounded loops, tempo rescale/lock, metronome + click exclusion
+- [x] shell: transport bar, tempo control (pulse, tap/hold), beat grid + seek mapping in lanes, hints
+- [x] tester: update specs for the new transport (tap no longer records), add transport/tempo specs — full suite 68/68 (Chromium + WebKit), silent test audio
 
 ## Known issues
 - (fixed locally 2026-10-17, not yet deployed) WebKit advances currentTime mid-task: vocal starts lost a render quantum (2.7 ms late) → 10 ms start margin; the states.spec failure was a two-clock-reads test artefact.
