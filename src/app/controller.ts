@@ -374,7 +374,8 @@ export async function createController(deps: ControllerDeps): Promise<EngineCont
   };
 
   /** whole bars: max(1, round-half-up(recorded bars)) */
-  const barRounded = (recorded: Sec) => Math.max(1, Math.floor(recorded / barSecOf() + 0.5)) * barSecOf();
+  // round half up; the 1e-6 absorbs float error so a stop at exactly n.5 bars always rounds up
+  const barRounded = (recorded: Sec) => Math.max(1, Math.floor(recorded / barSecOf() + 0.5 + 1e-6)) * barSecOf();
 
   const finishFirstTake = (end: Sec): boolean => {
     const t = take;
